@@ -145,7 +145,9 @@ def main() -> int:
         assert recovered["packet_hash"] == packet_hash
         assert recovered["packet_manifest_path"] == packet_manifest_path
         assert recovered["repair_round"] == 1
-        assert len(recovered["repair_context_paths"]) == 1
+        # A worker repair retains both the earlier worker result and the
+        # auditor feedback that requested the repair.
+        assert len(recovered["repair_context_paths"]) == 2
         assert recovered["next"]["assigned_agent_id"] == "worker-after-chat"
         assert recovered["next"]["spawn_prompt"] == repair_action["spawn_prompt"]
         started_repair = _run(
@@ -204,7 +206,9 @@ def main() -> int:
         assert recovered_auditor["new_agent_id"] == "auditor-after-chat"
         assert recovered_auditor["packet_hash"] == re_audit_action["packet_hash"]
         assert recovered_auditor["repair_round"] == 1
-        assert len(recovered_auditor["repair_context_paths"]) == 1
+        # The replacement auditor receives the same complete two-item repair
+        # lineage: prior worker result plus the audit feedback.
+        assert len(recovered_auditor["repair_context_paths"]) == 2
         assert recovered_auditor["next"]["spawn_prompt"] == re_audit_action["spawn_prompt"]
         started_auditor = _run(
             "start", str(root), re_audit_action["job_id"], "auditor-after-chat"

@@ -1,0 +1,23 @@
+# Python-generated files
+__pycache__/
+*.py[cod]
+
+# Local environments and test artefacts
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local R session history
+.Rhistory
+.RData
+
+# Generated research runs (keep evidence outputs outside the source repository)
+repurposing_program_runs/
