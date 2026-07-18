@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Thin CLI over the deterministic schema-v5 programme runtime."""
+"""Thin CLI over the deterministic schema-v6 programme runtime."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from program_contract import FAILURE_KINDS
 from program_io import read_json
 from program_runtime import (
     complete_job,
@@ -65,8 +66,8 @@ def _parser() -> argparse.ArgumentParser:
     fail = commands.add_parser("fail")
     fail.add_argument("run_folder")
     fail.add_argument("job_id")
-    fail.add_argument("failure_kind", choices=("rate_limit", "spawn_failure", "transient", "unrecoverable"))
-    fail.add_argument("--retry-after-seconds", type=int, default=60)
+    fail.add_argument("failure_kind", choices=sorted(FAILURE_KINDS))
+    fail.add_argument("--retry-after-seconds", type=int)
     fail.add_argument("--detail", default="")
     return parser
 

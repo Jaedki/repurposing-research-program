@@ -1,19 +1,60 @@
 #!/usr/bin/env python3
-"""Authoritative schema-v5 contracts for human therapeutic repurposing runs."""
+"""Authoritative schema-v6 contracts for human therapeutic repurposing runs."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 MAX_ACTIVE_JOBS = 1
 HUMAN_OUTCOME_NODE = "CASE_HUMAN_THERAPEUTIC_OUTCOME"
 RANKING_VERSION = "human-therapeutic-v2"
 COUNCIL_TOP_N = 5
-REPURPOSING_READINESS_MAX = 10
+REPURPOSING_READINESS_MAX = 100
+REPURPOSING_READINESS_STEP = 10
+
+SEARCH_COVERAGE_STATUSES = {
+    "FOUND",
+    "NOT_FOUND_AFTER_EXHAUSTIVE_SEARCH",
+    "NOT_YET_SEARCHED",
+}
+TERMINAL_SEARCH_COVERAGE_STATUSES = SEARCH_COVERAGE_STATUSES - {"NOT_YET_SEARCHED"}
+
+BRANCH_BUDGET_PER_UNIT = 12
+BRANCH_MATERIALITY_THRESHOLD = 50
+FRONTIER_DECISIONS = {
+    "expanded",
+    "closed_duplicate",
+    "closed_irrelevant",
+    "closed_immaterial",
+    "closed_budget_exhausted",
+}
+
+RETRYABLE_FAILURE_KINDS = {
+    "tpm_exhaustion",
+    "rpm_exhaustion",
+    "api_rate_limit",
+    "network_interruption",
+    "worker_interruption",
+    "process_termination",
+    "spawn_failure",
+    "transient",
+    "rate_limit",  # schema-v5 CLI compatibility
+}
+FAILURE_KINDS = RETRYABLE_FAILURE_KINDS | {"unrecoverable"}
+RETRY_BASE_SECONDS = 30
+RETRY_DELAY_CAP_SECONDS = 900
+RETRY_LIMIT = 6
+STALE_RUN_SECONDS = 3600
+
+JOB_STATUSES = {"planned", "ready", "running", "retry_wait", "blocked", "complete"}
+ATTEMPT_STATUSES = {"running", "complete", "failed", "orphaned"}
+COMPLETION_STATES = {"not_validated", "validated", "committing", "committed"}
 
 BROAD_DOMAINS = (
     "human_disease_biology",
@@ -23,28 +64,310 @@ BROAD_DOMAINS = (
     "clinical_safety_exposure",
 )
 
-GLOBAL_PERSPECTIVES = (
-    "direct_mechanism",
-    "phenotype_reversal",
-    "vulnerability_inverse",
-    "compensatory_network",
-    "human_genetics_clinical",
-    "hidden_in_plain_sight",
-    "natural_compounds",
-)
+PERSPECTIVE_CONTRACTS = {
+    "direct_mechanism": {
+        "perspective_id": "direct_mechanism",
+        "discovery_objective": (
+            "Find exact compounds that directly correct, modulate, or counter a source-supported "
+            "disease-driving target or process."
+        ),
+        "required_causal_route": (
+            "The compound acts directly on the disease-driving target or process in the direction "
+            "expected to improve the declared human outcome."
+        ),
+        "required_coverage_areas": {
+            "lens_direct_disease_driver": "Establish the source-supported disease-driving target or process.",
+            "lens_direct_directional_modulation": (
+                "Search exact compounds whose direct action corrects, modulates, or counters that driver."
+            ),
+            "lens_direct_human_outcome_bridge": (
+                "Search the explicit bridge from directional target or process correction to a human outcome."
+            ),
+        },
+        "prohibited_primary_rationales": (
+            "phenotype reversal without a direct target or process action",
+            "natural origin, availability, novelty, or generic pathway relevance alone",
+        ),
+        "required_lens_specific_rationale": {
+            "field": "rationale",
+            "route_marker": "Lens route [direct_target_or_process_correction]:",
+            "human_outcome_marker": "Human-outcome bridge:",
+            "route_term_groups": (
+                ("direct", "directly"),
+                ("target", "process", "driver"),
+                ("correct", "modulat", "counter", "inhibit", "activat"),
+            ),
+        },
+        "distinguishing_boundary": (
+            "Unlike phenotype reversal or compensation, this lane requires direct directional action on "
+            "the disease driver itself."
+        ),
+    },
+    "phenotype_reversal": {
+        "perspective_id": "phenotype_reversal",
+        "discovery_objective": (
+            "Find exact compounds that reverse or normalise a disease-relevant phenotype, biomarker pattern, "
+            "or molecular signature with an explicit human-outcome bridge."
+        ),
+        "required_causal_route": (
+            "The compound reverses or normalises a defined disease phenotype, biomarker pattern, or molecular "
+            "signature, and that reversal is connected to the declared human outcome."
+        ),
+        "required_coverage_areas": {
+            "lens_phenotype_disease_pattern": (
+                "Define the disease-relevant phenotype, biomarker pattern, or molecular signature."
+            ),
+            "lens_phenotype_reversal_evidence": (
+                "Search exact-compound evidence for reversal or normalisation of that defined pattern."
+            ),
+            "lens_phenotype_human_outcome_bridge": (
+                "Search the explicit bridge from pattern reversal to a human therapeutic outcome."
+            ),
+        },
+        "prohibited_primary_rationales": (
+            "direct target modulation without phenotype, biomarker, or signature reversal",
+            "generic mechanism, natural origin, novelty, or assay activity alone",
+        ),
+        "required_lens_specific_rationale": {
+            "field": "rationale",
+            "route_marker": "Lens route [phenotype_or_signature_reversal]:",
+            "human_outcome_marker": "Human-outcome bridge:",
+            "route_term_groups": (
+                ("phenotype", "biomarker", "signature", "molecular pattern"),
+                ("revers", "normalis", "normaliz", "restor"),
+            ),
+        },
+        "distinguishing_boundary": (
+            "Unlike direct mechanism, this lane requires demonstrated reversal of a disease-state readout; "
+            "unlike vulnerability inverse, it does not depend on a disease-created dependency."
+        ),
+    },
+    "vulnerability_inverse": {
+        "perspective_id": "vulnerability_inverse",
+        "discovery_objective": (
+            "Find exact compounds that exploit, oppose, protect against, or correct a disease-created "
+            "dependency, reciprocal state, stress response, or induced vulnerability."
+        ),
+        "required_causal_route": (
+            "The disease creates a specific dependency, reciprocal state, stress response, or vulnerability, "
+            "and the compound therapeutically exploits, opposes, protects against, or corrects it."
+        ),
+        "required_coverage_areas": {
+            "lens_vulnerability_disease_created_state": (
+                "Establish the disease-created dependency, reciprocal state, stress response, or vulnerability."
+            ),
+            "lens_vulnerability_inverse_intervention": (
+                "Search exact compounds that exploit, oppose, protect against, or correct that created state."
+            ),
+            "lens_vulnerability_human_outcome_bridge": (
+                "Search the explicit bridge from the vulnerability intervention to a human outcome."
+            ),
+        },
+        "prohibited_primary_rationales": (
+            "generic phenotype reversal without a disease-created dependency or reciprocal state",
+            "direct disease-driver modulation, natural origin, novelty, or stress-assay activity alone",
+        ),
+        "required_lens_specific_rationale": {
+            "field": "rationale",
+            "route_marker": "Lens route [disease_created_vulnerability_inverse]:",
+            "human_outcome_marker": "Human-outcome bridge:",
+            "route_term_groups": (
+                ("dependency", "vulnerability", "reciprocal state", "stress response"),
+                ("exploit", "oppose", "protect", "correct", "buffer"),
+            ),
+        },
+        "distinguishing_boundary": (
+            "Unlike phenotype reversal, this lane must name a disease-created dependency or reciprocal state "
+            "and the inverse intervention that acts on it."
+        ),
+    },
+    "compensatory_network": {
+        "perspective_id": "compensatory_network",
+        "discovery_objective": (
+            "Find exact compounds that restore function through a parallel, downstream, bypass, or compensatory "
+            "network route when direct correction is unavailable, unsafe, or incomplete."
+        ),
+        "required_causal_route": (
+            "A source-supported parallel, downstream, bypass, or compensatory route restores function despite "
+            "an unavailable, unsafe, or incomplete direct correction."
+        ),
+        "required_coverage_areas": {
+            "lens_compensation_direct_route_limit": (
+                "Establish why direct correction is unavailable, unsafe, or incomplete for the relevant outcome."
+            ),
+            "lens_compensation_bypass_route": (
+                "Search exact compounds acting through a parallel, downstream, bypass, or compensatory network."
+            ),
+            "lens_compensation_human_outcome_bridge": (
+                "Search the explicit bridge from compensatory functional restoration to a human outcome."
+            ),
+        },
+        "prohibited_primary_rationales": (
+            "direct correction presented without a distinct compensatory or bypass route",
+            "generic network proximity, phenotype reversal, natural origin, or novelty alone",
+        ),
+        "required_lens_specific_rationale": {
+            "field": "rationale",
+            "route_marker": "Lens route [parallel_or_compensatory_restoration]:",
+            "human_outcome_marker": "Human-outcome bridge:",
+            "route_term_groups": (
+                ("parallel", "downstream", "bypass", "compensat"),
+                ("restore", "rescue", "preserve"),
+                ("unavailable", "unsafe", "incomplete", "insufficient", "not feasible"),
+            ),
+        },
+        "distinguishing_boundary": (
+            "Unlike direct mechanism, this lane acts through a distinct restoration route and must state the "
+            "limitation of direct correction."
+        ),
+    },
+    "human_genetics_clinical": {
+        "perspective_id": "human_genetics_clinical",
+        "discovery_objective": (
+            "Find exact compounds supported by human genetic causality, natural experiments, human target "
+            "validation, or human intervention evidence relevant to the proposed route."
+        ),
+        "required_causal_route": (
+            "Human genetic, natural-experiment, target-validation, or intervention evidence anchors the "
+            "direction of the compound route and its relevance to the declared human outcome."
+        ),
+        "required_coverage_areas": {
+            "lens_human_causal_anchor": (
+                "Search human genetic causality, natural experiments, or human target-validation evidence."
+            ),
+            "lens_human_intervention_route": (
+                "Search exact compounds whose directional route matches the human causal or intervention anchor."
+            ),
+            "lens_human_genetics_clinical_outcome_bridge": (
+                "Search the explicit bridge from the human causal anchor or intervention to the target outcome."
+            ),
+        },
+        "prohibited_primary_rationales": (
+            "model-only genetics or mechanistic plausibility without a human causal anchor",
+            "generic clinical availability, natural origin, phenotype reversal, or novelty alone",
+        ),
+        "required_lens_specific_rationale": {
+            "field": "rationale",
+            "route_marker": "Lens route [human_causal_or_intervention_anchor]:",
+            "human_outcome_marker": "Human-outcome bridge:",
+            "route_term_groups": (
+                ("genetic", "variant", "allele", "natural experiment", "target validation", "human intervention"),
+                ("causal", "validat", "intervention"),
+            ),
+        },
+        "distinguishing_boundary": (
+            "Unlike the other mechanistic lanes, this lane requires a human causal, natural-experiment, "
+            "target-validation, or intervention anchor for the proposed direction."
+        ),
+    },
+    "hidden_in_plain_sight": {
+        "perspective_id": "hidden_in_plain_sight",
+        "discovery_objective": (
+            "Find exact compounds with adjacent-indication, real-world, comorbidity, or clinically observed "
+            "therapeutic signals that bridge to the declared human outcome."
+        ),
+        "required_causal_route": (
+            "A source-supported adjacent-indication, real-world, comorbidity, or other clinical observation "
+            "provides a directional therapeutic signal and a defensible bridge to the target outcome."
+        ),
+        "required_coverage_areas": {
+            "lens_hidden_adjacent_indication_signal": (
+                "Search adjacent indications and clinically observed signals relevant to the target outcome."
+            ),
+            "lens_hidden_real_world_comorbidity_signal": (
+                "Search real-world and comorbidity-associated therapeutic observations."
+            ),
+            "lens_hidden_human_outcome_bridge": (
+                "Search the explicit bridge from the observed clinical signal to the target human outcome."
+            ),
+        },
+        "prohibited_primary_rationales": (
+            "being an obvious, available, or familiar compound without a human-outcome signal",
+            "mechanistic plausibility, natural origin, novelty, or anecdote alone",
+        ),
+        "required_lens_specific_rationale": {
+            "field": "rationale",
+            "route_marker": "Lens route [adjacent_or_observed_clinical_signal]:",
+            "human_outcome_marker": "Human-outcome bridge:",
+            "route_term_groups": (
+                ("adjacent indication", "real-world", "real world", "comorbidity", "clinically observed", "clinical observation"),
+                ("outcome", "benefit", "improv", "response", "reduc"),
+            ),
+        },
+        "distinguishing_boundary": (
+            "Unlike human genetics/clinical, this lane is anchored in adjacent-use or observed clinical signals "
+            "rather than requiring genetic causality or formal target validation."
+        ),
+    },
+    "natural_compounds": {
+        "perspective_id": "natural_compounds",
+        "discovery_objective": (
+            "Find identity-resolved exact natural compounds whose source-supported causal route and explicit "
+            "human-outcome bridge justify consideration independently of natural origin."
+        ),
+        "required_causal_route": (
+            "The exact compound has verified natural origin plus a distinct source-supported causal route and "
+            "human-outcome bridge; origin itself contributes no therapeutic rationale."
+        ),
+        "required_coverage_areas": {
+            "lens_natural_exact_identity_origin": (
+                "Verify exact chemical identity and natural, endogenous, or nutrient origin."
+            ),
+            "lens_natural_independent_causal_route": (
+                "Search a causal therapeutic route independent of the compound's origin."
+            ),
+            "lens_natural_human_outcome_bridge": (
+                "Search the explicit bridge from that independent route to a human outcome."
+            ),
+        },
+        "prohibited_primary_rationales": (
+            "natural, traditional, dietary, familiar, or widely available origin alone",
+            "extract, mixture, compound class, generic antioxidant activity, or novelty alone",
+        ),
+        "required_lens_specific_rationale": {
+            "field": "rationale",
+            "route_marker": "Lens route [exact_natural_compound_with_independent_route]:",
+            "human_outcome_marker": "Human-outcome bridge:",
+            "route_term_groups": (
+                ("natural product", "natural origin", "plant", "microbial", "marine", "endogenous", "nutrient"),
+                ("causal", "mechanism", "phenotype", "genetic", "clinical"),
+            ),
+        },
+        "distinguishing_boundary": (
+            "Unlike every route-defined lane, this lane is additionally origin-constrained; unlike origin-only "
+            "screening, it still requires an independent causal route and human-outcome bridge."
+        ),
+    },
+}
+
+GLOBAL_PERSPECTIVES = tuple(PERSPECTIVE_CONTRACTS)
 
 BASE_QUERY_FAMILIES = {
     "primary_literature",
     "authoritative_databases",
     "counterevidence",
     "citation_chaining",
+    "synonym_expansion",
+    "adjacent_domain_search",
 }
 COMPOUND_QUERY_FAMILIES = {
     "exact_compound",
     "identity_exposure",
     "human_translation",
 }
-AUDIT_QUERY_FAMILIES = {"independent_verification", "counterevidence"}
+AUDIT_QUERY_FAMILIES = {
+    "independent_verification",
+    "counterevidence",
+    "citation_chaining",
+    "synonym_expansion",
+    "adjacent_domain_search",
+}
+SATURATION_QUERY_FAMILIES = {
+    "synonym_expansion": "synonym_expansion",
+    "citation_expansion": "citation_chaining",
+    "contradiction_search": "counterevidence",
+    "adjacent_domain_search": "adjacent_domain_search",
+}
 
 CALIBRATIONS = {
     "established",
@@ -155,6 +478,11 @@ NESTED_SCHEMAS = {
     "candidate_exclusion": ("name", "reason", "source_ids"),
     "experimental_model_suitability": ("assessed", "score", "rationale", "source_ids"),
     "applied_cap": ("maximum", "reasons"),
+    "frontier_branch": (
+        "branch_id", "branch_order", "causal_route", "distinct_causal_route",
+        "human_or_candidate_relevance", "already_covered", "materiality_score",
+        "decision", "query_ids", "source_ids", "rationale",
+    ),
 }
 
 
@@ -185,12 +513,12 @@ SCHEMAS = {
             "result_count", "screened_count", "pagination_complete", "compact_payload_paths",
             "pagination_trace", "acquired_source_ids", "verified_source_ids", "retained_source_ids",
             "executed_by_agent_id", "origin_job_id", "produced_claim_ids",
-            "produced_observation_ids", "outcome", "closure_note",
+            "produced_observation_ids", "idempotency_key", "outcome", "closure_note",
         ),
         (
             "query_id", "research_unit_id", "query_family", "resource", "query",
             "compact_payload_paths", "pagination_trace", "executed_by_agent_id",
-            "origin_job_id", "outcome", "closure_note",
+            "origin_job_id", "idempotency_key", "outcome", "closure_note",
         ),
     ),
     "claim_ledger.jsonl": _schema(
@@ -221,9 +549,13 @@ SCHEMAS = {
         (
             "unit_id", "unit_type", "perspective", "question", "worker_agent_id", "status",
             "planned_query_families", "completed_query_families", "search_ids",
-            "observation_ids", "candidate_exclusions", "closure_basis",
+            "coverage_statuses", "evidence_frontier", "frontier_exhausted",
+            "branch_budget", "observation_ids", "candidate_exclusions", "closure_basis",
         ),
-        ("unit_id", "unit_type", "perspective", "question", "status", "planned_query_families"),
+        (
+            "unit_id", "unit_type", "perspective", "question", "status",
+            "planned_query_families", "coverage_statuses", "branch_budget",
+        ),
     ),
     "candidate_observations.jsonl": _schema(
         "observation_id",
@@ -302,17 +634,58 @@ RESULT_REQUIRED_FIELDS = (
     "job_id", "packet_hash", "all_chunks_processed", "outcome", "ledger_updates"
 )
 
+JOB_REQUIRED_FIELDS = (
+    "job_id", "phase", "sequence", "kind", "role", "unit_id", "question", "depends_on",
+    "candidate_ids", "status", "assigned_agent_id", "attempt_count", "packet_manifest_path",
+    "packet_hash", "result_path", "result_hash", "retry_not_before", "retry_reason",
+    "retry_detail", "retry_count", "retry_limit", "retry_delay_seconds", "completion_state",
+    "validated_result_path", "validated_result_hash", "commit_started_at", "completed_at",
+    "selection_snapshot", "selection_snapshot_hash",
+)
+ATTEMPT_REQUIRED_FIELDS = (
+    "attempt_id", "job_id", "agent_id", "packet_hash", "packet_manifest_path",
+    "expected_result_path", "status", "started_at", "last_progress_at", "finished_at",
+    "failure_kind", "retry_reason",
+)
+PROGRAM_STATE_REQUIRED_FIELDS = (
+    "schema_version", "max_active_jobs", "current_phase", "active_job_id",
+    "active_attempt_id", "checkpoint_pending", "slice_started_at", "slice_jobs_completed",
+    "slice_max_jobs", "slice_max_minutes", "blocked_reason", "interrupted_run_detected",
+    "stale_run_detected", "created_at", "updated_at",
+)
+
 
 def required_case_present(case: dict[str, Any]) -> bool:
     return any(str(case.get(field, "")).strip() for field in ("human_gene", "human_disease", "human_phenotype"))
 
 
-def required_query_families(unit_type: str) -> set[str]:
+def search_idempotency_key(
+    research_unit_id: str,
+    query_family: str,
+    resource: str,
+    query: str,
+) -> str:
+    normalized = {
+        "research_unit_id": research_unit_id.strip(),
+        "query_family": query_family.strip(),
+        "resource": " ".join(resource.casefold().split()),
+        "query": " ".join(query.casefold().split()),
+    }
+    payload = json.dumps(normalized, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return f"SEARCH:{hashlib.sha256(payload).hexdigest()}"
+
+
+def required_query_families(unit_type: str, perspective: str = "") -> set[str]:
     if unit_type == "decisive_audit":
         return set(AUDIT_QUERY_FAMILIES)
     families = set(BASE_QUERY_FAMILIES)
     if unit_type == "compound_perspective":
         families.update(COMPOUND_QUERY_FAMILIES)
+        if perspective:
+            contract = PERSPECTIVE_CONTRACTS.get(perspective)
+            if contract is None:
+                raise ValueError(f"Unknown compound perspective: {perspective}")
+            families.update(contract["required_coverage_areas"])
     return families
 
 
@@ -334,22 +707,73 @@ def allowed_ledgers(job_kind: str) -> set[str]:
 
 def role_contract(job: dict[str, Any], unit: dict[str, Any] | None) -> dict[str, Any]:
     unit_type = str((unit or {}).get("unit_type", ""))
+    perspective = str((unit or {}).get("perspective", ""))
+    perspective_contract = (
+        PERSPECTIVE_CONTRACTS.get(perspective, {}) if unit_type == "compound_perspective" else {}
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "job_kind": job.get("kind"),
         "role": job.get("role"),
-        "required_query_families": sorted(required_query_families(unit_type)) if unit_type else [],
+        "required_query_families": (
+            sorted(required_query_families(unit_type, perspective)) if unit_type else []
+        ),
+        "compound_perspective_contract": perspective_contract,
         "allowed_ledgers": sorted(allowed_ledgers(str(job.get("kind", "")))),
         "schemas": SCHEMAS,
         "nested_schemas": NESTED_SCHEMAS,
         "result_required_fields": RESULT_REQUIRED_FIELDS,
         "conditional_result_fields": {
-            "job_with_research_unit": ["closure_basis"],
+            "job_with_research_unit": ["closure_basis", "evidence_frontier", "frontier_exhausted"],
             "compound_perspective": ["candidate_exclusions"],
         },
         "human_endpoint": HUMAN_OUTCOME_NODE,
         "ranking_components": RANKING_COMPONENTS,
         "ranking_caps": RANKING_CAPS,
+        "search_coverage": {
+            "statuses": sorted(SEARCH_COVERAGE_STATUSES),
+            "terminal_statuses": sorted(TERMINAL_SEARCH_COVERAGE_STATUSES),
+            "saturation_query_families": SATURATION_QUERY_FAMILIES,
+            "completion_requires_no_not_yet_searched": True,
+        },
+        "frontier_contract": {
+            "branch_budget": BRANCH_BUDGET_PER_UNIT,
+            "materiality_threshold_exclusive": BRANCH_MATERIALITY_THRESHOLD,
+            "decisions": sorted(FRONTIER_DECISIONS),
+            "expansion_requires": (
+                "distinct_causal_route", "human_or_candidate_relevance", "not_already_covered",
+                "materiality_above_threshold", "branch_budget_remaining",
+            ),
+        },
+        "retry_contract": {
+            "failure_kinds": sorted(FAILURE_KINDS),
+            "retry_limit": RETRY_LIMIT,
+            "base_delay_seconds": RETRY_BASE_SECONDS,
+            "delay_cap_seconds": RETRY_DELAY_CAP_SECONDS,
+            "jitter": False,
+            "stale_after_seconds": STALE_RUN_SECONDS,
+        },
+        "idempotency_contract": {
+            "search_key_fields": ("research_unit_id", "query_family", "normalized_resource", "normalized_query"),
+            "check_existing_operation_before_external_execution": True,
+            "reuse_query_bound_receipts": True,
+            "duplicate_search_operations_prohibited": True,
+            "validated_result_hash_is_completion_checkpoint": True,
+            "duplicate_validation_prohibited": True,
+            "duplicate_completion_prohibited": True,
+        },
+        "runtime_contracts": {
+            "job_required_fields": JOB_REQUIRED_FIELDS,
+            "attempt_required_fields": ATTEMPT_REQUIRED_FIELDS,
+            "program_state_required_fields": PROGRAM_STATE_REQUIRED_FIELDS,
+            "job_statuses": sorted(JOB_STATUSES),
+            "attempt_statuses": sorted(ATTEMPT_STATUSES),
+            "completion_states": sorted(COMPLETION_STATES),
+        },
+        "score_presentation": {
+            "repurposing_readiness_max": REPURPOSING_READINESS_MAX,
+            "repurposing_readiness_step": REPURPOSING_READINESS_STEP,
+        },
         "controlled_values": {
             "human_relevance": sorted(HUMAN_RELEVANCE_LEVELS),
             "claim_direction": sorted(CLAIM_DIRECTIONS),
@@ -358,6 +782,8 @@ def role_contract(job: dict[str, Any], unit: dict[str, Any] | None) -> dict[str,
             "target_endpoint_type": sorted(TARGET_ENDPOINT_TYPES),
             "council_disposition": sorted(COUNCIL_DISPOSITIONS),
             "rank_section": list(RANK_SECTION_ORDER),
+            "search_coverage_status": sorted(SEARCH_COVERAGE_STATUSES),
+            "frontier_decision": sorted(FRONTIER_DECISIONS),
         },
         "source_compactor": str(Path(__file__).resolve().parent / "compact_source_payload.py"),
         "search_record_builder": str(Path(__file__).resolve().parent / "build_search_record.py"),

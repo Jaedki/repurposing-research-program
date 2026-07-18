@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Synthetic end-to-end test for schema v5, audit, ranking, checkpoint, and resume."""
+"""Synthetic end-to-end test for schema v6, saturation, retry, checkpoint, and resume."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from program_runtime import (
     recover_active,
     resume_action,
     start_job,
+    validate_result,
 )
 from validate_program import validate_run
 
@@ -93,6 +94,7 @@ def _research_updates(
                 retained_source_ids=[source_id],
                 executed_by_agent_id=agent_id,
                 origin_job_id=str(job["job_id"]),
+                coverage_status="FOUND",
                 closure_note="Every retrieved page and the predeclared branch were screened; no open continuation remains.",
                 produced_claim_ids=produced_claims,
                 produced_observation_ids=produced_observations,
@@ -207,7 +209,11 @@ def _research_updates(
             "mode_of_action": "Selective pathway modulator",
             "claim_ids": [claim_id],
             "edge_ids": ["EDGE_CANDIDATE"],
-            "rationale": "A direct human finding and tractable pharmacology support repurposing.",
+            "rationale": (
+                "Lens route [direct_target_or_process_correction]: Syntheticmol directly inhibits the "
+                "disease-driving target process to correct pathological signalling. Human-outcome bridge: "
+                "That directional correction is linked to improved human disease progression."
+            ),
             "rationale_source_ids": [source_id],
             "uncertainty": "Prospective therapeutic validation is still required.",
         }
@@ -334,6 +340,8 @@ def run_integration() -> None:
             if action["job_id"] == "BE01.research" and not retried:
                 retry = fail_job(root, action["job_id"], "rate_limit", 1, "synthetic throttle")
                 assert retry["action"] == "wait_for_retry"
+                assert retry["retry_count"] == 1 and retry["retry_delay_seconds"] == 30
+                assert retry["retry_reason"] == "rate_limit"
                 retried = True
                 continue
             if action["job_id"] == "BE02.research" and not recovered:
@@ -349,6 +357,9 @@ def run_integration() -> None:
                 "outcome": "completed",
                 "ledger_updates": {},
             }
+            if job.get("unit_id"):
+                result["evidence_frontier"] = []
+                result["frontier_exhausted"] = True
             if job["kind"] == "research":
                 result["closure_basis"] = "All predeclared branches, counterevidence, citations, and continuations were resolved."
                 if job["unit_id"].startswith("CP"):
@@ -369,7 +380,7 @@ def run_integration() -> None:
                 source_id = candidate["rationale_source_ids"][0]
                 candidate["candidate_class"] = "repurposing_candidate"
                 candidate["repurposing_readiness"] = {
-                    "score": 8,
+                    "score": 80,
                     "rationale": "Existing human use outside the target disease supports near-term repurposing.",
                     "source_ids": [source_id],
                 }
@@ -397,7 +408,19 @@ def run_integration() -> None:
                 raise AssertionError(job["kind"])
             result_path = root / str(attempt["expected_result_path"])
             write_json(result_path, result)
-            complete_job(root, job["job_id"])
+            if job["job_id"] == "BE03.research":
+                validated = validate_result(root, job["job_id"])
+                assert validated["status"] == "valid" and validated["cached_validation"] is False
+                cached = validate_result(root, job["job_id"])
+                assert cached["cached_validation"] is True
+                resumed = next_action(root)
+                assert resumed["resumed_interrupted_completion"] == job["job_id"]
+                continue
+            completed = complete_job(root, job["job_id"])
+            if job["job_id"] == "BE04.research":
+                replayed = complete_job(root, job["job_id"])
+                assert replayed["duplicate_completion_prevented"] is True
+                assert replayed["next"] == completed["next"]
 
         assert retried and recovered and checkpoints >= 1
         errors = validate_run(root)
@@ -417,7 +440,7 @@ def run_integration() -> None:
                 "target_endpoint_type": "disease_modifying_clinical",
                 "target_endpoint": "synthetic disease progression",
                 "mode_of_action": "Selective pathway modulator",
-                "repurposing_readiness": "8",
+                "repurposing_readiness": "80",
                 "raw_score": "80",
                 "total_score": "80",
                 "applied_cap": "100",

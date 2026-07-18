@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic serial runtime for schema-v5 repurposing programmes."""
+"""Deterministic serial runtime for schema-v6 repurposing programmes."""
 
 from __future__ import annotations
 
@@ -11,13 +11,21 @@ from typing import Any
 
 from build_context_packet import build_packet
 from program_contract import (
+    BRANCH_BUDGET_PER_UNIT,
     BROAD_DOMAINS,
+    FAILURE_KINDS,
     GLOBAL_PERSPECTIVES,
     LEDGER_KEYS,
     MAX_ACTIVE_JOBS,
+    RETRY_BASE_SECONDS,
+    RETRY_DELAY_CAP_SECONDS,
+    RETRY_LIMIT,
+    RETRYABLE_FAILURE_KINDS,
     SCHEMAS,
     SCHEMA_VERSION,
     SOURCE_AGGREGATE_FIELDS,
+    STALE_RUN_SECONDS,
+    TERMINAL_SEARCH_COVERAGE_STATUSES,
     required_case_present,
     required_query_families,
 )
@@ -89,12 +97,23 @@ def _job(
         "result_path": "",
         "result_hash": "",
         "retry_not_before": "",
+        "retry_reason": "",
+        "retry_detail": "",
+        "retry_count": 0,
+        "retry_limit": RETRY_LIMIT,
+        "retry_delay_seconds": 0,
+        "completion_state": "not_validated",
+        "validated_result_path": "",
+        "validated_result_hash": "",
+        "commit_started_at": "",
+        "completed_at": "",
         "selection_snapshot": [],
         "selection_snapshot_hash": "",
     }
 
 
 def _unit(unit_id: str, unit_type: str, perspective: str, question: str) -> dict[str, Any]:
+    planned_query_families = sorted(required_query_families(unit_type, perspective))
     return {
         "unit_id": unit_id,
         "unit_type": unit_type,
@@ -102,9 +121,15 @@ def _unit(unit_id: str, unit_type: str, perspective: str, question: str) -> dict
         "question": question,
         "worker_agent_id": "",
         "status": "planned",
-        "planned_query_families": sorted(required_query_families(unit_type)),
+        "planned_query_families": planned_query_families,
         "completed_query_families": [],
         "search_ids": [],
+        "coverage_statuses": {
+            family: "NOT_YET_SEARCHED" for family in planned_query_families
+        },
+        "evidence_frontier": [],
+        "frontier_exhausted": False,
+        "branch_budget": BRANCH_BUDGET_PER_UNIT,
         "observation_ids": [],
         "candidate_exclusions": [],
         "closure_basis": "",
@@ -198,9 +223,18 @@ def _initial_plan() -> tuple[dict[str, Any], list[dict[str, Any]]]:
 
 def _event(root: Path, event: str, **details: Any) -> None:
     rows = read_jsonl(root / "orchestration.jsonl")
+    dedupe_key = str(details.pop("dedupe_key", ""))
+    if dedupe_key and any(str(row.get("dedupe_key", "")) == dedupe_key for row in rows):
+        return
     append_jsonl(
         root / "orchestration.jsonl",
-        {"event_id": f"EV{len(rows) + 1:06d}", "event": event, "at": _now(), **details},
+        {
+            "event_id": f"EV{len(rows) + 1:06d}",
+            "event": event,
+            "at": _now(),
+            **({"dedupe_key": dedupe_key} if dedupe_key else {}),
+            **details,
+        },
     )
 
 
@@ -213,12 +247,17 @@ def _retry_elapsed(job: dict[str, Any]) -> bool:
     return value is None or value <= datetime.now(timezone.utc)
 
 
+def _retry_delay_seconds(retry_count: int, retry_after_seconds: int | None = None) -> int:
+    exponential = min(RETRY_DELAY_CAP_SECONDS, RETRY_BASE_SECONDS * (2 ** max(0, retry_count - 1)))
+    requested = max(0, int(retry_after_seconds or 0))
+    return min(RETRY_DELAY_CAP_SECONDS, max(exponential, requested))
+
+
 def _refresh(plan: dict[str, Any], state: dict[str, Any]) -> None:
     jobs = _job_map(plan)
     for job in plan.get("jobs", []):
         if job.get("status") == "retry_wait" and _retry_elapsed(job):
             job["status"] = "ready"
-            job["retry_not_before"] = ""
         if job.get("status") != "planned":
             continue
         if all(jobs.get(str(dep), {}).get("status") == "complete" for dep in job.get("depends_on", [])):
@@ -231,8 +270,70 @@ def _refresh(plan: dict[str, Any], state: dict[str, Any]) -> None:
     state["updated_at"] = _now()
 
 
+def _detect_run_health(root: Path, plan: dict[str, Any], state: dict[str, Any]) -> None:
+    job_id = str(state.get("active_job_id", ""))
+    attempt_id = str(state.get("active_attempt_id", ""))
+    jobs = _job_map(plan)
+    attempts = index_rows(read_jsonl(root / "job_attempts.jsonl"), "attempt_id")
+    job = jobs.get(job_id)
+    attempt = attempts.get(attempt_id)
+    dangling_running = [
+        row for row in attempts.values()
+        if row.get("status") == "running" and str(row.get("attempt_id")) != attempt_id
+    ]
+    inconsistent = bool(job_id) != bool(attempt_id)
+    if job_id and (
+        not job
+        or job.get("status") != "running"
+        or not attempt
+        or attempt.get("status") != "running"
+        or str(attempt.get("job_id")) != job_id
+    ):
+        inconsistent = True
+    if dangling_running:
+        inconsistent = True
+    committing = bool(job and job.get("completion_state") in {"validated", "committing"})
+    state["interrupted_run_detected"] = inconsistent or committing
+    progress = _parse_time((attempt or {}).get("last_progress_at") or (attempt or {}).get("started_at"))
+    state["stale_run_detected"] = bool(
+        job_id and progress and (datetime.now(timezone.utc) - progress).total_seconds() >= STALE_RUN_SECONDS
+    )
+
+
+def _reconcile_interrupted_start(root: Path, plan: dict[str, Any], state: dict[str, Any]) -> None:
+    if state.get("active_job_id") or state.get("active_attempt_id"):
+        return
+    running = [row for row in read_jsonl(root / "job_attempts.jsonl") if row.get("status") == "running"]
+    if len(running) != 1:
+        return
+    attempt = running[0]
+    job = _job_map(plan).get(str(attempt.get("job_id", "")))
+    if (
+        not job
+        or job.get("status") not in {"ready", "running"}
+        or str(job.get("packet_hash", "")) != str(attempt.get("packet_hash", ""))
+    ):
+        return
+    job["status"] = "running"
+    job["assigned_agent_id"] = str(attempt.get("agent_id", ""))
+    match = re.search(r"\.attempt(\d+)$", str(attempt.get("attempt_id", "")))
+    if match:
+        job["attempt_count"] = max(int(job.get("attempt_count", 0)), int(match.group(1)))
+    state["active_job_id"] = str(job.get("job_id", ""))
+    state["active_attempt_id"] = str(attempt.get("attempt_id", ""))
+    _event(
+        root,
+        "interrupted_start_reconciled",
+        job_id=job.get("job_id"),
+        attempt_id=attempt.get("attempt_id"),
+        dedupe_key=f"start-reconcile:{attempt.get('attempt_id')}",
+    )
+
+
 def _persist(root: Path, plan: dict[str, Any], state: dict[str, Any]) -> None:
+    _reconcile_interrupted_start(root, plan, state)
     _refresh(plan, state)
+    _detect_run_health(root, plan, state)
     write_json(root / "execution_plan.json", plan)
     write_json(root / "program_state.json", state)
 
@@ -288,6 +389,8 @@ def initialize(root: Path, case: dict[str, Any]) -> dict[str, Any]:
         "slice_max_jobs": DEFAULT_SLICE_JOBS,
         "slice_max_minutes": DEFAULT_SLICE_MINUTES,
         "blocked_reason": "",
+        "interrupted_run_detected": False,
+        "stale_run_detected": False,
         "created_at": _now(),
         "updated_at": _now(),
     }
@@ -318,10 +421,19 @@ def next_action(root: Path) -> dict[str, Any]:
     state = read_json(root / "program_state.json", {})
     _persist(root, plan, state)
     if state.get("active_job_id"):
+        active_job = _job_map(plan).get(str(state["active_job_id"]), {})
+        if active_job.get("completion_state") in {"validated", "committing"}:
+            completed = _commit_validated_job(root, plan, state, active_job)
+            return {
+                **completed["next"],
+                "resumed_interrupted_completion": str(active_job.get("job_id")),
+            }
         return {
             "action": "resume_active_job",
             "job_id": state["active_job_id"],
             "attempt_id": state.get("active_attempt_id"),
+            "stale_run_detected": state.get("stale_run_detected") is True,
+            "interrupted_run_detected": state.get("interrupted_run_detected") is True,
         }
     if state.get("blocked_reason"):
         return {"action": "blocked", "reason": state["blocked_reason"]}
@@ -342,7 +454,16 @@ def next_action(root: Path) -> dict[str, Any]:
         return {"action": "checkpoint", "reason": "bounded_execution_slice_complete", "resume_command": "resume"}
     job = incomplete[0]
     if job.get("status") == "retry_wait":
-        return {"action": "wait_for_retry", "job_id": job["job_id"], "retry_not_before": job["retry_not_before"]}
+        return {
+            "action": "wait_for_retry",
+            "job_id": job["job_id"],
+            "retry_not_before": job["retry_not_before"],
+            "retry_reason": job.get("retry_reason", ""),
+            "retry_detail": job.get("retry_detail", ""),
+            "retry_count": job.get("retry_count", 0),
+            "retry_limit": job.get("retry_limit", RETRY_LIMIT),
+            "retry_delay_seconds": job.get("retry_delay_seconds", 0),
+        }
     if job.get("status") != "ready":
         return {"action": "blocked_by_dependencies", "earliest_job": job["job_id"]}
     if job.get("packet_manifest_path"):
@@ -382,7 +503,30 @@ def start_job(root: Path, job_id: str, agent_id: str) -> dict[str, Any]:
     if not job:
         raise ValueError(f"Unknown job: {job_id}")
     if state.get("active_job_id"):
+        if state.get("active_job_id") == job_id:
+            active = _active_attempt(root, state)
+            if str(active.get("agent_id")) == agent_id and active.get("status") == "running":
+                return {**active, "duplicate_start_prevented": True}
         raise ValueError(f"Another job is active: {state['active_job_id']}")
+    recoverable = next(
+        (
+            row for row in reversed(read_jsonl(root / "job_attempts.jsonl"))
+            if row.get("job_id") == job_id and row.get("status") == "running"
+        ),
+        None,
+    )
+    if recoverable:
+        if str(recoverable.get("agent_id")) != agent_id:
+            raise ValueError(f"Interrupted start is reserved to {recoverable.get('agent_id')}")
+        if str(recoverable.get("packet_hash")) != str(job.get("packet_hash")):
+            raise ValueError("Interrupted start packet hash disagrees with the current job")
+        job["status"] = "running"
+        job["assigned_agent_id"] = agent_id
+        state["active_job_id"] = job_id
+        state["active_attempt_id"] = str(recoverable["attempt_id"])
+        _event(root, "job_start_recovered", job_id=job_id, attempt_id=recoverable["attempt_id"], agent_id=agent_id)
+        _persist(root, plan, state)
+        return {**recoverable, "recovered_interrupted_start": True}
     if job.get("status") != "ready" or not job.get("packet_hash"):
         raise ValueError("Job is not ready with an immutable packet")
     _verify_packet(root, job)
@@ -409,8 +553,10 @@ def start_job(root: Path, job_id: str, agent_id: str) -> dict[str, Any]:
         "expected_result_path": str(result_path.relative_to(root)),
         "status": "running",
         "started_at": _now(),
+        "last_progress_at": _now(),
         "finished_at": "",
         "failure_kind": "",
+        "retry_reason": "",
     }
     append_jsonl(root / "job_attempts.jsonl", attempt)
     job["status"] = "running"
@@ -436,7 +582,25 @@ def validate_result(root: Path, job_id: str, result_path: str | None = None) -> 
     plan = read_json(root / "execution_plan.json", {})
     state = read_json(root / "program_state.json", {})
     job = _job_map(plan).get(job_id)
-    if not job or job.get("status") != "running" or state.get("active_job_id") != job_id:
+    if not job:
+        raise ValueError(f"Unknown job: {job_id}")
+    cached_relative = str(job.get("validated_result_path") or job.get("result_path") or "")
+    supplied_relative = result_path or cached_relative
+    if supplied_relative:
+        supplied_path = (root / supplied_relative).resolve()
+        supplied_path.relative_to(root.resolve())
+        if (
+            supplied_path.is_file()
+            and job.get("completion_state") in {"validated", "committing", "committed"}
+            and str(job.get("validated_result_hash")) == file_hash(supplied_path)
+        ):
+            return {
+                "status": "valid",
+                "job_id": job_id,
+                "result_path": str(supplied_path.relative_to(root)),
+                "cached_validation": True,
+            }
+    if job.get("status") != "running" or state.get("active_job_id") != job_id:
         raise ValueError(f"Job is not active: {job_id}")
     attempt = _active_attempt(root, state)
     relative = result_path or str(attempt["expected_result_path"])
@@ -459,6 +623,11 @@ def validate_result(root: Path, job_id: str, result_path: str | None = None) -> 
         errors.append("Result outcome must be completed; scientific uncertainty belongs in structured records")
     if job.get("unit_id") and not str(result.get("closure_basis", "")).strip():
         errors.append("Research and audit jobs require a non-rhetorical closure_basis")
+    if job.get("unit_id"):
+        if not isinstance(result.get("evidence_frontier"), list):
+            errors.append("Research and audit jobs require an evidence_frontier list")
+        if result.get("frontier_exhausted") is not True:
+            errors.append("Research and audit jobs must confirm frontier_exhausted=true")
     if job.get("kind") == "research":
         unit = next(
             (
@@ -476,17 +645,48 @@ def validate_result(root: Path, job_id: str, result_path: str | None = None) -> 
     if errors:
         return {"status": "invalid", "errors": errors, "result_path": relative}
     write_json(path, result, compact=True)
-    return {"status": "valid", "job_id": job_id, "result_path": str(path.relative_to(root))}
+    job["completion_state"] = "validated"
+    job["validated_result_path"] = str(path.relative_to(root))
+    job["validated_result_hash"] = file_hash(path)
+    attempts = read_jsonl(root / "job_attempts.jsonl")
+    for row in attempts:
+        if row.get("attempt_id") == attempt.get("attempt_id"):
+            row["last_progress_at"] = _now()
+    write_jsonl(root / "job_attempts.jsonl", attempts)
+    _event(
+        root,
+        "result_validated",
+        job_id=job_id,
+        attempt_id=attempt.get("attempt_id"),
+        dedupe_key=f"result-valid:{job_id}:{job.get('validated_result_hash')}",
+    )
+    _persist(root, plan, state)
+    return {
+        "status": "valid",
+        "job_id": job_id,
+        "result_path": str(path.relative_to(root)),
+        "cached_validation": False,
+    }
 
 
-def _finish_attempt(root: Path, attempt_id: str, status: str, failure_kind: str = "") -> None:
+def _finish_attempt(
+    root: Path,
+    attempt_id: str,
+    status: str,
+    failure_kind: str = "",
+    retry_reason: str = "",
+) -> None:
     attempts = read_jsonl(root / "job_attempts.jsonl")
     target = next((row for row in attempts if row.get("attempt_id") == attempt_id), None)
     if not target:
         raise ValueError(f"Unknown attempt: {attempt_id}")
+    if target.get("status") == status and target.get("finished_at"):
+        return
     target["status"] = status
     target["finished_at"] = _now()
+    target["last_progress_at"] = target["finished_at"]
     target["failure_kind"] = failure_kind
+    target["retry_reason"] = retry_reason
     write_jsonl(root / "job_attempts.jsonl", attempts)
 
 
@@ -521,6 +721,19 @@ def _complete_unit(root: Path, job: dict[str, Any], agent_id: str, result: dict[
     required = set(unit.get("planned_query_families", []))
     if families != required:
         raise ValueError(f"Unit {unit_id} did not complete its exact query-family contract")
+    coverage_statuses: dict[str, str] = {}
+    for family in sorted(required):
+        outcomes = {
+            str(row.get("outcome")) for row in searches if str(row.get("query_family")) == family
+        }
+        coverage_statuses[family] = (
+            "FOUND" if "FOUND" in outcomes
+            else "NOT_FOUND_AFTER_EXHAUSTIVE_SEARCH"
+            if outcomes == {"NOT_FOUND_AFTER_EXHAUSTIVE_SEARCH"}
+            else "NOT_YET_SEARCHED"
+        )
+    if any(value not in TERMINAL_SEARCH_COVERAGE_STATUSES for value in coverage_statuses.values()):
+        raise ValueError(f"Unit {unit_id} retains a NOT_YET_SEARCHED coverage area")
     observations = [
         str(row.get("observation_id"))
         for row in read_jsonl(root / "candidate_observations.jsonl")
@@ -531,6 +744,10 @@ def _complete_unit(root: Path, job: dict[str, Any], agent_id: str, result: dict[
         status="complete",
         completed_query_families=sorted(families),
         search_ids=sorted(str(row.get("query_id")) for row in searches),
+        coverage_statuses=coverage_statuses,
+        evidence_frontier=result.get("evidence_frontier", []),
+        frontier_exhausted=result.get("frontier_exhausted") is True,
+        branch_budget=BRANCH_BUDGET_PER_UNIT,
         observation_ids=sorted(observations),
         candidate_exclusions=result.get("candidate_exclusions", []),
         closure_basis=str(result.get("closure_basis", "")),
@@ -588,19 +805,32 @@ def _register_council(root: Path, plan: dict[str, Any], selected: list[str]) -> 
     plan["jobs"].append(council_job)
 
 
-def complete_job(root: Path, job_id: str, result_path: str | None = None) -> dict[str, Any]:
-    _assert_current_schema(root)
-    plan = read_json(root / "execution_plan.json", {})
-    state = read_json(root / "program_state.json", {})
-    job = _job_map(plan).get(job_id)
-    if not job or job.get("status") != "running" or state.get("active_job_id") != job_id:
-        raise ValueError(f"Job is not active: {job_id}")
+def _commit_validated_job(
+    root: Path,
+    plan: dict[str, Any],
+    state: dict[str, Any],
+    job: dict[str, Any],
+) -> dict[str, Any]:
+    job_id = str(job["job_id"])
+    relative = str(job.get("validated_result_path", ""))
+    path = root / relative
+    if not path.is_file() or file_hash(path) != str(job.get("validated_result_hash", "")):
+        raise ValueError(f"Validated result checkpoint is missing or changed for {job_id}")
+    if job.get("completion_state") == "validated":
+        job["completion_state"] = "committing"
+        job["commit_started_at"] = _now()
+        _event(
+            root,
+            "job_commit_started",
+            job_id=job_id,
+            attempt_id=state.get("active_attempt_id"),
+            dedupe_key=f"commit-start:{job_id}:{job.get('validated_result_hash')}",
+        )
+        _persist(root, plan, state)
+    if job.get("completion_state") != "committing":
+        raise ValueError(f"Job {job_id} has invalid completion state {job.get('completion_state')!r}")
     attempt = _active_attempt(root, state)
-    validation = validate_result(root, job_id, result_path)
-    if validation.get("status") != "valid":
-        raise ValueError("Staged result failed validation:\n" + "\n".join(f"- {e}" for e in validation["errors"]))
-    relative = str(validation["result_path"])
-    result = read_json(root / relative, {})
+    result = read_json(path, {})
     _merge_updates(root, result.get("ledger_updates", {}))
     _complete_unit(root, job, str(attempt.get("agent_id", "")), result)
     if job.get("kind") == "merge":
@@ -626,8 +856,10 @@ def complete_job(root: Path, job_id: str, result_path: str | None = None) -> dic
         rank_candidates(root)
 
     job["status"] = "complete"
+    job["completion_state"] = "committed"
     job["result_path"] = relative
-    job["result_hash"] = file_hash(root / relative)
+    job["result_hash"] = file_hash(path)
+    job["completed_at"] = _now()
     attempt_id = str(state.get("active_attempt_id"))
     _finish_attempt(root, attempt_id, "complete")
     state["active_job_id"] = ""
@@ -635,12 +867,47 @@ def complete_job(root: Path, job_id: str, result_path: str | None = None) -> dic
     state["slice_jobs_completed"] = int(state.get("slice_jobs_completed", 0)) + 1
     if state["slice_jobs_completed"] >= int(state.get("slice_max_jobs", DEFAULT_SLICE_JOBS)):
         state["checkpoint_pending"] = True
-    _event(root, "job_completed", job_id=job_id, attempt_id=attempt_id)
+    _event(
+        root,
+        "job_completed",
+        job_id=job_id,
+        attempt_id=attempt_id,
+        dedupe_key=f"job-complete:{job_id}:{job.get('result_hash')}",
+    )
     _persist(root, plan, state)
     return {"status": "complete", "next": next_action(root)}
 
 
-def fail_job(root: Path, job_id: str, failure_kind: str, retry_after_seconds: int, detail: str) -> dict[str, Any]:
+def complete_job(root: Path, job_id: str, result_path: str | None = None) -> dict[str, Any]:
+    _assert_current_schema(root)
+    plan = read_json(root / "execution_plan.json", {})
+    state = read_json(root / "program_state.json", {})
+    job = _job_map(plan).get(job_id)
+    if not job:
+        raise ValueError(f"Unknown job: {job_id}")
+    if job.get("status") == "complete" and job.get("completion_state") == "committed":
+        path = root / str(job.get("result_path", ""))
+        if not path.is_file() or file_hash(path) != str(job.get("result_hash", "")):
+            raise ValueError(f"Completed result checkpoint is missing or changed for {job_id}")
+        return {"status": "complete", "duplicate_completion_prevented": True, "next": next_action(root)}
+    if job.get("status") != "running" or state.get("active_job_id") != job_id:
+        raise ValueError(f"Job is not active: {job_id}")
+    validation = validate_result(root, job_id, result_path)
+    if validation.get("status") != "valid":
+        raise ValueError("Staged result failed validation:\n" + "\n".join(f"- {e}" for e in validation["errors"]))
+    plan = read_json(root / "execution_plan.json", {})
+    state = read_json(root / "program_state.json", {})
+    job = _job_map(plan)[job_id]
+    return _commit_validated_job(root, plan, state, job)
+
+
+def fail_job(
+    root: Path,
+    job_id: str,
+    failure_kind: str,
+    retry_after_seconds: int | None,
+    detail: str,
+) -> dict[str, Any]:
     _assert_current_schema(root)
     plan = read_json(root / "execution_plan.json", {})
     state = read_json(root / "program_state.json", {})
@@ -648,20 +915,42 @@ def fail_job(root: Path, job_id: str, failure_kind: str, retry_after_seconds: in
     if not job or job.get("status") != "running" or state.get("active_job_id") != job_id:
         raise ValueError(f"Job is not active: {job_id}")
     attempt_id = str(state.get("active_attempt_id"))
+    if failure_kind not in FAILURE_KINDS:
+        raise ValueError(f"Unknown failure kind: {failure_kind}")
+    if job.get("completion_state") != "not_validated":
+        raise ValueError("A validated result must be completed or resumed, not failed")
+    retry_reason = detail.strip() or failure_kind
     if failure_kind == "unrecoverable":
         job["status"] = "blocked"
         state["blocked_reason"] = detail or f"Unrecoverable failure in {job_id}"
-    elif failure_kind in {"rate_limit", "spawn_failure", "transient"}:
-        job["status"] = "retry_wait" if retry_after_seconds > 0 else "ready"
-        job["retry_not_before"] = (
-            datetime.now(timezone.utc) + timedelta(seconds=max(0, retry_after_seconds))
-        ).isoformat() if retry_after_seconds > 0 else ""
     else:
-        raise ValueError(f"Unknown failure kind: {failure_kind}")
-    _finish_attempt(root, attempt_id, "failed", failure_kind)
+        if failure_kind not in RETRYABLE_FAILURE_KINDS:
+            raise ValueError(f"Failure kind is not retryable: {failure_kind}")
+        job["retry_count"] = int(job.get("retry_count", 0)) + 1
+        job["retry_reason"] = failure_kind
+        job["retry_detail"] = retry_reason
+        if int(job["retry_count"]) > int(job.get("retry_limit", RETRY_LIMIT)):
+            job["status"] = "blocked"
+            state["blocked_reason"] = f"Retry limit exceeded for {job_id}: {retry_reason}"
+        else:
+            delay = _retry_delay_seconds(int(job["retry_count"]), retry_after_seconds)
+            job["retry_delay_seconds"] = delay
+            job["retry_not_before"] = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
+            job["status"] = "retry_wait"
+    _finish_attempt(root, attempt_id, "failed", failure_kind, retry_reason)
     state["active_job_id"] = ""
     state["active_attempt_id"] = ""
-    _event(root, "job_failed", job_id=job_id, failure_kind=failure_kind, detail=detail)
+    _event(
+        root,
+        "job_failed",
+        job_id=job_id,
+        attempt_id=attempt_id,
+        failure_kind=failure_kind,
+        detail=detail,
+        retry_count=job.get("retry_count", 0),
+        retry_not_before=job.get("retry_not_before", ""),
+        dedupe_key=f"job-failed:{attempt_id}",
+    )
     _persist(root, plan, state)
     return next_action(root)
 
@@ -675,7 +964,7 @@ def recover_active(root: Path, new_agent_id: str, reason: str = "assigned task u
     job = _job_map(plan).get(job_id)
     if not job or not attempt_id:
         raise ValueError("No active job is available for recovery")
-    _finish_attempt(root, attempt_id, "orphaned", "orphaned_agent")
+    _finish_attempt(root, attempt_id, "orphaned", "worker_interruption", reason)
     old_agent = str(job.get("assigned_agent_id", ""))
     job["assigned_agent_id"] = ""
     job["status"] = "ready"
@@ -708,4 +997,9 @@ def status(root: Path) -> dict[str, Any]:
     counts: dict[str, int] = defaultdict(int)
     for job in plan.get("jobs", []):
         counts[str(job.get("status"))] += 1
-    return {"state": state, "job_counts": dict(counts), "next": next_action(root)}
+    next_value = next_action(root)
+    return {
+        "state": read_json(root / "program_state.json", state),
+        "job_counts": dict(counts),
+        "next": next_value,
+    }

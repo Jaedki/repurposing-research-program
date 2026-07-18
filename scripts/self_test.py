@@ -1,23 +1,80 @@
 #!/usr/bin/env python3
-"""Focused contract, ranking-cap, and context-isolation tests for schema v5."""
+"""Focused contract, saturation, resilience, ranking, and isolation tests for schema v6."""
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 
 from build_context_packet import build_packet
 from program_contract import (
+    AUDIT_QUERY_FAMILIES,
+    BASE_QUERY_FAMILIES,
+    BRANCH_BUDGET_PER_UNIT,
+    COMPOUND_QUERY_FAMILIES,
+    GLOBAL_PERSPECTIVES,
     HUMAN_OUTCOME_NODE,
     HUMAN_RELEVANCE_LEVELS,
+    MAX_ACTIVE_JOBS,
+    PERSPECTIVE_CONTRACTS,
     RANKING_CAPS,
     RANKING_COMPONENTS,
+    RETRY_BASE_SECONDS,
+    RETRY_DELAY_CAP_SECONDS,
+    RETRY_LIMIT,
     SCHEMA_VERSION,
+    required_query_families,
 )
 from program_io import read_json, read_jsonl, write_json, write_jsonl
-from program_runtime import _merge_updates, complete_job, initialize, next_action, start_job
+from program_runtime import _merge_updates, complete_job, fail_job, initialize, next_action, start_job
 from ranking import council_selection, rank_candidates, rank_rows
-from validate_program import validate_run, validate_staged_result
+from validate_program import (
+    _validate_distinct_perspective_rationales,
+    _validate_perspective_rationale,
+    _validate_unit_frontier,
+    validate_run,
+    validate_staged_result,
+)
+
+
+VALID_PERSPECTIVE_RATIONALES = {
+    "direct_mechanism": (
+        "Lens route [direct_target_or_process_correction]: Syntheticmol directly inhibits the "
+        "disease-driving target process to correct pathological signalling. Human-outcome bridge: "
+        "That directional correction is linked to improved human disease progression."
+    ),
+    "phenotype_reversal": (
+        "Lens route [phenotype_or_signature_reversal]: Syntheticmol reverses the disease molecular "
+        "signature and normalises the pathological phenotype biomarker pattern. Human-outcome bridge: "
+        "Normalisation of that pattern is linked to improved clinical function in human disease."
+    ),
+    "vulnerability_inverse": (
+        "Lens route [disease_created_vulnerability_inverse]: Disease creates a stress response "
+        "vulnerability and dependency that Syntheticmol protects against and corrects. Human-outcome bridge: "
+        "Protection from that dependency is linked to preserved human clinical function."
+    ),
+    "compensatory_network": (
+        "Lens route [parallel_or_compensatory_restoration]: Direct correction is incomplete, while "
+        "Syntheticmol activates a parallel bypass network that restores function. Human-outcome bridge: "
+        "The compensatory restoration is linked to improved human disease function."
+    ),
+    "human_genetics_clinical": (
+        "Lens route [human_causal_or_intervention_anchor]: A human genetic variant supplies causal target "
+        "validation and the Syntheticmol intervention follows that direction. Human-outcome bridge: "
+        "The validated intervention direction is linked to a better human therapeutic outcome."
+    ),
+    "hidden_in_plain_sight": (
+        "Lens route [adjacent_or_observed_clinical_signal]: A real-world comorbidity clinical observation "
+        "shows reduced disease burden and improved response with Syntheticmol. Human-outcome bridge: "
+        "That observed benefit maps to the target human clinical outcome."
+    ),
+    "natural_compounds": (
+        "Lens route [exact_natural_compound_with_independent_route]: The exact plant-derived natural product "
+        "Syntheticmol has a source-supported causal mechanism independent of its origin. Human-outcome bridge: "
+        "That independent mechanism is linked to improved human disease function."
+    ),
+}
 
 
 def _component_scores(source_id: str, human: int, total_target: int) -> dict[str, dict[str, object]]:
@@ -64,7 +121,7 @@ def _candidate_metadata(source_id: str, claim_id: str) -> dict[str, object]:
             "source_ids": [source_id],
         },
         "repurposing_readiness": {
-            "score": 5,
+            "score": 50,
             "rationale": "Established human use elsewhere supports a tractable repurposing test.",
             "source_ids": [source_id],
         },
@@ -88,6 +145,134 @@ def exercise_human_inputs() -> None:
         else:
             raise AssertionError("empty human case was accepted")
     assert HUMAN_OUTCOME_NODE == "CASE_HUMAN_THERAPEUTIC_OUTCOME"
+
+
+def exercise_perspective_contracts_and_packet_delivery() -> None:
+    expected_perspectives = (
+        "direct_mechanism",
+        "phenotype_reversal",
+        "vulnerability_inverse",
+        "compensatory_network",
+        "human_genetics_clinical",
+        "hidden_in_plain_sight",
+        "natural_compounds",
+    )
+    required_contract_fields = {
+        "perspective_id",
+        "discovery_objective",
+        "required_causal_route",
+        "required_coverage_areas",
+        "prohibited_primary_rationales",
+        "required_lens_specific_rationale",
+        "distinguishing_boundary",
+    }
+    assert GLOBAL_PERSPECTIVES == expected_perspectives
+    assert tuple(PERSPECTIVE_CONTRACTS) == expected_perspectives
+    assert MAX_ACTIVE_JOBS == 1
+    assert (RETRY_BASE_SECONDS, RETRY_DELAY_CAP_SECONDS, RETRY_LIMIT) == (30, 900, 6)
+    assert required_query_families("broad_evidence", "human_disease_biology") == BASE_QUERY_FAMILIES
+    assert required_query_families("decisive_audit", "decisive_claims") == AUDIT_QUERY_FAMILIES
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "run"
+        initialize(root, {"human_disease": "synthetic disease"})
+        units = {row["perspective"]: row for row in read_jsonl(root / "research_units.jsonl")}
+        plan = read_json(root / "execution_plan.json", {})
+        compound_jobs = [row for row in plan["jobs"] if str(row["job_id"]).startswith("CP")]
+        assert [row["job_id"] for row in compound_jobs] == [f"CP{i:02d}.research" for i in range(1, 8)]
+        assert [row["sequence"] for row in compound_jobs] == list(range(201, 208))
+        for index, perspective in enumerate(expected_perspectives, 1):
+            contract = PERSPECTIVE_CONTRACTS[perspective]
+            assert set(contract) == required_contract_fields
+            assert contract["perspective_id"] == perspective
+            assert len(contract["required_coverage_areas"]) == 3
+            required = required_query_families("compound_perspective", perspective)
+            assert required == (
+                BASE_QUERY_FAMILIES
+                | COMPOUND_QUERY_FAMILIES
+                | set(contract["required_coverage_areas"])
+            )
+            assert set(units[perspective]["planned_query_families"]) == required
+            assert set(units[perspective]["coverage_statuses"]) == required
+            assert set(units[perspective]["coverage_statuses"].values()) == {"NOT_YET_SEARCHED"}
+            manifest_path, _ = build_packet(root, f"CP{index:02d}.research")
+            manifest = read_json(manifest_path, {})
+            packet = read_json(root / manifest["required_chunks"][0]["path"], {})
+            machine = packet["machine_contract"]
+            assert machine["compound_perspective_contract"] == json.loads(json.dumps(contract))
+            assert machine["required_query_families"] == sorted(required)
+            packet_text = (root / manifest["required_chunks"][0]["path"]).read_text(encoding="utf-8")
+            for other in set(expected_perspectives) - {perspective}:
+                marker = PERSPECTIVE_CONTRACTS[other]["required_lens_specific_rationale"]["route_marker"]
+                assert marker not in packet_text
+
+
+def exercise_perspective_rationale_validation_and_convergence() -> None:
+    for perspective, rationale in VALID_PERSPECTIVE_RATIONALES.items():
+        errors: list[str] = []
+        _validate_perspective_rationale("fixture", perspective, rationale, errors)
+        assert not errors, (perspective, errors)
+
+    errors = []
+    _validate_perspective_rationale(
+        "generic fixture",
+        "direct_mechanism",
+        "A promising exact compound has relevant evidence and should be repurposed.",
+        errors,
+    )
+    assert any("route marker" in error for error in errors), errors
+
+    wrong_lens = (
+        "Lens route [phenotype_or_signature_reversal]: Syntheticmol directly inhibits a disease-driving "
+        "target process to correct signalling. Human-outcome bridge: This may improve human disease progression."
+    )
+    errors = []
+    _validate_perspective_rationale("wrong lens fixture", "phenotype_reversal", wrong_lens, errors)
+    assert any("phenotype_reversal route" in error for error in errors), errors
+
+    origin_only = (
+        "Lens route [exact_natural_compound_with_independent_route]: Syntheticmol is a familiar plant-derived "
+        "natural product that is widely available. Human-outcome bridge: It may help human disease outcomes."
+    )
+    errors = []
+    _validate_perspective_rationale("origin-only fixture", "natural_compounds", origin_only, errors)
+    assert any("natural_compounds route" in error for error in errors), errors
+
+    units = {
+        "CP01": {"perspective": "direct_mechanism"},
+        "CP02": {"perspective": "phenotype_reversal"},
+    }
+    convergent = {
+        "OBS_DIRECT": {
+            "research_unit_id": "CP01",
+            "active_moiety_key": "INCHIKEY:AAAAAAAAAAAAAA-BBBBBBBBBB-C",
+            "rationale": VALID_PERSPECTIVE_RATIONALES["direct_mechanism"],
+        },
+        "OBS_PHENOTYPE": {
+            "research_unit_id": "CP02",
+            "active_moiety_key": "INCHIKEY:AAAAAAAAAAAAAA-BBBBBBBBBB-C",
+            "rationale": VALID_PERSPECTIVE_RATIONALES["phenotype_reversal"],
+        },
+    }
+    errors = []
+    _validate_distinct_perspective_rationales(convergent, units, errors)
+    assert not errors, errors
+
+    shared_narrative = (
+        " Syntheticmol directly modulates the target process and reverses the disease phenotype signature "
+        "to normalise its biomarker pattern. Human-outcome bridge: This is linked to improved human clinical function."
+    )
+    duplicated = {
+        "OBS_DIRECT": {**convergent["OBS_DIRECT"], "rationale": (
+            "Lens route [direct_target_or_process_correction]:" + shared_narrative
+        )},
+        "OBS_PHENOTYPE": {**convergent["OBS_PHENOTYPE"], "rationale": (
+            "Lens route [phenotype_or_signature_reversal]:" + shared_narrative
+        )},
+    }
+    errors = []
+    _validate_distinct_perspective_rationales(duplicated, units, errors)
+    assert any("semantically duplicated" in error for error in errors), errors
 
 
 def exercise_ranking_caps() -> None:
@@ -276,7 +461,8 @@ def exercise_class_partition() -> None:
         "source_ids": [],
     }
     specifications = (
-        ("REP", "Repurposed", "repurposing_candidate", 60, 7),
+        ("REP", "Repurposed", "repurposing_candidate", 60, 70),
+        ("REP_LOW", "Repurposed lower readiness", "repurposing_candidate", 60, 50),
         ("BENCH", "Target asset", "target_disease_investigational", 80, 0),
         ("BASE", "Replacement", "supportive_standard_care", 85, 0),
         ("PRE", "Tool compound", "preclinical_hypothesis", 75, 0),
@@ -301,14 +487,16 @@ def exercise_class_partition() -> None:
             "audit_status": "independently_verified",
         })
     ranked = rank_rows(rows, source_rows, claim_rows, audit_rows)
-    assert [row["candidate_id"] for row in ranked] == ["REP", "BENCH", "BASE", "PRE"]
+    assert [row["candidate_id"] for row in ranked] == ["REP", "REP_LOW", "BENCH", "BASE", "PRE"]
     assert [row["rank_section"] for row in ranked] == [
+        "primary_repurposing",
         "primary_repurposing",
         "target_disease_benchmark",
         "baseline_care",
         "preclinical_hypothesis",
     ]
-    assert all(row["rank"] == 1 and row["endpoint_rank"] == 1 for row in ranked)
+    assert [row["rank"] for row in ranked] == [1, 2, 1, 1, 1]
+    assert [row["endpoint_rank"] for row in ranked] == [1, 2, 1, 1, 1]
 
 
 def exercise_candidate_isolation() -> None:
@@ -429,6 +617,113 @@ def exercise_source_provenance_union() -> None:
         assert source["supported_claim_ids"] == ["CL1", "CL2"]
 
 
+def exercise_frontier_budget_and_materiality() -> None:
+    searches = {
+        f"Q{index}": {"research_unit_id": "U1"}
+        for index in range(1, BRANCH_BUDGET_PER_UNIT + 1)
+    }
+    frontier = [
+        {
+            "branch_id": f"B{index}",
+            "branch_order": index,
+            "causal_route": f"Distinct causal route {index}",
+            "distinct_causal_route": True,
+            "human_or_candidate_relevance": True,
+            "already_covered": False,
+            "materiality_score": 51,
+            "decision": "expanded",
+            "query_ids": [f"Q{index}"],
+            "source_ids": [],
+            "rationale": "The route is distinct, relevant, material, and within budget.",
+        }
+        for index in range(1, BRANCH_BUDGET_PER_UNIT + 1)
+    ]
+    frontier.append({
+        "branch_id": "B_BUDGET",
+        "branch_order": BRANCH_BUDGET_PER_UNIT + 1,
+        "causal_route": "Additional material route",
+        "distinct_causal_route": True,
+        "human_or_candidate_relevance": True,
+        "already_covered": False,
+        "materiality_score": 100,
+        "decision": "closed_budget_exhausted",
+        "query_ids": [],
+        "source_ids": [],
+        "rationale": "The deterministic branch budget is exhausted.",
+    })
+    frontier.append({
+        "branch_id": "B_THRESHOLD",
+        "branch_order": BRANCH_BUDGET_PER_UNIT + 2,
+        "causal_route": "Threshold-boundary route",
+        "distinct_causal_route": True,
+        "human_or_candidate_relevance": True,
+        "already_covered": False,
+        "materiality_score": 50,
+        "decision": "closed_immaterial",
+        "query_ids": [],
+        "source_ids": [],
+        "rationale": "Materiality must exceed, not equal, the threshold.",
+    })
+    unit = {
+        "branch_budget": BRANCH_BUDGET_PER_UNIT,
+        "evidence_frontier": frontier,
+        "frontier_exhausted": True,
+    }
+    errors: list[str] = []
+    _validate_unit_frontier("U1", unit, searches, {}, errors)
+    assert not errors, errors
+    unit["evidence_frontier"][-2]["decision"] = "expanded"
+    errors = []
+    _validate_unit_frontier("U1", unit, searches, {}, errors)
+    assert any("closed_budget_exhausted" in error for error in errors), errors
+
+
+def exercise_not_yet_searched_gate() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "run"
+        initialize(root, {"human_disease": "synthetic disease"})
+        units = read_jsonl(root / "research_units.jsonl")
+        unit = next(row for row in units if row["perspective"] == "phenotype_reversal")
+        assert "lens_phenotype_reversal_evidence" in unit["planned_query_families"]
+        unit["status"] = "complete"
+        unit["worker_agent_id"] = "fixture-agent"
+        unit["closure_basis"] = "Fixture closure that must not override machine coverage."
+        unit["completed_query_families"] = list(unit["planned_query_families"])
+        unit["frontier_exhausted"] = True
+        write_jsonl(root / "research_units.jsonl", units)
+        errors = validate_run(root)
+        assert any("NOT_YET_SEARCHED" in error for error in errors), errors
+
+
+def exercise_bounded_retry_and_stale_detection() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "run"
+        initialize(root, {"human_gene": "GENE1"})
+        delays = []
+        for retry_number in range(1, 8):
+            action = next_action(root)
+            if action["action"] == "wait_for_retry":
+                plan = read_json(root / "execution_plan.json", {})
+                job = next(row for row in plan["jobs"] if row["job_id"] == action["job_id"])
+                job["retry_not_before"] = "2000-01-01T00:00:00+00:00"
+                write_json(root / "execution_plan.json", plan)
+                action = next_action(root)
+            attempt = start_job(root, action["job_id"], "retry-agent")
+            if retry_number == 1:
+                attempts = read_jsonl(root / "job_attempts.jsonl")
+                attempts[-1]["last_progress_at"] = "2000-01-01T00:00:00+00:00"
+                write_jsonl(root / "job_attempts.jsonl", attempts)
+                stale = next_action(root)
+                assert stale["stale_run_detected"] is True
+            failed = fail_job(root, action["job_id"], "tpm_exhaustion", None, "synthetic TPM limit")
+            if retry_number <= 6:
+                delays.append(failed["retry_delay_seconds"])
+            else:
+                assert failed["action"] == "blocked"
+            assert read_jsonl(root / "job_attempts.jsonl")[-1]["attempt_id"] == attempt["attempt_id"]
+        assert delays == [30, 60, 120, 240, 480, 900]
+
+
 def exercise_packet_and_legacy_guards() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary) / "run"
@@ -449,8 +744,8 @@ def exercise_packet_and_legacy_guards() -> None:
         initialize(root, {"human_gene": "GENE1"})
         state = read_json(root / "program_state.json", {})
         plan = read_json(root / "execution_plan.json", {})
-        state["schema_version"] = 4
-        plan["schema_version"] = 4
+        state["schema_version"] = SCHEMA_VERSION - 1
+        plan["schema_version"] = SCHEMA_VERSION - 1
         write_json(root / "program_state.json", state)
         write_json(root / "execution_plan.json", plan)
         before = (root / "program_state.json").read_bytes(), (root / "execution_plan.json").read_bytes()
@@ -462,6 +757,30 @@ def exercise_packet_and_legacy_guards() -> None:
             raise AssertionError("legacy run was mutated instead of rejected")
         after = (root / "program_state.json").read_bytes(), (root / "execution_plan.json").read_bytes()
         assert before == after
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "run"
+        initialize(root, {"human_gene": "GENE1"})
+        action = next_action(root)
+        attempt_id = "BE01.research.attempt001"
+        write_jsonl(root / "job_attempts.jsonl", [{
+            "attempt_id": attempt_id,
+            "job_id": action["job_id"],
+            "agent_id": "interrupted-start-agent",
+            "packet_hash": action["packet_hash"],
+            "packet_manifest_path": action["packet_manifest_path"],
+            "expected_result_path": f"staging/{attempt_id}/result.json",
+            "status": "running",
+            "started_at": "2026-07-18T12:00:00+00:00",
+            "last_progress_at": "2026-07-18T12:00:00+00:00",
+            "finished_at": "",
+            "failure_kind": "",
+            "retry_reason": "",
+        }])
+        resumed = next_action(root)
+        assert resumed["action"] == "resume_active_job" and resumed["attempt_id"] == attempt_id
+        duplicate = start_job(root, action["job_id"], "interrupted-start-agent")
+        assert duplicate["duplicate_start_prevented"] is True
 
 
 def exercise_research_overwrite_guard() -> None:
@@ -524,11 +843,16 @@ def exercise_invalid_stage_is_not_merged() -> None:
 
 def main() -> int:
     exercise_human_inputs()
+    exercise_perspective_contracts_and_packet_delivery()
+    exercise_perspective_rationale_validation_and_convergence()
     exercise_ranking_caps()
     exercise_class_partition()
     exercise_candidate_isolation()
     exercise_semantic_enum_rejection()
     exercise_source_provenance_union()
+    exercise_frontier_budget_and_materiality()
+    exercise_not_yet_searched_gate()
+    exercise_bounded_retry_and_stale_detection()
     exercise_packet_and_legacy_guards()
     exercise_research_overwrite_guard()
     exercise_invalid_stage_is_not_merged()

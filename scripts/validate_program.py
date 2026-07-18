@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Schema-v5 structural, provenance, scientific-audit, and runtime validation."""
+"""Schema-v6 structural, provenance, scientific-audit, and runtime validation."""
 
 from __future__ import annotations
 
@@ -10,29 +10,46 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from program_contract import (
+    ATTEMPT_REQUIRED_FIELDS,
+    ATTEMPT_STATUSES,
     AUDIT_QUERY_FAMILIES,
     AUDIT_VERDICTS,
+    BRANCH_BUDGET_PER_UNIT,
+    BRANCH_MATERIALITY_THRESHOLD,
     BROAD_DOMAINS,
     CALIBRATIONS,
     CANDIDATE_CLASSES,
     CLAIM_DIRECTIONS,
+    COMPLETION_STATES,
     COMPOUND_ORIGINS,
     COUNCIL_DISPOSITIONS,
+    FAILURE_KINDS,
+    FRONTIER_DECISIONS,
     GLOBAL_PERSPECTIVES,
     HUMAN_RELEVANCE_LEVELS,
     HUMAN_OUTCOME_NODE,
+    JOB_REQUIRED_FIELDS,
+    JOB_STATUSES,
     MAX_ACTIVE_JOBS,
     NESTED_SCHEMAS,
+    PERSPECTIVE_CONTRACTS,
+    PROGRAM_STATE_REQUIRED_FIELDS,
     RANKING_VERSION,
+    RETRY_DELAY_CAP_SECONDS,
+    RETRY_LIMIT,
+    SATURATION_QUERY_FAMILIES,
     SCHEMAS,
     SCHEMA_VERSION,
+    SEARCH_COVERAGE_STATUSES,
     SCIENTIFIC_AUDIT_STATUSES,
     SOURCE_ALLOWED_FIELDS,
     SOURCE_AGGREGATE_FIELDS,
     TARGET_ENDPOINT_TYPES,
+    TERMINAL_SEARCH_COVERAGE_STATUSES,
     allowed_ledgers,
     required_case_present,
     required_query_families,
+    search_idempotency_key,
 )
 from program_io import content_hash, file_hash, index_rows, inside, read_json, read_jsonl
 
@@ -155,6 +172,163 @@ def _schema_rows(ledgers: dict[str, list[dict[str, Any]]], errors: list[str]) ->
     return indexes
 
 
+def _coverage_by_family(
+    planned: set[str],
+    searches: list[dict[str, Any]],
+) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for family in sorted(planned):
+        outcomes = {
+            str(row.get("outcome")) for row in searches if str(row.get("query_family")) == family
+        }
+        result[family] = (
+            "FOUND" if "FOUND" in outcomes
+            else "NOT_FOUND_AFTER_EXHAUSTIVE_SEARCH"
+            if outcomes == {"NOT_FOUND_AFTER_EXHAUSTIVE_SEARCH"}
+            else "NOT_YET_SEARCHED"
+        )
+    return result
+
+
+def _expected_frontier_decision(branch: dict[str, Any], expanded_count: int, budget: int) -> str:
+    if branch.get("already_covered") is True or branch.get("distinct_causal_route") is not True:
+        return "closed_duplicate"
+    if branch.get("human_or_candidate_relevance") is not True:
+        return "closed_irrelevant"
+    score = branch.get("materiality_score")
+    if isinstance(score, bool) or not isinstance(score, int) or score <= BRANCH_MATERIALITY_THRESHOLD:
+        return "closed_immaterial"
+    return "expanded" if expanded_count < budget else "closed_budget_exhausted"
+
+
+def _validate_unit_frontier(
+    unit_id: str,
+    unit: dict[str, Any],
+    searches: dict[str, dict[str, Any]],
+    sources: dict[str, dict[str, Any]],
+    errors: list[str],
+) -> None:
+    budget = unit.get("branch_budget")
+    if budget != BRANCH_BUDGET_PER_UNIT:
+        errors.append(f"unit {unit_id}: branch_budget differs from the authoritative contract")
+        budget = BRANCH_BUDGET_PER_UNIT
+    frontier = unit.get("evidence_frontier")
+    if not isinstance(frontier, list):
+        errors.append(f"unit {unit_id}: evidence_frontier must be a list")
+        return
+    seen: set[str] = set()
+    expanded_count = 0
+    for position, branch in enumerate(frontier, 1):
+        label = f"unit {unit_id} frontier branch {position}"
+        if not isinstance(branch, dict) or set(branch) != set(NESTED_SCHEMAS["frontier_branch"]):
+            errors.append(f"{label}: fields do not match the frontier-branch schema")
+            continue
+        branch_id = str(branch.get("branch_id", "")).strip()
+        if not branch_id or branch_id in seen:
+            errors.append(f"{label}: branch_id must be nonempty and unique")
+        seen.add(branch_id)
+        if branch.get("branch_order") != position:
+            errors.append(f"{label}: branch_order must match deterministic list order")
+        if not str(branch.get("causal_route", "")).strip() or not str(branch.get("rationale", "")).strip():
+            errors.append(f"{label}: causal_route and rationale are required")
+        for field in ("distinct_causal_route", "human_or_candidate_relevance", "already_covered"):
+            if not isinstance(branch.get(field), bool):
+                errors.append(f"{label}: {field} must be boolean")
+        score = branch.get("materiality_score")
+        if isinstance(score, bool) or not isinstance(score, int) or not 0 <= score <= 100:
+            errors.append(f"{label}: materiality_score must be an integer from 0 to 100")
+        decision = str(branch.get("decision", ""))
+        if decision not in FRONTIER_DECISIONS:
+            errors.append(f"{label}: invalid frontier decision")
+        expected = _expected_frontier_decision(branch, expanded_count, int(budget))
+        if decision != expected:
+            errors.append(f"{label}: decision must be {expected} under the deterministic branch contract")
+        query_ids = [str(value) for value in _items(branch.get("query_ids"))]
+        source_ids = [str(value) for value in _items(branch.get("source_ids"))]
+        if not _unique(query_ids) or not _unique(source_ids):
+            errors.append(f"{label}: query_ids and source_ids must be unique")
+        if any(value not in searches or str(searches[value].get("research_unit_id")) != unit_id for value in query_ids):
+            errors.append(f"{label}: query_ids must resolve within the research unit")
+        if any(value not in sources for value in source_ids):
+            errors.append(f"{label}: source_ids must resolve")
+        if decision == "expanded":
+            if not query_ids:
+                errors.append(f"{label}: expanded branches require query_ids")
+            expanded_count += 1
+    if expanded_count > int(budget):
+        errors.append(f"unit {unit_id}: expanded branch count exceeds branch_budget")
+    if unit.get("frontier_exhausted") is not True:
+        errors.append(f"unit {unit_id}: completion requires frontier_exhausted=true")
+
+
+def _validate_research_units(
+    units: dict[str, dict[str, Any]],
+    searches_by_unit: dict[str, list[dict[str, Any]]],
+    searches: dict[str, dict[str, Any]],
+    sources: dict[str, dict[str, Any]],
+    errors: list[str],
+) -> None:
+    for unit_id, unit in units.items():
+        planned = set(str(value) for value in _items(unit.get("planned_query_families")))
+        try:
+            required = required_query_families(
+                str(unit.get("unit_type", "")),
+                str(unit.get("perspective", "")),
+            )
+        except ValueError as exc:
+            errors.append(f"unit {unit_id}: {exc}")
+            required = set()
+        if planned != required:
+            errors.append(f"unit {unit_id}: planned query families differ from the authoritative contract")
+        logged = {str(row.get("query_family")) for row in searches_by_unit.get(unit_id, [])}
+        recorded_coverage = unit.get("coverage_statuses")
+        if not isinstance(recorded_coverage, dict) or set(recorded_coverage) != planned:
+            errors.append(f"unit {unit_id}: coverage_statuses must cover every and only planned query family")
+            recorded_coverage = {}
+        elif any(value not in SEARCH_COVERAGE_STATUSES for value in recorded_coverage.values()):
+            errors.append(f"unit {unit_id}: coverage_statuses contains an invalid status")
+        if unit.get("status") == "complete":
+            if set(_items(unit.get("completed_query_families"))) != planned or logged != planned:
+                errors.append(f"unit {unit_id}: completed query coverage is incomplete")
+            derived_coverage = _coverage_by_family(planned, searches_by_unit.get(unit_id, []))
+            if recorded_coverage != derived_coverage:
+                errors.append(f"unit {unit_id}: recorded coverage differs from canonical searches")
+            if any(value not in TERMINAL_SEARCH_COVERAGE_STATUSES for value in derived_coverage.values()):
+                errors.append(f"unit {unit_id}: completion is prohibited while coverage remains NOT_YET_SEARCHED")
+            if not set(SATURATION_QUERY_FAMILIES.values()).issubset(planned):
+                errors.append(f"unit {unit_id}: saturation query families are not fully planned")
+            if set(_items(unit.get("search_ids"))) != {
+                str(row.get("query_id")) for row in searches_by_unit.get(unit_id, [])
+            }:
+                errors.append(f"unit {unit_id}: search_ids do not match canonical searches")
+            if _blank(unit.get("worker_agent_id")) or _blank(unit.get("closure_basis")):
+                errors.append(f"unit {unit_id}: completed unit lacks agent or closure basis")
+            unit_searches = searches_by_unit.get(unit_id, [])
+            if unit.get("unit_type") == "decisive_audit":
+                normalized_queries = [str(row.get("query", "")).strip().casefold() for row in unit_searches]
+                if len(normalized_queries) != len(set(normalized_queries)):
+                    errors.append(f"unit {unit_id}: independent-verification and counterevidence queries must differ")
+            exclusions = unit.get("candidate_exclusions")
+            if not isinstance(exclusions, list):
+                errors.append(f"unit {unit_id}: candidate_exclusions must be a list")
+            else:
+                for position, exclusion in enumerate(exclusions, 1):
+                    exclusion_label = f"unit {unit_id} candidate exclusion {position}"
+                    if not isinstance(exclusion, dict) or set(exclusion) != set(NESTED_SCHEMAS["candidate_exclusion"]):
+                        errors.append(f"{exclusion_label}: fields do not match the schema")
+                        continue
+                    if not str(exclusion.get("name", "")).strip() or not str(exclusion.get("reason", "")).strip():
+                        errors.append(f"{exclusion_label}: name and reason are required")
+                    source_ids = [str(value) for value in _items(exclusion.get("source_ids"))]
+                    if not source_ids or not _unique(source_ids) or any(value not in sources for value in source_ids):
+                        errors.append(f"{exclusion_label}: source_ids must be nonempty, unique, and resolve")
+            _validate_unit_frontier(unit_id, unit, searches, sources, errors)
+        elif unit.get("status") != "planned":
+            errors.append(f"unit {unit_id}: invalid status {unit.get('status')!r}")
+        elif recorded_coverage and any(value != "NOT_YET_SEARCHED" for value in recorded_coverage.values()):
+            errors.append(f"unit {unit_id}: planned unit coverage must remain NOT_YET_SEARCHED")
+
+
 def _validate_sources_and_searches(
     root: Path,
     indexes: dict[str, dict[str, dict[str, Any]]],
@@ -220,6 +394,7 @@ def _validate_sources_and_searches(
                 errors.append(f"{label}: supported claim {claim_id} lacks reverse source linkage")
 
     searches_by_unit: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    search_operation_keys: dict[str, str] = {}
     for query_id, query in searches.items():
         label = f"query {query_id}"
         unit_id = str(query.get("research_unit_id", ""))
@@ -235,8 +410,22 @@ def _validate_sources_and_searches(
             errors.append(f"{label}: origin_job_id does not match the unit")
         if str(query.get("executed_by_agent_id", "")) != str(origin.get("assigned_agent_id", "")):
             errors.append(f"{label}: executor does not match the controller assignment")
-        if query.get("outcome") != "completed" or query.get("pagination_complete") is not True:
-            errors.append(f"{label}: search or pagination is incomplete")
+        outcome = str(query.get("outcome", ""))
+        if outcome not in TERMINAL_SEARCH_COVERAGE_STATUSES or query.get("pagination_complete") is not True:
+            errors.append(f"{label}: search coverage or pagination is incomplete")
+        expected_operation_key = search_idempotency_key(
+            unit_id,
+            str(query.get("query_family", "")),
+            str(query.get("resource", "")),
+            str(query.get("query", "")),
+        )
+        operation_key = str(query.get("idempotency_key", ""))
+        if operation_key != expected_operation_key:
+            errors.append(f"{label}: idempotency_key does not match the normalized search operation")
+        elif operation_key in search_operation_keys:
+            errors.append(f"{label}: duplicates search operation {search_operation_keys[operation_key]}")
+        else:
+            search_operation_keys[operation_key] = query_id
         if not isinstance(query.get("result_count"), int) or not isinstance(query.get("screened_count"), int):
             errors.append(f"{label}: result and screened counts must be integers")
 
@@ -278,6 +467,10 @@ def _validate_sources_and_searches(
             errors.append(f"{label}: source ID lists must be unique")
         if not set(retained).issubset(verified) or not set(verified).issubset(acquired):
             errors.append(f"{label}: retained must be verified and verified must be acquired")
+        if outcome == "FOUND" and not retained:
+            errors.append(f"{label}: FOUND coverage requires a retained verified source")
+        if outcome == "NOT_FOUND_AFTER_EXHAUSTIVE_SEARCH" and retained:
+            errors.append(f"{label}: NOT_FOUND_AFTER_EXHAUSTIVE_SEARCH cannot retain a source")
         receipt_ids = {str(row.get("canonical_identifier", "")).casefold() for row in records}
         for source_id in acquired:
             source = sources.get(source_id)
@@ -305,40 +498,7 @@ def _validate_sources_and_searches(
         ):
             errors.append(f"{label}: decisive audit must retrieve evidence independently of its packet")
 
-    for unit_id, unit in units.items():
-        planned = set(str(value) for value in _items(unit.get("planned_query_families")))
-        required = required_query_families(str(unit.get("unit_type", "")))
-        if planned != required:
-            errors.append(f"unit {unit_id}: planned query families differ from the authoritative contract")
-        logged = {str(row.get("query_family")) for row in searches_by_unit.get(unit_id, [])}
-        if unit.get("status") == "complete":
-            if set(_items(unit.get("completed_query_families"))) != planned or logged != planned:
-                errors.append(f"unit {unit_id}: completed query coverage is incomplete")
-            if set(_items(unit.get("search_ids"))) != {str(row.get("query_id")) for row in searches_by_unit.get(unit_id, [])}:
-                errors.append(f"unit {unit_id}: search_ids do not match canonical searches")
-            if _blank(unit.get("worker_agent_id")) or _blank(unit.get("closure_basis")):
-                errors.append(f"unit {unit_id}: completed unit lacks agent or closure basis")
-            unit_searches = searches_by_unit.get(unit_id, [])
-            if unit.get("unit_type") == "decisive_audit":
-                normalized_queries = [str(row.get("query", "")).strip().casefold() for row in unit_searches]
-                if len(normalized_queries) != len(set(normalized_queries)):
-                    errors.append(f"unit {unit_id}: independent-verification and counterevidence queries must differ")
-            exclusions = unit.get("candidate_exclusions")
-            if not isinstance(exclusions, list):
-                errors.append(f"unit {unit_id}: candidate_exclusions must be a list")
-            else:
-                for position, exclusion in enumerate(exclusions, 1):
-                    exclusion_label = f"unit {unit_id} candidate exclusion {position}"
-                    if not isinstance(exclusion, dict) or set(exclusion) != set(NESTED_SCHEMAS["candidate_exclusion"]):
-                        errors.append(f"{exclusion_label}: fields do not match the schema")
-                        continue
-                    if not str(exclusion.get("name", "")).strip() or not str(exclusion.get("reason", "")).strip():
-                        errors.append(f"{exclusion_label}: name and reason are required")
-                    source_ids = [str(value) for value in _items(exclusion.get("source_ids"))]
-                    if not source_ids or not _unique(source_ids) or any(value not in sources for value in source_ids):
-                        errors.append(f"{exclusion_label}: source_ids must be nonempty, unique, and resolve")
-        elif unit.get("status") != "planned":
-            errors.append(f"unit {unit_id}: invalid status {unit.get('status')!r}")
+    _validate_research_units(units, searches_by_unit, searches, sources, errors)
 
 
 def _validate_evidence(indexes: dict[str, dict[str, dict[str, Any]]], errors: list[str]) -> None:
@@ -384,10 +544,130 @@ def _validate_evidence(indexes: dict[str, dict[str, dict[str, Any]]], errors: li
                     errors.append(f"edge {edge_id}: invalid {field} reference {related}")
 
 
-def _validate_compounds(
+def _validate_compound_identity(
+    label: str,
+    row: dict[str, Any],
+    sources: dict[str, dict[str, Any]],
+    errors: list[str],
+) -> str:
+    key = str(row.get("structure_identity_key", "")).upper()
+    if not STRUCTURE_KEY.fullmatch(key):
+        errors.append(f"{label}: invalid structure_identity_key")
+    if str(row.get("chemical_node_id", "")) != f"CHEM:{key}":
+        errors.append(f"{label}: chemical_node_id does not match the structure key")
+    registry = row.get("registry_identifiers")
+    if not isinstance(registry, dict) or str(row.get("canonical_identifier")) not in {
+        str(value) for value in registry.values()
+    }:
+        errors.append(f"{label}: canonical identifier is absent from registry_identifiers")
+    for source_id in _items(row.get("identity_source_ids")):
+        source = sources.get(str(source_id))
+        if not source:
+            errors.append(f"{label}: unknown identity source {source_id}")
+        elif (
+            not all(source.get(field) is True for field in ("metadata_verified", "original_acquired", "content_verified"))
+            or source.get("screen_decision") != "include"
+        ):
+            errors.append(f"{label}: identity source {source_id} is not verified")
+    return key
+
+
+def _validate_evidence_source_ids(
+    label: str,
+    values: Any,
+    sources: dict[str, dict[str, Any]],
+    errors: list[str],
+) -> list[str]:
+    source_ids = [str(value) for value in _items(values)]
+    if not source_ids or not _unique(source_ids):
+        errors.append(f"{label}: source IDs must be nonempty and unique")
+    for source_id in source_ids:
+        source = sources.get(source_id)
+        if not source:
+            errors.append(f"{label}: unknown source {source_id}")
+        elif source.get("content_verified") is not True or source.get("screen_decision") != "include":
+            errors.append(f"{label}: source {source_id} must be content-verified and included")
+    return source_ids
+
+
+def _normalized_lens_narrative(rationale: Any) -> str:
+    text = re.sub(
+        r"^\s*lens\s+route\s*\[[a-z0-9_]+\]\s*:\s*",
+        "",
+        str(rationale),
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    return " ".join(re.findall(r"[a-z0-9]+", text.casefold()))
+
+
+def _validate_perspective_rationale(
+    label: str,
+    perspective: str,
+    rationale: Any,
+    errors: list[str],
+) -> None:
+    contract = PERSPECTIVE_CONTRACTS.get(perspective)
+    if contract is None:
+        errors.append(f"{label}: unknown compound perspective {perspective!r}")
+        return
+    rationale_contract = contract["required_lens_specific_rationale"]
+    text = str(rationale).strip()
+    route_marker = str(rationale_contract["route_marker"])
+    outcome_marker = str(rationale_contract["human_outcome_marker"])
+    if not text.casefold().startswith(route_marker.casefold()):
+        errors.append(
+            f"{label}: rationale must start with the {perspective} route marker {route_marker!r}"
+        )
+        return
+    marker_position = text.casefold().find(outcome_marker.casefold(), len(route_marker))
+    if marker_position < 0:
+        errors.append(f"{label}: rationale requires an explicit {outcome_marker!r}")
+        return
+    route_text = text[len(route_marker):marker_position].strip()
+    outcome_text = text[marker_position + len(outcome_marker):].strip()
+    if len(re.findall(r"[A-Za-z0-9]+", route_text)) < 6:
+        errors.append(f"{label}: lens route is too generic to establish the {perspective} causal pattern")
+    if len(re.findall(r"[A-Za-z0-9]+", outcome_text)) < 5 or not any(
+        term in outcome_text.casefold()
+        for term in ("human", "patient", "clinical", "therapeutic", "disease", "symptom", "function")
+    ):
+        errors.append(f"{label}: human-outcome bridge is missing a specific human therapeutic endpoint link")
+    normalized_route = " ".join(route_text.casefold().split())
+    for group in rationale_contract["route_term_groups"]:
+        if not any(str(term).casefold() in normalized_route for term in group):
+            errors.append(
+                f"{label}: rationale does not demonstrate the {perspective} route; "
+                f"expected one of {list(group)}"
+            )
+
+
+def _validate_distinct_perspective_rationales(
+    observations: dict[str, dict[str, Any]],
+    units: dict[str, dict[str, Any]],
+    errors: list[str],
+) -> None:
+    seen: dict[tuple[str, str], tuple[str, str]] = {}
+    for observation_id, observation in observations.items():
+        unit = units.get(str(observation.get("research_unit_id", "")), {})
+        perspective = str(unit.get("perspective", ""))
+        if perspective not in PERSPECTIVE_CONTRACTS:
+            continue
+        moiety = str(observation.get("active_moiety_key", "")).upper()
+        narrative = _normalized_lens_narrative(observation.get("rationale", ""))
+        key = (moiety, narrative)
+        prior = seen.get(key)
+        if prior and prior[1] != perspective:
+            errors.append(
+                f"observation {observation_id}: lens rationale is semantically duplicated from "
+                f"{prior[0]} after route-marker normalization; convergent perspectives require distinct routes"
+            )
+        else:
+            seen[key] = (observation_id, perspective)
+
+
+def _validate_observation_records(
     indexes: dict[str, dict[str, dict[str, Any]]],
-    *,
-    final: bool,
     errors: list[str],
 ) -> None:
     sources = indexes["source_corpus.jsonl"]
@@ -396,57 +676,39 @@ def _validate_compounds(
     edges = indexes["evidence_graph.jsonl"]
     units = indexes["research_units.jsonl"]
     observations = indexes["candidate_observations.jsonl"]
-    candidates = indexes["candidate_records.jsonl"]
-    audits = indexes["audit_records.jsonl"]
-
-    def validate_identity(label: str, row: dict[str, Any]) -> str:
-        key = str(row.get("structure_identity_key", "")).upper()
-        if not STRUCTURE_KEY.fullmatch(key):
-            errors.append(f"{label}: invalid structure_identity_key")
-        if str(row.get("chemical_node_id", "")) != f"CHEM:{key}":
-            errors.append(f"{label}: chemical_node_id does not match the structure key")
-        registry = row.get("registry_identifiers")
-        if not isinstance(registry, dict) or str(row.get("canonical_identifier")) not in {str(value) for value in registry.values()}:
-            errors.append(f"{label}: canonical identifier is absent from registry_identifiers")
-        for source_id in _items(row.get("identity_source_ids")):
-            source = sources.get(str(source_id))
-            if not source:
-                errors.append(f"{label}: unknown identity source {source_id}")
-            elif (
-                not all(source.get(field) is True for field in ("metadata_verified", "original_acquired", "content_verified"))
-                or source.get("screen_decision") != "include"
-            ):
-                errors.append(f"{label}: identity source {source_id} is not verified")
-        return key
-
-    def validate_evidence_sources(label: str, values: Any) -> list[str]:
-        source_ids = [str(value) for value in _items(values)]
-        if not source_ids or not _unique(source_ids):
-            errors.append(f"{label}: source IDs must be nonempty and unique")
-        for source_id in source_ids:
-            source = sources.get(source_id)
-            if not source:
-                errors.append(f"{label}: unknown source {source_id}")
-            elif source.get("content_verified") is not True or source.get("screen_decision") != "include":
-                errors.append(f"{label}: source {source_id} must be content-verified and included")
-        return source_ids
-
     for observation_id, observation in observations.items():
         label = f"observation {observation_id}"
-        key = validate_identity(label, observation)
+        _validate_compound_identity(label, observation, sources, errors)
         active_moiety_key = str(observation.get("active_moiety_key", "")).upper()
         if not STRUCTURE_KEY.fullmatch(active_moiety_key):
             errors.append(f"{label}: invalid active_moiety_key")
-        validate_evidence_sources(f"{label} active moiety", observation.get("active_moiety_source_ids"))
+        _validate_evidence_source_ids(f"{label} active moiety", observation.get("active_moiety_source_ids"), sources, errors)
         if not str(observation.get("active_moiety_rationale", "")).strip():
             errors.append(f"{label}: active_moiety_rationale is required")
         unit = units.get(str(observation.get("research_unit_id", "")))
         if not unit or unit.get("unit_type") != "compound_perspective":
             errors.append(f"{label}: observation does not belong to a compound perspective")
+        else:
+            _validate_perspective_rationale(
+                label,
+                str(unit.get("perspective", "")),
+                observation.get("rationale", ""),
+                errors,
+            )
         for field, mapping in (("claim_ids", claims), ("edge_ids", edges), ("rationale_source_ids", sources)):
             for value in _items(observation.get(field)):
                 if str(value) not in mapping:
                     errors.append(f"{label}: unknown {field} value {value}")
+        rationale_source_ids = _validate_evidence_source_ids(
+            f"{label} rationale", observation.get("rationale_source_ids"), sources, errors
+        )
+        claim_source_ids = {
+            str(source_id)
+            for claim_id in _items(observation.get("claim_ids"))
+            for source_id in _items(claims.get(str(claim_id), {}).get("source_ids"))
+        }
+        if not set(rationale_source_ids).issubset(claim_source_ids):
+            errors.append(f"{label}: lens-rationale sources must be linked through its emitted claims")
         emitted = any(
             observation_id in {str(value) for value in _items(query.get("produced_observation_ids"))}
             for query in searches.values()
@@ -454,6 +716,81 @@ def _validate_compounds(
         )
         if not emitted:
             errors.append(f"{label}: no source-unit search emitted the observation")
+    _validate_distinct_perspective_rationales(observations, units, errors)
+
+
+def _validate_candidate_paths(
+    label: str,
+    candidate: dict[str, Any],
+    formulation_structures: set[str],
+    endpoint_label: str,
+    claims: dict[str, dict[str, Any]],
+    edges: dict[str, dict[str, Any]],
+    final: bool,
+    errors: list[str],
+) -> tuple[set[str], bool]:
+    path_claims: set[str] = set()
+    ambiguous_path = False
+    paths = _items(candidate.get("causal_paths"))
+    if not paths:
+        errors.append(f"{label}: at least one human therapeutic path is required")
+    for path_number, path in enumerate(paths, 1):
+        if not isinstance(path, dict):
+            errors.append(f"{label} path {path_number}: expected an object")
+            continue
+        required = set(NESTED_SCHEMAS["causal_path"])
+        if set(path) != required:
+            errors.append(f"{label} path {path_number}: fields must exactly match the causal-path schema")
+            continue
+        edge_ids = [str(value) for value in _items(path.get("edge_ids"))]
+        claim_ids = {str(value) for value in _items(path.get("claim_ids"))}
+        concrete = [edges.get(value) for value in edge_ids]
+        if not edge_ids or any(edge is None for edge in concrete):
+            errors.append(f"{label} path {path_number}: graph edges must resolve")
+            continue
+        graph = [edge for edge in concrete if edge]
+        ambiguous_path = ambiguous_path or any(edge.get("directionality") == "ambiguous" for edge in graph)
+        allowed_start_nodes = {f"CHEM:{value}" for value in formulation_structures}
+        path_start = str(path.get("start_node"))
+        if path_start not in allowed_start_nodes or str(graph[0].get("from_node")) != path_start:
+            errors.append(f"{label} path {path_number}: path must start at one retained formulation structure")
+        if str(path.get("end_node")) != HUMAN_OUTCOME_NODE or graph[-1].get("to_node") != HUMAN_OUTCOME_NODE:
+            errors.append(f"{label} path {path_number}: path must end at the human therapeutic outcome")
+        if path.get("expected_direction") != "therapeutic_benefit":
+            errors.append(f"{label} path {path_number}: expected_direction must be therapeutic_benefit")
+        if str(path.get("target_endpoint", "")).strip() != endpoint_label:
+            errors.append(f"{label} path {path_number}: target_endpoint must match the candidate endpoint")
+        if any(left.get("to_node") != right.get("from_node") for left, right in zip(graph, graph[1:])):
+            errors.append(f"{label} path {path_number}: graph edges are disconnected")
+        if any(edge.get("directionality") == "opposes_benefit" for edge in graph):
+            errors.append(f"{label} path {path_number}: path contains an opposing edge")
+        if final and any(edge.get("audit_status") == "unreviewed" for edge in graph):
+            errors.append(f"{label} path {path_number}: decisive graph edge remains unreviewed")
+        if not claim_ids or any(value not in claims for value in claim_ids):
+            errors.append(f"{label} path {path_number}: claim_ids must resolve")
+        if any(not set(str(value) for value in _items(edge.get("claim_ids"))).intersection(claim_ids) for edge in graph):
+            errors.append(f"{label} path {path_number}: every edge needs a path claim")
+        graph_claim_ids = {str(value) for edge in graph for value in _items(edge.get("claim_ids"))}
+        if not claim_ids.issubset(graph_claim_ids):
+            errors.append(f"{label} path {path_number}: every path claim must belong to a path edge")
+        path_claims.update(claim_ids)
+    return path_claims, ambiguous_path
+
+
+def _validate_compounds(
+    indexes: dict[str, dict[str, dict[str, Any]]],
+    *,
+    final: bool,
+    errors: list[str],
+) -> None:
+    sources = indexes["source_corpus.jsonl"]
+    claims = indexes["claim_ledger.jsonl"]
+    edges = indexes["evidence_graph.jsonl"]
+    units = indexes["research_units.jsonl"]
+    observations = indexes["candidate_observations.jsonl"]
+    candidates = indexes["candidate_records.jsonl"]
+    audits = indexes["audit_records.jsonl"]
+    _validate_observation_records(indexes, errors)
     candidate_moieties: dict[str, str] = {}
     audits_by_claim: dict[str, dict[str, Any]] = {}
     for row in audits.values():
@@ -465,15 +802,15 @@ def _validate_compounds(
         audits_by_claim[claim_id] = row
     for candidate_id, candidate in candidates.items():
         label = f"candidate {candidate_id}"
-        key = validate_identity(label, candidate)
+        key = _validate_compound_identity(label, candidate, sources, errors)
         active_moiety_key = str(candidate.get("active_moiety_key", "")).upper()
         if not STRUCTURE_KEY.fullmatch(active_moiety_key):
             errors.append(f"{label}: invalid active_moiety_key")
         if active_moiety_key in candidate_moieties:
             errors.append(f"{label}: duplicate active moiety with {candidate_moieties[active_moiety_key]}")
         candidate_moieties[active_moiety_key] = candidate_id
-        candidate_moiety_sources = validate_evidence_sources(
-            f"{label} active moiety", candidate.get("active_moiety_source_ids")
+        candidate_moiety_sources = _validate_evidence_source_ids(
+            f"{label} active moiety", candidate.get("active_moiety_source_ids"), sources, errors
         )
         if not str(candidate.get("active_moiety_rationale", "")).strip():
             errors.append(f"{label}: active_moiety_rationale is required")
@@ -515,14 +852,24 @@ def _validate_compounds(
         observed_units = {str(observations[value].get("research_unit_id")) for value in observation_ids if value in observations}
         if source_units != observed_units:
             errors.append(f"{label}: source_research_unit_ids do not match merged observations")
-        validate_evidence_sources(f"{label} rationale", candidate.get("rationale_source_ids"))
+        if any(
+            units.get(unit_id, {}).get("perspective") == "natural_compounds"
+            for unit_id in observed_units
+        ) and candidate.get("compound_origin") not in {"natural_product", "endogenous_or_nutrient"}:
+            errors.append(
+                f"{label}: an observation from natural_compounds requires a verified natural-product, "
+                "endogenous, or nutrient origin"
+            )
+        _validate_evidence_source_ids(f"{label} rationale", candidate.get("rationale_source_ids"), sources, errors)
         if str(candidate.get("human_outcome")) != HUMAN_OUTCOME_NODE:
             errors.append(f"{label}: human_outcome must be {HUMAN_OUTCOME_NODE}")
         if candidate.get("candidate_class") not in CANDIDATE_CLASSES:
             errors.append(f"{label}: invalid candidate_class")
         if candidate.get("compound_origin") not in COMPOUND_ORIGINS:
             errors.append(f"{label}: invalid compound_origin")
-        validate_evidence_sources(f"{label} candidate class", candidate.get("candidate_class_source_ids"))
+        _validate_evidence_source_ids(
+            f"{label} candidate class", candidate.get("candidate_class_source_ids"), sources, errors
+        )
         target_endpoint = candidate.get("target_endpoint")
         endpoint_label = ""
         endpoint_claim_ids: set[str] = set()
@@ -540,69 +887,41 @@ def _validate_compounds(
                 or any(value not in claims for value in endpoint_claim_ids)
             ):
                 errors.append(f"{label}: target endpoint claim_ids must be nonempty, unique, and resolve")
-            validate_evidence_sources(f"{label} target endpoint", target_endpoint.get("source_ids"))
+            _validate_evidence_source_ids(
+                f"{label} target endpoint", target_endpoint.get("source_ids"), sources, errors
+            )
         readiness = candidate.get("repurposing_readiness")
         if isinstance(readiness, dict):
-            validate_evidence_sources(f"{label} repurposing readiness", readiness.get("source_ids"))
+            _validate_evidence_source_ids(
+                f"{label} repurposing readiness", readiness.get("source_ids"), sources, errors
+            )
         for collection_name in ("score_components", "cap_assessments"):
             collection = candidate.get(collection_name)
             if isinstance(collection, dict):
                 for assessment_name, assessment in collection.items():
                     if isinstance(assessment, dict):
-                        validate_evidence_sources(
-                            f"{label} {collection_name} {assessment_name}", assessment.get("source_ids")
+                        _validate_evidence_source_ids(
+                            f"{label} {collection_name} {assessment_name}",
+                            assessment.get("source_ids"),
+                            sources,
+                            errors,
                         )
         model_suitability = candidate.get("experimental_model_suitability")
         if isinstance(model_suitability, dict) and model_suitability.get("assessed") is True:
-            validate_evidence_sources(f"{label} model suitability", model_suitability.get("source_ids"))
+            _validate_evidence_source_ids(
+                f"{label} model suitability", model_suitability.get("source_ids"), sources, errors
+            )
 
-        path_claims: set[str] = set()
-        ambiguous_path = False
-        paths = _items(candidate.get("causal_paths"))
-        if not paths:
-            errors.append(f"{label}: at least one human therapeutic path is required")
-        for path_number, path in enumerate(paths, 1):
-            if not isinstance(path, dict):
-                errors.append(f"{label} path {path_number}: expected an object")
-                continue
-            required = set(NESTED_SCHEMAS["causal_path"])
-            if set(path) != required:
-                errors.append(f"{label} path {path_number}: fields must exactly match the causal-path schema")
-                continue
-            edge_ids = [str(value) for value in _items(path.get("edge_ids"))]
-            claim_ids = {str(value) for value in _items(path.get("claim_ids"))}
-            concrete = [edges.get(value) for value in edge_ids]
-            if not edge_ids or any(edge is None for edge in concrete):
-                errors.append(f"{label} path {path_number}: graph edges must resolve")
-                continue
-            graph = [edge for edge in concrete if edge]
-            ambiguous_path = ambiguous_path or any(edge.get("directionality") == "ambiguous" for edge in graph)
-            allowed_start_nodes = {f"CHEM:{value}" for value in formulation_structures}
-            path_start = str(path.get("start_node"))
-            if path_start not in allowed_start_nodes or str(graph[0].get("from_node")) != path_start:
-                errors.append(f"{label} path {path_number}: path must start at one retained formulation structure")
-            if str(path.get("end_node")) != HUMAN_OUTCOME_NODE or graph[-1].get("to_node") != HUMAN_OUTCOME_NODE:
-                errors.append(f"{label} path {path_number}: path must end at the human therapeutic outcome")
-            if path.get("expected_direction") != "therapeutic_benefit":
-                errors.append(f"{label} path {path_number}: expected_direction must be therapeutic_benefit")
-            if str(path.get("target_endpoint", "")).strip() != endpoint_label:
-                errors.append(f"{label} path {path_number}: target_endpoint must match the candidate endpoint")
-            if any(left.get("to_node") != right.get("from_node") for left, right in zip(graph, graph[1:])):
-                errors.append(f"{label} path {path_number}: graph edges are disconnected")
-            if any(edge.get("directionality") == "opposes_benefit" for edge in graph):
-                errors.append(f"{label} path {path_number}: path contains an opposing edge")
-            if final and any(edge.get("audit_status") == "unreviewed" for edge in graph):
-                errors.append(f"{label} path {path_number}: decisive graph edge remains unreviewed")
-            if not claim_ids or any(value not in claims for value in claim_ids):
-                errors.append(f"{label} path {path_number}: claim_ids must resolve")
-            if any(not set(str(value) for value in _items(edge.get("claim_ids"))).intersection(claim_ids) for edge in graph):
-                errors.append(f"{label} path {path_number}: every edge needs a path claim")
-            graph_claim_ids = {
-                str(value) for edge in graph for value in _items(edge.get("claim_ids"))
-            }
-            if not claim_ids.issubset(graph_claim_ids):
-                errors.append(f"{label} path {path_number}: every path claim must belong to a path edge")
-            path_claims.update(claim_ids)
+        path_claims, ambiguous_path = _validate_candidate_paths(
+            label,
+            candidate,
+            formulation_structures,
+            endpoint_label,
+            claims,
+            edges,
+            final,
+            errors,
+        )
         decisive = {str(value) for value in _items(candidate.get("decisive_claim_ids"))}
         if decisive != path_claims:
             errors.append(f"{label}: decisive_claim_ids must exactly cover all path claims")
@@ -814,6 +1133,49 @@ def _validate_council_records(
             errors.append(f"council {candidate_id}: disposition conflicts with candidate_class")
 
 
+def _validate_runtime_contracts(
+    state: dict[str, Any],
+    jobs: list[dict[str, Any]],
+    attempts: list[dict[str, Any]],
+    errors: list[str],
+) -> None:
+    if set(state) != set(PROGRAM_STATE_REQUIRED_FIELDS):
+        errors.append("program_state fields differ from the authoritative runtime contract")
+    for job in jobs:
+        job_id = str(job.get("job_id", "<missing>"))
+        if set(job) != set(JOB_REQUIRED_FIELDS):
+            errors.append(f"job {job_id}: fields differ from the authoritative runtime contract")
+        if job.get("status") not in JOB_STATUSES:
+            errors.append(f"job {job_id}: invalid status")
+        if job.get("completion_state") not in COMPLETION_STATES:
+            errors.append(f"job {job_id}: invalid completion_state")
+        retry_count = job.get("retry_count")
+        retry_limit = job.get("retry_limit")
+        retry_delay = job.get("retry_delay_seconds")
+        if (
+            isinstance(retry_count, bool) or not isinstance(retry_count, int) or retry_count < 0
+            or retry_limit != RETRY_LIMIT
+            or isinstance(retry_delay, bool) or not isinstance(retry_delay, int)
+            or not 0 <= retry_delay <= RETRY_DELAY_CAP_SECONDS
+        ):
+            errors.append(f"job {job_id}: retry state differs from the bounded retry contract")
+        if isinstance(retry_count, int) and retry_count > 0 and not str(job.get("retry_reason", "")).strip():
+            errors.append(f"job {job_id}: persisted retry reason is missing")
+        if job.get("status") == "complete" and job.get("completion_state") != "committed":
+            errors.append(f"job {job_id}: completed job lacks a committed completion checkpoint")
+    for attempt in attempts:
+        attempt_id = str(attempt.get("attempt_id", "<missing>"))
+        if set(attempt) != set(ATTEMPT_REQUIRED_FIELDS):
+            errors.append(f"attempt {attempt_id}: fields differ from the authoritative runtime contract")
+        if attempt.get("status") not in ATTEMPT_STATUSES:
+            errors.append(f"attempt {attempt_id}: invalid status")
+        failure_kind = str(attempt.get("failure_kind", ""))
+        if failure_kind and failure_kind not in FAILURE_KINDS:
+            errors.append(f"attempt {attempt_id}: invalid failure_kind")
+        if attempt.get("status") in {"failed", "orphaned"} and not str(attempt.get("retry_reason", "")).strip():
+            errors.append(f"attempt {attempt_id}: interrupted or failed attempt lacks a persisted reason")
+
+
 def _validate_final_runtime(
     root: Path,
     state: dict[str, Any],
@@ -828,6 +1190,8 @@ def _validate_final_runtime(
         errors.append("runtime max_active_jobs must be 1")
     if state.get("active_job_id") or state.get("active_attempt_id"):
         errors.append("no job may remain active at finalization")
+    if state.get("interrupted_run_detected") or state.get("stale_run_detected"):
+        errors.append("runtime interruption or stale-run flags must be clear at finalization")
     if state.get("blocked_reason"):
         errors.append("blocked_reason must be empty at finalization")
     if state.get("current_phase") != "ready_for_finalization":
@@ -836,6 +1200,7 @@ def _validate_final_runtime(
     if not isinstance(jobs, list) or not jobs:
         errors.append("execution plan must contain jobs")
         return
+    _validate_runtime_contracts(state, jobs, attempts, errors)
     job_by_id = index_rows(jobs, "job_id")
     assigned = [str(job.get("assigned_agent_id")) for job in jobs if job.get("assigned_agent_id")]
     if len(assigned) != len(set(assigned)):
@@ -856,6 +1221,16 @@ def _validate_final_runtime(
         result_path = _resolve_file(root, job.get("result_path"), f"job {job_id} result", errors)
         if result_path and str(job.get("result_hash")) != file_hash(result_path):
             errors.append(f"job {job_id}: result hash mismatch")
+        if (
+            job.get("completion_state") == "committed"
+            and (
+                job.get("validated_result_path") != job.get("result_path")
+                or job.get("validated_result_hash") != job.get("result_hash")
+                or not job.get("commit_started_at")
+                or not job.get("completed_at")
+            )
+        ):
+            errors.append(f"job {job_id}: committed validation and completion checkpoints disagree")
         if manifest_path:
             manifest = read_json(manifest_path, {})
             body = {key: value for key, value in manifest.items() if key != "packet_hash"}
@@ -952,26 +1327,12 @@ def validate_ledgers(
     return errors
 
 
-def validate_staged_result(
-    run_folder: str | Path,
+def _validate_update_permissions(
     job: dict[str, Any],
-    result: dict[str, Any],
-    active_agent_id: str,
-) -> list[str]:
-    root = Path(run_folder).expanduser().resolve()
-    errors: list[str] = []
-    updates = result.get("ledger_updates")
-    if not isinstance(updates, dict):
-        return ["ledger_updates must be an object"]
-    permitted = allowed_ledgers(str(job.get("kind", "")))
-    unknown = set(updates) - permitted
-    if unknown:
-        errors.append(f"job {job.get('job_id')}: unapproved ledgers {sorted(unknown)}")
-    ledgers = _load_ledgers(root, errors)
-    original_indexes = {
-        filename: index_rows(rows, SCHEMAS[filename]["key"])
-        for filename, rows in ledgers.items()
-    }
+    updates: dict[str, Any],
+    original_indexes: dict[str, dict[str, dict[str, Any]]],
+    errors: list[str],
+) -> None:
     if job.get("kind") == "research":
         for filename in (
             "search_log.jsonl", "claim_ledger.jsonl", "evidence_graph.jsonl",
@@ -994,6 +1355,7 @@ def validate_staged_result(
         }
         if changed:
             errors.append(f"source {source_id}: rediscovery may not change fields {sorted(changed)}")
+
     if job.get("kind") == "decisive_audit":
         for filename, mutable_fields in AUDIT_MUTABLE_FIELDS.items():
             key = SCHEMAS[filename]["key"]
@@ -1065,6 +1427,13 @@ def validate_staged_result(
             }
             if changed:
                 errors.append(f"observation {observation_id}: merge may not change fields {sorted(changed)}")
+
+
+def _apply_staged_updates(
+    ledgers: dict[str, list[dict[str, Any]]],
+    updates: dict[str, Any],
+    errors: list[str],
+) -> None:
     for filename, rows in updates.items():
         if filename not in SCHEMAS:
             continue
@@ -1087,6 +1456,30 @@ def validate_staged_result(
                 else:
                     merged[identity] = row
         ledgers[filename] = list(merged.values())
+
+
+def validate_staged_result(
+    run_folder: str | Path,
+    job: dict[str, Any],
+    result: dict[str, Any],
+    active_agent_id: str,
+) -> list[str]:
+    root = Path(run_folder).expanduser().resolve()
+    errors: list[str] = []
+    updates = result.get("ledger_updates")
+    if not isinstance(updates, dict):
+        return ["ledger_updates must be an object"]
+    permitted = allowed_ledgers(str(job.get("kind", "")))
+    unknown = set(updates) - permitted
+    if unknown:
+        errors.append(f"job {job.get('job_id')}: unapproved ledgers {sorted(unknown)}")
+    ledgers = _load_ledgers(root, errors)
+    original_indexes = {
+        filename: index_rows(rows, SCHEMAS[filename]["key"])
+        for filename, rows in ledgers.items()
+    }
+    _validate_update_permissions(job, updates, original_indexes, errors)
+    _apply_staged_updates(ledgers, updates, errors)
     errors.extend(validate_ledgers(root, ledgers, read_json(root / "execution_plan.json", {}), final=False))
 
     for query in updates.get("search_log.jsonl", []):
@@ -1123,6 +1516,19 @@ def validate_staged_result(
         unit = next(
             (row for row in ledgers["research_units.jsonl"] if str(row.get("unit_id")) == str(job.get("unit_id"))),
             {},
+        )
+        staged_unit = dict(unit)
+        staged_unit.update(
+            evidence_frontier=result.get("evidence_frontier"),
+            frontier_exhausted=result.get("frontier_exhausted"),
+            branch_budget=BRANCH_BUDGET_PER_UNIT,
+        )
+        _validate_unit_frontier(
+            str(job.get("unit_id")),
+            staged_unit,
+            index_rows(ledgers["search_log.jsonl"], "query_id"),
+            index_rows(ledgers["source_corpus.jsonl"], "source_id"),
+            errors,
         )
         staged_families = {
             str(row.get("query_family"))

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build one schema-v5 search record from query-bound compact receipts."""
+"""Build one schema-v6 search record from query-bound compact receipts."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from program_contract import TERMINAL_SEARCH_COVERAGE_STATUSES, search_idempotency_key
 from program_io import inside
 
 
@@ -44,10 +45,15 @@ def build_search_record(
     retained_source_ids: list[str],
     executed_by_agent_id: str,
     origin_job_id: str,
+    coverage_status: str,
     closure_note: str,
     produced_claim_ids: list[str] | None = None,
     produced_observation_ids: list[str] | None = None,
 ) -> dict[str, Any]:
+    if coverage_status not in TERMINAL_SEARCH_COVERAGE_STATUSES:
+        raise ValueError(
+            "coverage_status must be FOUND or NOT_FOUND_AFTER_EXHAUSTIVE_SEARCH"
+        )
     if len(continuation_tokens) != max(0, len(receipt_paths) - 1):
         raise ValueError("Provide exactly one continuation token between adjacent receipt pages")
     normalized_paths: list[str] = []
@@ -71,6 +77,10 @@ def build_search_record(
     retained = list(dict.fromkeys(retained_source_ids))
     if not set(verified).issubset(acquired) or not set(retained).issubset(verified):
         raise ValueError("Retained sources must be verified, and verified sources must be acquired")
+    if coverage_status == "FOUND" and not retained:
+        raise ValueError("FOUND coverage requires at least one retained verified source")
+    if coverage_status == "NOT_FOUND_AFTER_EXHAUSTIVE_SEARCH" and retained:
+        raise ValueError("NOT_FOUND_AFTER_EXHAUSTIVE_SEARCH cannot retain a source")
     return {
         "query_id": query_id,
         "research_unit_id": research_unit_id,
@@ -89,7 +99,8 @@ def build_search_record(
         "origin_job_id": origin_job_id,
         "produced_claim_ids": list(dict.fromkeys(produced_claim_ids or [])),
         "produced_observation_ids": list(dict.fromkeys(produced_observation_ids or [])),
-        "outcome": "completed",
+        "idempotency_key": search_idempotency_key(research_unit_id, query_family, resource, query),
+        "outcome": coverage_status,
         "closure_note": closure_note,
     }
 
@@ -112,6 +123,11 @@ def main() -> int:
     parser.add_argument("--produced-observation-id", action="append", default=[])
     parser.add_argument("--executed-by-agent-id", required=True)
     parser.add_argument("--origin-job-id", required=True)
+    parser.add_argument(
+        "--coverage-status",
+        required=True,
+        choices=sorted(TERMINAL_SEARCH_COVERAGE_STATUSES),
+    )
     parser.add_argument("--closure-note", required=True)
     args = parser.parse_args()
     root = Path(args.run_folder).expanduser().resolve()
@@ -131,6 +147,7 @@ def main() -> int:
         produced_observation_ids=args.produced_observation_id,
         executed_by_agent_id=args.executed_by_agent_id,
         origin_job_id=args.origin_job_id,
+        coverage_status=args.coverage_status,
         closure_note=args.closure_note,
     )
     output = inside(root, args.output_path)

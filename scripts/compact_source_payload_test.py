@@ -97,10 +97,13 @@ class SourcePipelineTests(unittest.TestCase):
                 retained_source_ids=[],
                 executed_by_agent_id="agent-1",
                 origin_job_id="U1.research",
+                coverage_status="NOT_FOUND_AFTER_EXHAUSTIVE_SEARCH",
                 closure_note="All pages were screened.",
             )
             self.assertEqual((row["result_count"], row["screened_count"]), (2, 2))
             self.assertEqual(row["pagination_trace"][0]["output_token_hash"], row["pagination_trace"][1]["input_token_hash"])
+            self.assertEqual(row["outcome"], "NOT_FOUND_AFTER_EXHAUSTIVE_SEARCH")
+            self.assertTrue(row["idempotency_key"].startswith("SEARCH:"))
 
     def test_search_builder_rejects_cross_query_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -123,6 +126,7 @@ class SourcePipelineTests(unittest.TestCase):
                     retained_source_ids=[],
                     executed_by_agent_id="agent-1",
                     origin_job_id="U1.research",
+                    coverage_status="NOT_FOUND_AFTER_EXHAUSTIVE_SEARCH",
                     closure_note="All pages were screened.",
                 )
 

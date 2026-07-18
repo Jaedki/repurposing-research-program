@@ -20,6 +20,7 @@ from program_contract import (
     RANKING_COMPONENTS,
     RANKING_VERSION,
     REPURPOSING_READINESS_MAX,
+    REPURPOSING_READINESS_STEP,
     SUPPORTIVE_ENDPOINT_TYPES,
     TARGET_ENDPOINT_TYPES,
 )
@@ -146,9 +147,11 @@ def rank_rows(
                     isinstance(readiness_score, bool)
                     or not isinstance(readiness_score, int)
                     or not 0 <= readiness_score <= REPURPOSING_READINESS_MAX
+                    or readiness_score % REPURPOSING_READINESS_STEP != 0
                 ):
                     errors.append(
-                        f"candidate {candidate_id}: repurposing_readiness score must be 0-{REPURPOSING_READINESS_MAX}"
+                        f"candidate {candidate_id}: repurposing_readiness score must be 0-{REPURPOSING_READINESS_MAX} "
+                        f"in steps of {REPURPOSING_READINESS_STEP}"
                     )
             elif readiness_score is not None:
                 errors.append(f"candidate {candidate_id}: non-repurposing readiness score must be null")
