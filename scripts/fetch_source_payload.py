@@ -15,7 +15,7 @@ from typing import Any
 from compact_source_payload import compact_payload
 
 
-USER_AGENT = "repurposing-research-program/3.1 (local research workflow)"
+USER_AGENT = "repurposing-research-program/4.0 (local research workflow)"
 
 
 def _fetch_json(url: str) -> tuple[dict[str, Any], dict[str, str]]:

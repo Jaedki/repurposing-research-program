@@ -1,101 +1,163 @@
 #!/usr/bin/env python3
-"""Build compound-only user outputs after full structured validation."""
+"""Write transparent sectioned candidate rankings and referenced rationales."""
 
 from __future__ import annotations
 
 import csv
-import json
 import sys
 from pathlib import Path
 from typing import Any
 
+from program_contract import RANK_SECTION_ORDER
+from program_io import index_rows, read_jsonl
 from validate_program import validate_run
 
 
 CSV_COLUMNS = (
-    "candidate_id",
-    "drug_name",
-    "human_gene",
-    "worm_gene",
-    "allele_mode",
-    "worm_disease_model",
-    "dossier_path",
+    "rank_section",
+    "rank",
+    "endpoint_rank",
+    "drug",
+    "chemical_identifier",
+    "candidate_class",
+    "compound_origin",
+    "target_endpoint_type",
+    "target_endpoint",
+    "mode_of_action",
+    "repurposing_readiness",
+    "raw_score",
+    "total_score",
+    "applied_cap",
+    "cap_reason",
+    "audit_status",
+    "council_disposition",
 )
 
+SECTION_TITLES = {
+    "primary_repurposing": "Primary repurposing candidates",
+    "target_disease_benchmark": "Target-disease development benchmarks",
+    "baseline_care": "Baseline and supportive care",
+    "preclinical_hypothesis": "Preclinical hypotheses",
+}
 
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        if line.strip():
-            rows.append(json.loads(line))
-    return rows
+
+def _clean(value: Any) -> str:
+    return " ".join(str(value).replace("\r", " ").replace("\n", " ").split())
 
 
-def _clean_markdown(value: Any) -> str:
-    return str(value).replace("\r", " ").replace("\n", " ").strip()
+def _reference(source: dict[str, Any]) -> str:
+    source_id = _clean(source.get("source_id", "source"))
+    identifier = _clean(source.get("canonical_identifier", ""))
+    label = f"{source_id}: {identifier}" if identifier else source_id
+    pointer = str(source.get("original_pointer", ""))
+    return f"[{label}]({pointer})" if pointer.startswith(("https://", "http://")) else label
+
+
+def _candidate_source_ids(
+    candidate: dict[str, Any],
+    claims: dict[str, dict[str, Any]],
+    council: dict[str, Any],
+) -> list[str]:
+    values: list[str] = []
+    for claim_id in candidate.get("decisive_claim_ids", []):
+        values.extend(str(value) for value in claims.get(str(claim_id), {}).get("source_ids", []))
+    endpoint = candidate.get("target_endpoint", {})
+    if isinstance(endpoint, dict):
+        values.extend(str(value) for value in endpoint.get("source_ids", []))
+    values.extend(str(value) for value in candidate.get("candidate_class_source_ids", []))
+    readiness = candidate.get("repurposing_readiness", {})
+    if isinstance(readiness, dict):
+        values.extend(str(value) for value in readiness.get("source_ids", []))
+    caps = candidate.get("cap_assessments", {})
+    for reason in candidate.get("applied_cap", {}).get("reasons", []):
+        assessment = caps.get(str(reason), {}) if isinstance(caps, dict) else {}
+        if isinstance(assessment, dict):
+            values.extend(str(value) for value in assessment.get("source_ids", []))
+    values.extend(str(value) for value in council.get("checked_source_ids", []))
+    return list(dict.fromkeys(values))
+
+
+def _candidate_order(candidate: dict[str, Any]) -> tuple[int, int, str]:
+    return (
+        RANK_SECTION_ORDER.index(str(candidate["rank_section"])),
+        int(candidate["rank"]),
+        str(candidate["candidate_id"]),
+    )
 
 
 def build_outputs(run_folder: str | Path) -> tuple[Path, Path]:
     root = Path(run_folder).expanduser().resolve()
     errors = validate_run(root)
     if errors:
-        joined = "\n".join(f"- {error}" for error in errors)
-        raise ValueError(f"Run validation failed; outputs were not written:\n{joined}")
-
-    candidates = [
-        row
-        for row in _read_jsonl(root / "candidate_records.jsonl")
-        if row["council_disposition"] == "screen"
-    ]
-    candidates.sort(key=lambda row: (row["canonical_name"].casefold(), row["candidate_id"]))
-
-    csv_path = root / "17_screening_candidates.csv"
-    markdown_path = root / "18_candidate_rationales.md"
+        raise ValueError("Run validation failed; outputs were not written:\n" + "\n".join(f"- {e}" for e in errors))
+    candidates = sorted(read_jsonl(root / "candidate_records.jsonl"), key=_candidate_order)
+    sources = index_rows(read_jsonl(root / "source_corpus.jsonl"), "source_id")
+    claims = index_rows(read_jsonl(root / "claim_ledger.jsonl"), "claim_id")
+    councils = index_rows(read_jsonl(root / "council_records.jsonl"), "candidate_id")
+    csv_path = root / "ranked_compound_candidates.csv"
+    markdown_path = root / "candidate_justifications.md"
     csv_temp = csv_path.with_suffix(".csv.tmp")
     markdown_temp = markdown_path.with_suffix(".md.tmp")
-
     with csv_temp.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS)
         writer.writeheader()
         for row in candidates:
+            endpoint = row["target_endpoint"]
+            applied_cap = row["applied_cap"]
+            council = councils.get(str(row["candidate_id"]), {})
             writer.writerow(
                 {
-                    "candidate_id": row["candidate_id"],
-                    "drug_name": row["canonical_name"],
-                    "human_gene": row["human_gene"],
-                    "worm_gene": row["worm_gene"],
-                    "allele_mode": row["allele_mode"],
-                    "worm_disease_model": row["worm_model"],
-                    "dossier_path": row["dossier_path"],
+                    "rank_section": row["rank_section"],
+                    "rank": row["rank"],
+                    "endpoint_rank": row["endpoint_rank"],
+                    "drug": row["canonical_name"],
+                    "chemical_identifier": row["canonical_identifier"],
+                    "candidate_class": row["candidate_class"],
+                    "compound_origin": row["compound_origin"],
+                    "target_endpoint_type": endpoint["endpoint_type"],
+                    "target_endpoint": endpoint["label"],
+                    "mode_of_action": row["mode_of_action"],
+                    "repurposing_readiness": (
+                        row["repurposing_readiness"]["score"]
+                        if row["repurposing_readiness"]["score"] is not None else ""
+                    ),
+                    "raw_score": row["raw_score"],
+                    "total_score": row["total_score"],
+                    "applied_cap": applied_cap["maximum"],
+                    "cap_reason": ";".join(applied_cap["reasons"]),
+                    "audit_status": row["audit_status"],
+                    "council_disposition": council.get("disposition", "not_selected"),
                 }
             )
-
-    lines = ["# Compound Screening Rationales", ""]
+    lines = ["# Candidate justifications", ""]
     if not candidates:
-        lines.extend(
-            [
-                "No exact compound met the audited screening-inclusion standard.",
-                "",
-            ]
-        )
+        lines.append("No identity-resolved compound candidates were found within the documented search scope.")
+    current_section = ""
     for row in candidates:
-        lines.extend(
-            [
-                f"## {_clean_markdown(row['canonical_name'])}",
-                "",
-                f"- Candidate ID: `{_clean_markdown(row['candidate_id'])}`",
-                f"- Chemical ID: `{_clean_markdown(row['canonical_identifier'])}`",
-                f"- Model: {_clean_markdown(row['worm_model'])} ({_clean_markdown(row['allele_mode'])})",
-                f"- Evidence origin: {_clean_markdown(row['origin'])}",
-                f"- Rationale: {_clean_markdown(row['rationale'])}",
-                f"- Expected phenomic interpretation: {_clean_markdown(row['phenomic_interpretation'])}",
-                f"- Decisive uncertainty: {_clean_markdown(row['decisive_uncertainty'])}",
-                f"- Evidence dossier: `{_clean_markdown(row['dossier_path'])}`",
-                "",
-            ]
+        if row["rank_section"] != current_section:
+            current_section = str(row["rank_section"])
+            lines.extend([f"## {SECTION_TITLES[current_section]}", ""])
+        endpoint = row["target_endpoint"]
+        applied_cap = row["applied_cap"]
+        cap_note = ", ".join(applied_cap["reasons"]) or "none"
+        council = councils.get(str(row["candidate_id"]), {})
+        disposition = council.get("disposition", "not selected")
+        reference_ids = _candidate_source_ids(row, claims, council)
+        references = "; ".join(_reference(sources[value]) for value in reference_ids if value in sources)
+        readiness_score = row["repurposing_readiness"]["score"]
+        readiness_note = str(readiness_score) if readiness_score is not None else "not applicable"
+        council_note = _clean(" ".join(
+            str(council.get(field, ""))
+            for field in ("candidate_class_assessment", "endpoint_assessment", "rationale")
+        )) or "not reviewed"
+        lines.append(
+            f"{row['rank']}. **{_clean(row['canonical_name'])}** — "
+            f"{_clean(row['candidate_class'])}; endpoint: {_clean(endpoint['label'])} "
+            f"({_clean(endpoint['endpoint_type'])}); score {row['raw_score']}→{row['total_score']}; "
+            f"cap: {cap_note}; readiness: {readiness_note}; audit: {_clean(row['audit_status'])}; "
+            f"council: {_clean(disposition)} ({council_note}). {_clean(row['rationale'])} ({references})."
         )
-    markdown_temp.write_text("\n".join(lines), encoding="utf-8")
-
+    markdown_temp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     csv_temp.replace(csv_path)
     markdown_temp.replace(markdown_path)
     return csv_path, markdown_path

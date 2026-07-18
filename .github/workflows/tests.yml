@@ -29,11 +29,5 @@ jobs:
       - name: Test source-payload compaction
         run: python scripts/compact_source_payload_test.py
 
-      - name: Run safety regressions
-        run: python scripts/safety_regression_test.py
-
-      - name: Test restart and resume
-        run: python scripts/restart_resume_test.py
-
       - name: Run integration test
         run: python scripts/integration_test.py

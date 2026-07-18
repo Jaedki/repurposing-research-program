@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""Validate a repurposing research run from its structured evidence records."""
+"""Schema-v5 structural, provenance, scientific-audit, and runtime validation."""
 
 from __future__ import annotations
 
-import json
-import hashlib
 import re
 import sys
 from collections import defaultdict
@@ -12,17 +10,32 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from program_contract import (
+    AUDIT_QUERY_FAMILIES,
+    AUDIT_VERDICTS,
     BROAD_DOMAINS,
     CALIBRATIONS,
-    COUNCIL_STAGES,
+    CANDIDATE_CLASSES,
+    CLAIM_DIRECTIONS,
+    COMPOUND_ORIGINS,
+    COUNCIL_DISPOSITIONS,
     GLOBAL_PERSPECTIVES,
-    LEDGER_SCHEMAS,
+    HUMAN_RELEVANCE_LEVELS,
+    HUMAN_OUTCOME_NODE,
     MAX_ACTIVE_JOBS,
+    NESTED_SCHEMAS,
+    RANKING_VERSION,
+    SCHEMAS,
     SCHEMA_VERSION,
-    SKEPTIC_CRITIQUE_DOMAINS,
+    SCIENTIFIC_AUDIT_STATUSES,
     SOURCE_ALLOWED_FIELDS,
+    SOURCE_AGGREGATE_FIELDS,
+    TARGET_ENDPOINT_TYPES,
+    allowed_ledgers,
+    required_case_present,
     required_query_families,
 )
+from program_io import content_hash, file_hash, index_rows, inside, read_json, read_jsonl
+
 
 REQUIRED_FILES = (
     "case.json",
@@ -30,1621 +43,1208 @@ REQUIRED_FILES = (
     "execution_plan.json",
     "orchestration.jsonl",
     "job_attempts.jsonl",
-    "source_corpus.jsonl",
-    "search_log.jsonl",
-    "claim_ledger.jsonl",
-    "evidence_graph.jsonl",
-    "subtopic_registry.jsonl",
-    "research_units.jsonl",
-    "unit_audits.jsonl",
-    "candidate_records.jsonl",
-    "council_records.jsonl",
-    "council_exchanges.jsonl",
+    *SCHEMAS,
 )
-
-VERIFIED = {"verified", "audited_complete"}
-FINAL_UNIT_STATUSES = {"audited_complete", "evidence_absent_complete"}
-COUNCIL_STAGE_ROLES = COUNCIL_STAGES
-PROHIBITED_SOURCE_PAYLOAD_FIELDS = {
-    "affiliations",
-    "author_affiliations",
-    "raw_payload",
-    "raw_xml",
-    "raw_html",
-    "full_text",
-    "complete_reference_list",
-    "nested_metadata",
+STRUCTURE_KEY = re.compile(
+    r"^(INCHIKEY:[A-Z]{14}-[A-Z]{10}-[A-Z]|SMILES-SHA256:[0-9A-F]{64})$",
+    re.IGNORECASE,
+)
+PROHIBITED_SOURCE_FIELDS = {
+    "raw_payload", "raw_xml", "raw_html", "full_text", "nested_metadata",
+    "complete_reference_list", "author_affiliations",
 }
-BAD_COMPLETION_PHRASES = (
-    "enough to write",
-    "enough to judge",
-    "good enough",
-    "clean enough",
-    "sufficient to proceed",
-)
+AUDIT_MUTABLE_FIELDS = {
+    "claim_ledger.jsonl": {
+        "source_ids", "calibration", "contrary_claim_ids", "supersedes_claim_ids", "audit_status", "audit_note",
+    },
+    "evidence_graph.jsonl": {
+        "claim_ids", "contrary_edge_ids", "supersedes_edge_ids", "audit_status", "uncertainty",
+    },
+    "candidate_records.jsonl": {
+        "candidate_class", "candidate_class_source_ids", "compound_origin", "target_endpoint",
+        "repurposing_readiness", "rationale", "rationale_source_ids", "uncertainty", "audit_status",
+        "score_components", "cap_assessments", "experimental_model_suitability", "material_conflicts",
+        "raw_score", "total_score", "applied_cap", "rank_section", "rank", "endpoint_rank",
+        "ranking_version", "council_status",
+    },
+}
+COUNCIL_MUTABLE_CANDIDATE_FIELDS = {
+    "candidate_class", "candidate_class_source_ids", "target_endpoint", "repurposing_readiness",
+    "score_components", "cap_assessments", "raw_score", "total_score", "applied_cap",
+    "rank_section", "rank", "endpoint_rank", "ranking_version",
+}
 
 
-def _list(value: Any) -> list[Any]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return value
-    return [value]
+def _items(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
 
 
 def _blank(value: Any) -> bool:
     return value is None or value == "" or value == [] or value == {}
 
 
-def _empty_collection(value: Any) -> bool:
-    return value in (None, "", [], {})
+def _unique(values: Iterable[Any]) -> bool:
+    rows = [str(value) for value in values]
+    return len(rows) == len(set(rows))
 
 
-def _present(obj: dict[str, Any], fields: Iterable[str], label: str, errors: list[str]) -> None:
-    missing = [field for field in fields if field not in obj]
-    if missing:
-        errors.append(f"{label}: missing fields {missing}")
-
-
-def _read_json(path: Path, errors: list[str]) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8-sig"))
-    except Exception as exc:
-        errors.append(f"{path.name}: invalid JSON: {exc}")
-        return {}
-    if not isinstance(value, dict):
-        errors.append(f"{path.name}: expected one JSON object")
-        return {}
-    return value
-
-
-def _read_jsonl(path: Path, errors: list[str]) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    try:
-        lines = path.read_text(encoding="utf-8-sig").splitlines()
-    except Exception as exc:
-        errors.append(f"{path.name}: could not read: {exc}")
-        return rows
-    for line_number, line in enumerate(lines, 1):
-        if not line.strip():
-            continue
-        try:
-            value = json.loads(line)
-        except Exception as exc:
-            errors.append(f"{path.name}:{line_number}: invalid JSON: {exc}")
-            continue
-        if not isinstance(value, dict):
-            errors.append(f"{path.name}:{line_number}: expected a JSON object")
-            continue
-        rows.append(value)
-    return rows
-
-
-def _index(
-    rows: Iterable[dict[str, Any]], key: str, label: str, errors: list[str]
-) -> dict[str, dict[str, Any]]:
-    result: dict[str, dict[str, Any]] = {}
-    for row_number, row in enumerate(rows, 1):
-        value = str(row.get(key, "")).strip()
-        if not value:
-            errors.append(f"{label} row {row_number}: missing {key}")
-        elif value in result:
-            errors.append(f"{label}: duplicate {key} {value!r}")
-        else:
-            result[value] = row
-    return result
-
-
-def _required(row: dict[str, Any], fields: Iterable[str], label: str, errors: list[str]) -> None:
-    for field in fields:
-        if _blank(row.get(field)):
-            errors.append(f"{label}: missing {field}")
-
-
-def _inside_file(root: Path, value: Any, label: str, errors: list[str]) -> Path | None:
+def _resolve_file(root: Path, value: Any, label: str, errors: list[str]) -> Path | None:
     if _blank(value):
         errors.append(f"{label}: missing path")
         return None
-    supplied = Path(str(value))
-    target = supplied if supplied.is_absolute() else root / supplied
     try:
-        resolved = target.resolve()
-        resolved.relative_to(root.resolve())
+        path = inside(root, str(value))
     except Exception:
-        errors.append(f"{label}: path must stay inside the run folder: {value}")
+        errors.append(f"{label}: path must stay inside the run folder")
         return None
-    if not resolved.is_file():
+    if not path.is_file():
         errors.append(f"{label}: file does not exist: {value}")
         return None
-    return resolved
+    return path
 
 
-def _integer(value: Any, label: str, errors: list[str]) -> int | None:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        errors.append(f"{label}: expected a non-negative integer")
-        return None
-    return value
+def _read_receipt(root: Path, value: Any, label: str, errors: list[str]) -> dict[str, Any]:
+    path = _resolve_file(root, value, label, errors)
+    if not path:
+        return {}
+    try:
+        receipt = read_json(path, {})
+    except Exception as exc:
+        errors.append(f"{label}: invalid JSON: {exc}")
+        return {}
+    if not isinstance(receipt, dict):
+        errors.append(f"{label}: expected one JSON object")
+        return {}
+    if receipt.get("schema_version") != 2 or receipt.get("compactor") != "compact_source_payload.py":
+        errors.append(f"{label}: invalid compact-source receipt")
+    records = receipt.get("records")
+    if not isinstance(records, list) or any(not isinstance(row, dict) for row in records):
+        errors.append(f"{label}: records must be a list of objects")
+    else:
+        for position, record in enumerate(records, 1):
+            stored = str(record.get("compact_record_hash", ""))
+            body = {key: value for key, value in record.items() if key != "compact_record_hash"}
+            if not stored or stored != content_hash(body):
+                errors.append(f"{label}: record {position} hash mismatch")
+    return receipt
 
 
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def _schema_rows(ledgers: dict[str, list[dict[str, Any]]], errors: list[str]) -> dict[str, dict[str, dict[str, Any]]]:
+    indexes: dict[str, dict[str, dict[str, Any]]] = {}
+    for filename, spec in SCHEMAS.items():
+        rows = ledgers.get(filename, [])
+        seen: dict[str, dict[str, Any]] = {}
+        allowed = set(spec["fields"])
+        for position, row in enumerate(rows, 1):
+            label = f"{filename} row {position}"
+            missing = [field for field in spec["fields"] if field not in row]
+            if missing:
+                errors.append(f"{label}: missing fields {missing}")
+            empty = [field for field in spec["nonempty"] if _blank(row.get(field))]
+            if empty:
+                errors.append(f"{label}: empty required fields {empty}")
+            unknown = set(row) - allowed
+            if unknown:
+                errors.append(f"{label}: unknown fields {sorted(unknown)}")
+            identity = str(row.get(spec["key"], "")).strip()
+            if identity in seen:
+                errors.append(f"{filename}: duplicate {spec['key']} {identity!r}")
+            elif identity:
+                seen[identity] = row
+        indexes[filename] = seen
+    return indexes
 
 
-def _content_hash(value: Any) -> str:
-    return hashlib.sha256(
-        json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-
-
-def _receipt_identity(record: dict[str, Any]) -> str:
-    canonical = str(record.get("canonical_identifier", "")).strip().casefold()
-    identifier_type = str(record.get("identifier_type", "")).strip().casefold()
-    if canonical:
-        return f"{identifier_type}:{canonical}"
-    return f"hash:{str(record.get('compact_record_hash', '')).casefold()}"
-
-
-def _validate_query_depth(
+def _validate_sources_and_searches(
     root: Path,
-    query_id: str,
-    query: dict[str, Any],
-    sources: dict[str, dict[str, Any]],
+    indexes: dict[str, dict[str, dict[str, Any]]],
+    plan_jobs: dict[str, dict[str, Any]],
     errors: list[str],
-    *,
-    label_prefix: str = "query",
 ) -> None:
-    """Bind search depth claims to compact receipts, source IDs, and a continuation chain."""
-    label = f"{label_prefix} {query_id}"
-    compact_paths = [str(value) for value in _list(query.get("compact_payload_paths"))]
-    if not compact_paths:
-        errors.append(f"{label}: no compact payload receipt")
-        return
-    if len(compact_paths) != len(set(compact_paths)):
-        errors.append(f"{label}: compact payload receipts must be unique per retrieval page")
+    sources = indexes["source_corpus.jsonl"]
+    searches = indexes["search_log.jsonl"]
+    units = indexes["research_units.jsonl"]
+    claims = indexes["claim_ledger.jsonl"]
+    observations = indexes["candidate_observations.jsonl"]
 
-    records: list[dict[str, Any]] = []
-    for compact_path in compact_paths:
-        compact_file = _inside_file(root, compact_path, f"{label} compact payload", errors)
-        if not compact_file:
-            continue
-        receipt = _read_json(compact_file, errors)
-        receipt_records = _list(receipt.get("records"))
-        if receipt.get("schema_version") != 2 or receipt.get("compactor") != "compact_source_payload.py":
-            errors.append(f"{label}: compact payload was not produced by the required compactor")
-        receipt_count = _integer(receipt.get("result_count"), f"{label} compact receipt result_count", errors)
-        if receipt_count is not None and receipt_count != len(receipt_records):
-            errors.append(f"{label}: compact receipt result_count does not match its records")
-        for record_number, record in enumerate(receipt_records, 1):
-            if not isinstance(record, dict):
-                errors.append(f"{label}: compact receipt record {record_number} is not an object")
-                continue
-            stored_hash = str(record.get("compact_record_hash", ""))
-            hash_body = {key: value for key, value in record.items() if key != "compact_record_hash"}
-            if not stored_hash or stored_hash != _content_hash(hash_body):
-                errors.append(f"{label}: compact receipt record {record_number} hash mismatch")
-            if str(record.get("query_id", "")) != query_id:
-                errors.append(
-                    f"{label}: compact receipt record {record_number} query_id does not match the search record"
-                )
-            records.append(record)
-
-    result_count = query.get("result_count")
-    if isinstance(result_count, int) and not isinstance(result_count, bool) and result_count != len(records):
-        errors.append(f"{label}: result_count is not proven by compact receipt records")
-    identities = {_receipt_identity(record) for record in records}
-    deduplicated_count = query.get("deduplicated_count")
-    if (
-        isinstance(deduplicated_count, int)
-        and not isinstance(deduplicated_count, bool)
-        and deduplicated_count != len(identities)
-    ):
-        errors.append(f"{label}: deduplicated_count is not proven by compact receipt identities")
-    page_count = query.get("page_count")
-    if isinstance(page_count, int) and not isinstance(page_count, bool) and page_count != len(compact_paths):
-        errors.append(f"{label}: page_count is not proven by compact receipt paths")
-
-    trace = _list(query.get("pagination_trace"))
-    if len(trace) != len(compact_paths):
-        errors.append(f"{label}: pagination_trace must contain exactly one entry per compact receipt")
-    previous_output = ""
-    for index, item in enumerate(trace, 1):
-        if not isinstance(item, dict):
-            errors.append(f"{label}: pagination trace entry {index} is not an object")
-            continue
-        _present(
-            item,
-            ("page_index", "receipt_path", "input_token_hash", "output_token_hash"),
-            f"{label} pagination trace entry {index}",
-            errors,
-        )
-        if item.get("page_index") != index:
-            errors.append(f"{label}: pagination trace indexes are not contiguous")
-        if index <= len(compact_paths) and str(item.get("receipt_path", "")) != compact_paths[index - 1]:
-            errors.append(f"{label}: pagination trace is not bound to compact receipt order")
-        input_hash = str(item.get("input_token_hash", ""))
-        output_hash = str(item.get("output_token_hash", ""))
-        for token_hash in (input_hash, output_hash):
-            if token_hash and not re.fullmatch(r"[0-9a-fA-F]{64}", token_hash):
-                errors.append(f"{label}: pagination continuation hashes must be SHA-256 or empty")
-        if input_hash != previous_output:
-            errors.append(f"{label}: pagination continuation chain is disconnected")
-        if index < len(trace) and not output_hash:
-            errors.append(f"{label}: pagination trace ends before the final page")
-        previous_output = output_hash
-    if trace and previous_output:
-        errors.append(f"{label}: final pagination continuation is not exhausted")
-
-    acquired_ids = [str(value) for value in _list(query.get("acquired_source_ids"))]
-    verified_ids = [str(value) for value in _list(query.get("original_verified_source_ids"))]
-    retained_ids = [str(value) for value in _list(query.get("retained_source_ids"))]
-    if len(acquired_ids) != len(set(acquired_ids)) or len(verified_ids) != len(set(verified_ids)):
-        errors.append(f"{label}: acquisition and verification source IDs must be unique")
-    if query.get("acquired_count") != len(acquired_ids):
-        errors.append(f"{label}: acquired_count is not proven by acquired_source_ids")
-    if query.get("original_verified_count") != len(verified_ids):
-        errors.append(f"{label}: original_verified_count is not proven by original_verified_source_ids")
-    if not set(verified_ids).issubset(set(acquired_ids)):
-        errors.append(f"{label}: original-verified sources must be a subset of acquired sources")
-    if not set(retained_ids).issubset(set(verified_ids)):
-        errors.append(f"{label}: retained sources must be a subset of original-verified sources")
-    receipt_canonical_ids = {
-        str(record.get("canonical_identifier", "")).strip().casefold()
-        for record in records
-        if str(record.get("canonical_identifier", "")).strip()
-    }
-    for source_id in acquired_ids:
-        source = sources.get(source_id)
-        if source is None:
-            errors.append(f"{label}: acquired source {source_id} is unknown")
-            continue
-        if source.get("original_acquired") is not True:
-            errors.append(f"{label}: acquired source {source_id} lacks original acquisition")
-        if str(source.get("canonical_identifier", "")).strip().casefold() not in receipt_canonical_ids:
-            errors.append(f"{label}: acquired source {source_id} is absent from compact receipt records")
-    for source_id in verified_ids:
-        source = sources.get(source_id)
-        if source is not None and not all(
-            source.get(field) is True for field in ("metadata_verified", "original_acquired", "content_verified")
+    canonical_sources: dict[str, str] = {}
+    for source_id, source in sources.items():
+        label = f"source {source_id}"
+        if set(source) - SOURCE_ALLOWED_FIELDS:
+            errors.append(f"{label}: source schema drift")
+        if PROHIBITED_SOURCE_FIELDS.intersection(source):
+            errors.append(f"{label}: bulky raw-source fields are prohibited")
+        if source.get("screen_decision") not in {"include", "exclude"}:
+            errors.append(f"{label}: screen_decision must be include or exclude")
+        canonical_identifier = str(source.get("canonical_identifier", "")).strip()
+        canonical_key = canonical_identifier.split("#", 1)[0].casefold()
+        if "#" in canonical_identifier:
+            errors.append(f"{label}: canonical_identifier must identify the source, not an article section")
+        prior_source = canonical_sources.get(canonical_key)
+        if canonical_key and prior_source and prior_source != source_id:
+            errors.append(f"{label}: duplicate canonical source identity with {prior_source}")
+        elif canonical_key:
+            canonical_sources[canonical_key] = source_id
+        receipt = _read_receipt(root, source.get("compaction_receipt_path"), f"{label} receipt", errors)
+        matching = [
+            row for row in _items(receipt.get("records"))
+            if str(row.get("compact_record_hash")) == str(source.get("compaction_record_hash"))
+        ]
+        if len(matching) != 1:
+            errors.append(f"{label}: compact record hash must resolve exactly once")
+        elif (
+            str(matching[0].get("canonical_identifier")) != str(source.get("canonical_identifier"))
+            or str(matching[0].get("title")) != str(source.get("title"))
         ):
-            errors.append(f"{label}: original-verified source {source_id} lacks verified original content")
+            errors.append(f"{label}: compact identity mismatch")
+        discovered_units = [str(value) for value in _items(source.get("discovered_by_units"))]
+        discovery_queries = [str(value) for value in _items(source.get("discovery_query_ids"))]
+        supported_claims = [str(value) for value in _items(source.get("supported_claim_ids"))]
+        if not all(_unique(values) for values in (discovered_units, discovery_queries, supported_claims)):
+            errors.append(f"{label}: discovery and supported-claim lists must be unique")
+        for unit_id in discovered_units:
+            if str(unit_id) not in units:
+                errors.append(f"{label}: unknown discovery unit {unit_id}")
+        for query_id in discovery_queries:
+            query = searches.get(str(query_id))
+            if not query:
+                errors.append(f"{label}: unknown discovery query {query_id}")
+            elif source_id not in {str(value) for value in _items(query.get("acquired_source_ids"))}:
+                errors.append(f"{label}: discovery query {query_id} lacks reverse acquired-source linkage")
+            elif str(query.get("research_unit_id")) not in discovered_units:
+                errors.append(f"{label}: discovery query {query_id} has an unlisted discovery unit")
+        for claim_id in supported_claims:
+            if str(claim_id) not in claims:
+                errors.append(f"{label}: unknown supported claim {claim_id}")
+            elif source_id not in {str(value) for value in _items(claims[claim_id].get("source_ids"))}:
+                errors.append(f"{label}: supported claim {claim_id} lacks reverse source linkage")
+
+    searches_by_unit: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for query_id, query in searches.items():
+        label = f"query {query_id}"
+        unit_id = str(query.get("research_unit_id", ""))
+        unit = units.get(unit_id)
+        if not unit:
+            errors.append(f"{label}: unknown research unit {unit_id}")
+            continue
+        searches_by_unit[unit_id].append(query)
+        if query.get("query_family") not in set(unit.get("planned_query_families", [])):
+            errors.append(f"{label}: query family was not predeclared")
+        origin = plan_jobs.get(str(query.get("origin_job_id", "")))
+        if not origin or str(origin.get("unit_id", "")) != unit_id:
+            errors.append(f"{label}: origin_job_id does not match the unit")
+        if str(query.get("executed_by_agent_id", "")) != str(origin.get("assigned_agent_id", "")):
+            errors.append(f"{label}: executor does not match the controller assignment")
+        if query.get("outcome") != "completed" or query.get("pagination_complete") is not True:
+            errors.append(f"{label}: search or pagination is incomplete")
+        if not isinstance(query.get("result_count"), int) or not isinstance(query.get("screened_count"), int):
+            errors.append(f"{label}: result and screened counts must be integers")
+
+        paths = [str(value) for value in _items(query.get("compact_payload_paths"))]
+        trace = _items(query.get("pagination_trace"))
+        if not paths or len(paths) != len(trace) or not _unique(paths):
+            errors.append(f"{label}: receipts and pagination trace must be unique and one-to-one")
+        records: list[dict[str, Any]] = []
+        prior_output = ""
+        for index, (receipt_path, page) in enumerate(zip(paths, trace), 1):
+            receipt = _read_receipt(root, receipt_path, f"{label} receipt {index}", errors)
+            page_records = _items(receipt.get("records"))
+            for record in page_records:
+                if str(record.get("query_id", "")) != query_id:
+                    errors.append(f"{label}: compact record is bound to another query")
+            records.extend(page_records)
+            if (
+                not isinstance(page, dict)
+                or set(page) != set(NESTED_SCHEMAS["pagination_trace"])
+                or page.get("page_index") != index
+                or str(page.get("receipt_path")) != receipt_path
+            ):
+                errors.append(f"{label}: pagination trace entry {index} is malformed")
+                continue
+            input_hash = str(page.get("input_token_hash", ""))
+            output_hash = str(page.get("output_token_hash", ""))
+            if input_hash != prior_output or (index < len(trace) and not output_hash):
+                errors.append(f"{label}: pagination continuation chain is disconnected")
+            prior_output = output_hash
+        if prior_output:
+            errors.append(f"{label}: final continuation was not exhausted")
+        if query.get("result_count") != len(records) or query.get("screened_count") != len(records):
+            errors.append(f"{label}: receipt records do not prove the search counts")
+
+        acquired = [str(value) for value in _items(query.get("acquired_source_ids"))]
+        verified = [str(value) for value in _items(query.get("verified_source_ids"))]
+        retained = [str(value) for value in _items(query.get("retained_source_ids"))]
+        if not all(_unique(values) for values in (acquired, verified, retained)):
+            errors.append(f"{label}: source ID lists must be unique")
+        if not set(retained).issubset(verified) or not set(verified).issubset(acquired):
+            errors.append(f"{label}: retained must be verified and verified must be acquired")
+        receipt_ids = {str(row.get("canonical_identifier", "")).casefold() for row in records}
+        for source_id in acquired:
+            source = sources.get(source_id)
+            if not source:
+                errors.append(f"{label}: unknown acquired source {source_id}")
+            elif str(source.get("canonical_identifier", "")).casefold() not in receipt_ids:
+                errors.append(f"{label}: acquired source {source_id} is absent from receipts")
+            else:
+                if unit_id not in {str(value) for value in _items(source.get("discovered_by_units"))}:
+                    errors.append(f"{label}: acquired source {source_id} lacks reverse unit provenance")
+                if query_id not in {str(value) for value in _items(source.get("discovery_query_ids"))}:
+                    errors.append(f"{label}: acquired source {source_id} lacks reverse query provenance")
+        for source_id in verified:
+            source = sources.get(source_id, {})
+            if not all(source.get(field) is True for field in ("metadata_verified", "original_acquired", "content_verified")):
+                errors.append(f"{label}: source {source_id} lacks verified original content")
+        for claim_id in _items(query.get("produced_claim_ids")):
+            if str(claim_id) not in claims:
+                errors.append(f"{label}: unknown produced claim {claim_id}")
+        for observation_id in _items(query.get("produced_observation_ids")):
+            if str(observation_id) not in observations:
+                errors.append(f"{label}: unknown produced observation {observation_id}")
+        if unit.get("unit_type") == "decisive_audit" and str(query.get("resource", "")).strip().casefold().startswith(
+            ("packet", "local_packet", "context_packet")
+        ):
+            errors.append(f"{label}: decisive audit must retrieve evidence independently of its packet")
+
+    for unit_id, unit in units.items():
+        planned = set(str(value) for value in _items(unit.get("planned_query_families")))
+        required = required_query_families(str(unit.get("unit_type", "")))
+        if planned != required:
+            errors.append(f"unit {unit_id}: planned query families differ from the authoritative contract")
+        logged = {str(row.get("query_family")) for row in searches_by_unit.get(unit_id, [])}
+        if unit.get("status") == "complete":
+            if set(_items(unit.get("completed_query_families"))) != planned or logged != planned:
+                errors.append(f"unit {unit_id}: completed query coverage is incomplete")
+            if set(_items(unit.get("search_ids"))) != {str(row.get("query_id")) for row in searches_by_unit.get(unit_id, [])}:
+                errors.append(f"unit {unit_id}: search_ids do not match canonical searches")
+            if _blank(unit.get("worker_agent_id")) or _blank(unit.get("closure_basis")):
+                errors.append(f"unit {unit_id}: completed unit lacks agent or closure basis")
+            unit_searches = searches_by_unit.get(unit_id, [])
+            if unit.get("unit_type") == "decisive_audit":
+                normalized_queries = [str(row.get("query", "")).strip().casefold() for row in unit_searches]
+                if len(normalized_queries) != len(set(normalized_queries)):
+                    errors.append(f"unit {unit_id}: independent-verification and counterevidence queries must differ")
+            exclusions = unit.get("candidate_exclusions")
+            if not isinstance(exclusions, list):
+                errors.append(f"unit {unit_id}: candidate_exclusions must be a list")
+            else:
+                for position, exclusion in enumerate(exclusions, 1):
+                    exclusion_label = f"unit {unit_id} candidate exclusion {position}"
+                    if not isinstance(exclusion, dict) or set(exclusion) != set(NESTED_SCHEMAS["candidate_exclusion"]):
+                        errors.append(f"{exclusion_label}: fields do not match the schema")
+                        continue
+                    if not str(exclusion.get("name", "")).strip() or not str(exclusion.get("reason", "")).strip():
+                        errors.append(f"{exclusion_label}: name and reason are required")
+                    source_ids = [str(value) for value in _items(exclusion.get("source_ids"))]
+                    if not source_ids or not _unique(source_ids) or any(value not in sources for value in source_ids):
+                        errors.append(f"{exclusion_label}: source_ids must be nonempty, unique, and resolve")
+        elif unit.get("status") != "planned":
+            errors.append(f"unit {unit_id}: invalid status {unit.get('status')!r}")
 
 
-def _validate_runtime(
+def _validate_evidence(indexes: dict[str, dict[str, dict[str, Any]]], errors: list[str]) -> None:
+    sources = indexes["source_corpus.jsonl"]
+    claims = indexes["claim_ledger.jsonl"]
+    edges = indexes["evidence_graph.jsonl"]
+    for claim_id, claim in claims.items():
+        if claim.get("calibration") not in CALIBRATIONS:
+            errors.append(f"claim {claim_id}: invalid calibration")
+        if claim.get("audit_status") not in SCIENTIFIC_AUDIT_STATUSES:
+            errors.append(f"claim {claim_id}: invalid audit_status")
+        if claim.get("human_relevance") not in HUMAN_RELEVANCE_LEVELS:
+            errors.append(
+                f"claim {claim_id}: invalid human_relevance; allowed values are {sorted(HUMAN_RELEVANCE_LEVELS)}"
+            )
+        if claim.get("direction") not in CLAIM_DIRECTIONS:
+            errors.append(f"claim {claim_id}: invalid direction; allowed values are {sorted(CLAIM_DIRECTIONS)}")
+        for source_id in _items(claim.get("source_ids")):
+            source = sources.get(str(source_id))
+            if not source:
+                errors.append(f"claim {claim_id}: unknown source {source_id}")
+            elif not all(source.get(field) is True for field in ("metadata_verified", "original_acquired", "content_verified")):
+                errors.append(f"claim {claim_id}: source {source_id} is not verified")
+            elif source.get("screen_decision") != "include":
+                errors.append(f"claim {claim_id}: source {source_id} is excluded")
+            elif claim_id not in {str(value) for value in _items(source.get("supported_claim_ids"))}:
+                errors.append(f"claim {claim_id}: source {source_id} lacks reverse claim linkage")
+        for field in ("contrary_claim_ids", "supersedes_claim_ids"):
+            for related in _items(claim.get(field)):
+                if str(related) not in claims or str(related) == claim_id:
+                    errors.append(f"claim {claim_id}: invalid {field} reference {related}")
+    for edge_id, edge in edges.items():
+        if edge.get("directionality") not in {"supports_benefit", "opposes_benefit", "ambiguous"}:
+            errors.append(f"edge {edge_id}: invalid directionality")
+        if edge.get("audit_status") not in SCIENTIFIC_AUDIT_STATUSES:
+            errors.append(f"edge {edge_id}: invalid audit_status")
+        for claim_id in _items(edge.get("claim_ids")):
+            if str(claim_id) not in claims:
+                errors.append(f"edge {edge_id}: unknown claim {claim_id}")
+        for field in ("contrary_edge_ids", "supersedes_edge_ids"):
+            for related in _items(edge.get(field)):
+                if str(related) not in edges or str(related) == edge_id:
+                    errors.append(f"edge {edge_id}: invalid {field} reference {related}")
+
+
+def _validate_compounds(
+    indexes: dict[str, dict[str, dict[str, Any]]],
+    *,
+    final: bool,
+    errors: list[str],
+) -> None:
+    sources = indexes["source_corpus.jsonl"]
+    searches = indexes["search_log.jsonl"]
+    claims = indexes["claim_ledger.jsonl"]
+    edges = indexes["evidence_graph.jsonl"]
+    units = indexes["research_units.jsonl"]
+    observations = indexes["candidate_observations.jsonl"]
+    candidates = indexes["candidate_records.jsonl"]
+    audits = indexes["audit_records.jsonl"]
+
+    def validate_identity(label: str, row: dict[str, Any]) -> str:
+        key = str(row.get("structure_identity_key", "")).upper()
+        if not STRUCTURE_KEY.fullmatch(key):
+            errors.append(f"{label}: invalid structure_identity_key")
+        if str(row.get("chemical_node_id", "")) != f"CHEM:{key}":
+            errors.append(f"{label}: chemical_node_id does not match the structure key")
+        registry = row.get("registry_identifiers")
+        if not isinstance(registry, dict) or str(row.get("canonical_identifier")) not in {str(value) for value in registry.values()}:
+            errors.append(f"{label}: canonical identifier is absent from registry_identifiers")
+        for source_id in _items(row.get("identity_source_ids")):
+            source = sources.get(str(source_id))
+            if not source:
+                errors.append(f"{label}: unknown identity source {source_id}")
+            elif (
+                not all(source.get(field) is True for field in ("metadata_verified", "original_acquired", "content_verified"))
+                or source.get("screen_decision") != "include"
+            ):
+                errors.append(f"{label}: identity source {source_id} is not verified")
+        return key
+
+    def validate_evidence_sources(label: str, values: Any) -> list[str]:
+        source_ids = [str(value) for value in _items(values)]
+        if not source_ids or not _unique(source_ids):
+            errors.append(f"{label}: source IDs must be nonempty and unique")
+        for source_id in source_ids:
+            source = sources.get(source_id)
+            if not source:
+                errors.append(f"{label}: unknown source {source_id}")
+            elif source.get("content_verified") is not True or source.get("screen_decision") != "include":
+                errors.append(f"{label}: source {source_id} must be content-verified and included")
+        return source_ids
+
+    for observation_id, observation in observations.items():
+        label = f"observation {observation_id}"
+        key = validate_identity(label, observation)
+        active_moiety_key = str(observation.get("active_moiety_key", "")).upper()
+        if not STRUCTURE_KEY.fullmatch(active_moiety_key):
+            errors.append(f"{label}: invalid active_moiety_key")
+        validate_evidence_sources(f"{label} active moiety", observation.get("active_moiety_source_ids"))
+        if not str(observation.get("active_moiety_rationale", "")).strip():
+            errors.append(f"{label}: active_moiety_rationale is required")
+        unit = units.get(str(observation.get("research_unit_id", "")))
+        if not unit or unit.get("unit_type") != "compound_perspective":
+            errors.append(f"{label}: observation does not belong to a compound perspective")
+        for field, mapping in (("claim_ids", claims), ("edge_ids", edges), ("rationale_source_ids", sources)):
+            for value in _items(observation.get(field)):
+                if str(value) not in mapping:
+                    errors.append(f"{label}: unknown {field} value {value}")
+        emitted = any(
+            observation_id in {str(value) for value in _items(query.get("produced_observation_ids"))}
+            for query in searches.values()
+            if str(query.get("research_unit_id")) == str(observation.get("research_unit_id"))
+        )
+        if not emitted:
+            errors.append(f"{label}: no source-unit search emitted the observation")
+    candidate_moieties: dict[str, str] = {}
+    audits_by_claim: dict[str, dict[str, Any]] = {}
+    for row in audits.values():
+        if row.get("subject_type") != "claim":
+            continue
+        claim_id = str(row.get("subject_id"))
+        if claim_id in audits_by_claim:
+            errors.append(f"claim {claim_id}: multiple audit records are not allowed")
+        audits_by_claim[claim_id] = row
+    for candidate_id, candidate in candidates.items():
+        label = f"candidate {candidate_id}"
+        key = validate_identity(label, candidate)
+        active_moiety_key = str(candidate.get("active_moiety_key", "")).upper()
+        if not STRUCTURE_KEY.fullmatch(active_moiety_key):
+            errors.append(f"{label}: invalid active_moiety_key")
+        if active_moiety_key in candidate_moieties:
+            errors.append(f"{label}: duplicate active moiety with {candidate_moieties[active_moiety_key]}")
+        candidate_moieties[active_moiety_key] = candidate_id
+        candidate_moiety_sources = validate_evidence_sources(
+            f"{label} active moiety", candidate.get("active_moiety_source_ids")
+        )
+        if not str(candidate.get("active_moiety_rationale", "")).strip():
+            errors.append(f"{label}: active_moiety_rationale is required")
+        if candidate.get("identity_verified") is not True:
+            errors.append(f"{label}: identity_verified must be true")
+        applied_cap = candidate.get("applied_cap")
+        if not isinstance(applied_cap, dict) or set(applied_cap) != set(NESTED_SCHEMAS["applied_cap"]):
+            errors.append(f"{label}: applied_cap fields do not match the schema")
+        for field in ("raw_score", "total_score", "rank"):
+            if isinstance(candidate.get(field), bool) or not isinstance(candidate.get(field), int) or candidate.get(field) < 0:
+                errors.append(f"{label}: {field} must be a non-negative integer")
+        observation_ids = [str(value) for value in _items(candidate.get("observation_ids"))]
+        formulation_structures = {
+            str(value).upper() for value in _items(candidate.get("formulation_structure_keys"))
+        }
+        if not observation_ids or any(value not in observations for value in observation_ids):
+            errors.append(f"{label}: observation_ids must resolve")
+        else:
+            observation_moieties = {
+                str(observations[value].get("active_moiety_key", "")).upper()
+                for value in observation_ids
+            }
+            if observation_moieties != {active_moiety_key}:
+                errors.append(f"{label}: merged observations do not share the active moiety")
+            observation_moiety_sources = {
+                str(source_id)
+                for value in observation_ids
+                for source_id in _items(observations[value].get("active_moiety_source_ids"))
+            }
+            if set(candidate_moiety_sources) != observation_moiety_sources:
+                errors.append(f"{label}: active-moiety sources must aggregate all merged observations")
+            observed_structures = {
+                str(observations[value].get("structure_identity_key", "")).upper()
+                for value in observation_ids
+            }
+            if not formulation_structures or formulation_structures != observed_structures or key not in formulation_structures:
+                errors.append(f"{label}: formulation_structure_keys must exactly cover merged observation structures")
+        source_units = {str(value) for value in _items(candidate.get("source_research_unit_ids"))}
+        observed_units = {str(observations[value].get("research_unit_id")) for value in observation_ids if value in observations}
+        if source_units != observed_units:
+            errors.append(f"{label}: source_research_unit_ids do not match merged observations")
+        validate_evidence_sources(f"{label} rationale", candidate.get("rationale_source_ids"))
+        if str(candidate.get("human_outcome")) != HUMAN_OUTCOME_NODE:
+            errors.append(f"{label}: human_outcome must be {HUMAN_OUTCOME_NODE}")
+        if candidate.get("candidate_class") not in CANDIDATE_CLASSES:
+            errors.append(f"{label}: invalid candidate_class")
+        if candidate.get("compound_origin") not in COMPOUND_ORIGINS:
+            errors.append(f"{label}: invalid compound_origin")
+        validate_evidence_sources(f"{label} candidate class", candidate.get("candidate_class_source_ids"))
+        target_endpoint = candidate.get("target_endpoint")
+        endpoint_label = ""
+        endpoint_claim_ids: set[str] = set()
+        if not isinstance(target_endpoint, dict) or set(target_endpoint) != set(NESTED_SCHEMAS["target_endpoint"]):
+            errors.append(f"{label}: target_endpoint fields do not match the schema")
+        else:
+            endpoint_label = str(target_endpoint.get("label", "")).strip()
+            if target_endpoint.get("endpoint_type") not in TARGET_ENDPOINT_TYPES or not endpoint_label:
+                errors.append(f"{label}: target endpoint type and label are invalid")
+            endpoint_claim_values = [str(value) for value in _items(target_endpoint.get("claim_ids"))]
+            endpoint_claim_ids = set(endpoint_claim_values)
+            if (
+                not endpoint_claim_values
+                or len(endpoint_claim_values) != len(endpoint_claim_ids)
+                or any(value not in claims for value in endpoint_claim_ids)
+            ):
+                errors.append(f"{label}: target endpoint claim_ids must be nonempty, unique, and resolve")
+            validate_evidence_sources(f"{label} target endpoint", target_endpoint.get("source_ids"))
+        readiness = candidate.get("repurposing_readiness")
+        if isinstance(readiness, dict):
+            validate_evidence_sources(f"{label} repurposing readiness", readiness.get("source_ids"))
+        for collection_name in ("score_components", "cap_assessments"):
+            collection = candidate.get(collection_name)
+            if isinstance(collection, dict):
+                for assessment_name, assessment in collection.items():
+                    if isinstance(assessment, dict):
+                        validate_evidence_sources(
+                            f"{label} {collection_name} {assessment_name}", assessment.get("source_ids")
+                        )
+        model_suitability = candidate.get("experimental_model_suitability")
+        if isinstance(model_suitability, dict) and model_suitability.get("assessed") is True:
+            validate_evidence_sources(f"{label} model suitability", model_suitability.get("source_ids"))
+
+        path_claims: set[str] = set()
+        ambiguous_path = False
+        paths = _items(candidate.get("causal_paths"))
+        if not paths:
+            errors.append(f"{label}: at least one human therapeutic path is required")
+        for path_number, path in enumerate(paths, 1):
+            if not isinstance(path, dict):
+                errors.append(f"{label} path {path_number}: expected an object")
+                continue
+            required = set(NESTED_SCHEMAS["causal_path"])
+            if set(path) != required:
+                errors.append(f"{label} path {path_number}: fields must exactly match the causal-path schema")
+                continue
+            edge_ids = [str(value) for value in _items(path.get("edge_ids"))]
+            claim_ids = {str(value) for value in _items(path.get("claim_ids"))}
+            concrete = [edges.get(value) for value in edge_ids]
+            if not edge_ids or any(edge is None for edge in concrete):
+                errors.append(f"{label} path {path_number}: graph edges must resolve")
+                continue
+            graph = [edge for edge in concrete if edge]
+            ambiguous_path = ambiguous_path or any(edge.get("directionality") == "ambiguous" for edge in graph)
+            allowed_start_nodes = {f"CHEM:{value}" for value in formulation_structures}
+            path_start = str(path.get("start_node"))
+            if path_start not in allowed_start_nodes or str(graph[0].get("from_node")) != path_start:
+                errors.append(f"{label} path {path_number}: path must start at one retained formulation structure")
+            if str(path.get("end_node")) != HUMAN_OUTCOME_NODE or graph[-1].get("to_node") != HUMAN_OUTCOME_NODE:
+                errors.append(f"{label} path {path_number}: path must end at the human therapeutic outcome")
+            if path.get("expected_direction") != "therapeutic_benefit":
+                errors.append(f"{label} path {path_number}: expected_direction must be therapeutic_benefit")
+            if str(path.get("target_endpoint", "")).strip() != endpoint_label:
+                errors.append(f"{label} path {path_number}: target_endpoint must match the candidate endpoint")
+            if any(left.get("to_node") != right.get("from_node") for left, right in zip(graph, graph[1:])):
+                errors.append(f"{label} path {path_number}: graph edges are disconnected")
+            if any(edge.get("directionality") == "opposes_benefit" for edge in graph):
+                errors.append(f"{label} path {path_number}: path contains an opposing edge")
+            if final and any(edge.get("audit_status") == "unreviewed" for edge in graph):
+                errors.append(f"{label} path {path_number}: decisive graph edge remains unreviewed")
+            if not claim_ids or any(value not in claims for value in claim_ids):
+                errors.append(f"{label} path {path_number}: claim_ids must resolve")
+            if any(not set(str(value) for value in _items(edge.get("claim_ids"))).intersection(claim_ids) for edge in graph):
+                errors.append(f"{label} path {path_number}: every edge needs a path claim")
+            graph_claim_ids = {
+                str(value) for edge in graph for value in _items(edge.get("claim_ids"))
+            }
+            if not claim_ids.issubset(graph_claim_ids):
+                errors.append(f"{label} path {path_number}: every path claim must belong to a path edge")
+            path_claims.update(claim_ids)
+        decisive = {str(value) for value in _items(candidate.get("decisive_claim_ids"))}
+        if decisive != path_claims:
+            errors.append(f"{label}: decisive_claim_ids must exactly cover all path claims")
+        if not endpoint_claim_ids.issubset(decisive):
+            errors.append(f"{label}: target endpoint claims must be decisive path claims")
+        endpoint_claim_sources = {
+            str(source_id)
+            for claim_id in endpoint_claim_ids
+            for source_id in _items(claims.get(claim_id, {}).get("source_ids"))
+        }
+        endpoint_sources_declared = {
+            str(value) for value in _items(target_endpoint.get("source_ids"))
+        } if isinstance(target_endpoint, dict) else set()
+        if not endpoint_sources_declared.issubset(endpoint_claim_sources):
+            errors.append(f"{label}: target endpoint sources must support its decisive claims")
+        unresolved_from_semantics = ambiguous_path or any(
+            claims.get(claim_id, {}).get("direction") in {"opposes_benefit", "unclear"}
+            or claims.get(claim_id, {}).get("calibration") in {"unresolved", "contradicted"}
+            for claim_id in decisive
+        )
+        unresolved_cap = candidate.get("cap_assessments", {}).get("unresolved_direction", {}).get("applies")
+        if unresolved_from_semantics and unresolved_cap is not True:
+            errors.append(f"{label}: ambiguous or adverse path semantics require unresolved_direction cap")
+        rationale_sources = {str(value) for value in _items(candidate.get("rationale_source_ids"))}
+        claim_linked_sources = {
+            str(source_id)
+            for claim_id in decisive
+            for source_id in _items(claims.get(claim_id, {}).get("source_ids"))
+        }
+        endpoint_sources = {
+            str(value) for value in _items((target_endpoint or {}).get("source_ids"))
+        } if isinstance(target_endpoint, dict) else set()
+        identity_sources = {str(value) for value in _items(candidate.get("identity_source_ids"))}
+        if not rationale_sources.issubset(claim_linked_sources | endpoint_sources | identity_sources):
+            errors.append(f"{label}: rationale_source_ids must be candidate-claim, endpoint, or identity linked")
+
+        if final:
+            audit_rows = [audits_by_claim.get(value) for value in decisive]
+            if any(row is None for row in audit_rows):
+                errors.append(f"{label}: every decisive claim requires an audit record")
+            else:
+                verdicts = {str(row.get("verdict")) for row in audit_rows if row}
+                expected_status = (
+                    "conflicted" if verdicts.intersection({"unsupported", "contradicted", "unresolved"})
+                    else "qualified" if "qualified" in verdicts
+                    else "independently_verified"
+                )
+                if candidate.get("audit_status") != expected_status:
+                    errors.append(f"{label}: audit_status disagrees with decisive-claim verdicts")
+            if candidate.get("ranking_version") != RANKING_VERSION or not isinstance(candidate.get("rank"), int):
+                errors.append(f"{label}: deterministic ranking was not applied")
+            if candidate.get("council_status") not in {"reviewed", "not_selected"}:
+                errors.append(f"{label}: council_status is not final")
+        material_conflicts = {str(value) for value in _items(candidate.get("material_conflicts"))}
+        if not material_conflicts.issubset(decisive):
+            errors.append(f"{label}: material_conflicts must be decisive candidate claim IDs")
+        for conflict_id in material_conflicts.intersection(claims):
+            conflict = claims[conflict_id]
+            related = {str(value) for value in _items(conflict.get("contrary_claim_ids"))}
+            reciprocal = any(
+                conflict_id in {str(value) for value in _items(claims.get(other, {}).get("contrary_claim_ids"))}
+                for other in decisive - {conflict_id}
+            )
+            if (
+                conflict.get("direction") not in {"opposes_benefit", "unclear"}
+                and not related.intersection(decisive)
+                and not reciprocal
+            ):
+                errors.append(f"{label}: material conflict {conflict_id} lacks adverse or contrary evidence")
+
+    covered_observations = {
+        str(value)
+        for candidate in candidates.values()
+        for value in _items(candidate.get("observation_ids"))
+    }
+    if final and covered_observations != set(observations):
+        errors.append("candidate merge must retain every and only independent observations")
+
+    _validate_audit_records(indexes, final=final, errors=errors)
+    _validate_council_records(indexes, errors)
+
+
+def _validate_audit_records(
+    indexes: dict[str, dict[str, dict[str, Any]]],
+    *,
+    final: bool,
+    errors: list[str],
+) -> None:
+    audits = indexes["audit_records.jsonl"]
+    candidates = indexes["candidate_records.jsonl"]
+    claims = indexes["claim_ledger.jsonl"]
+    searches = indexes["search_log.jsonl"]
+    sources = indexes["source_corpus.jsonl"]
+    units = indexes["research_units.jsonl"]
+    rationales: dict[str, str] = {}
+    for audit_id, audit in audits.items():
+        subject_id = str(audit.get("subject_id"))
+        if audit.get("subject_type") != "claim" or subject_id not in claims:
+            errors.append(f"audit {audit_id}: subject must resolve to a claim")
+        if audit.get("verdict") not in AUDIT_VERDICTS:
+            errors.append(f"audit {audit_id}: invalid verdict")
+        checked = {str(value) for value in _items(audit.get("checked_source_ids"))}
+        subject_sources = {str(value) for value in _items(claims.get(subject_id, {}).get("source_ids"))}
+        if not checked.issubset(subject_sources):
+            errors.append(f"audit {audit_id}: checked sources must be linked from the subject claim")
+        for source_id in checked:
+            source = sources.get(source_id)
+            if not source or source.get("content_verified") is not True or source.get("screen_decision") != "include":
+                errors.append(f"audit {audit_id}: checked source {source_id} is not verified")
+            elif subject_id not in {str(value) for value in _items(source.get("supported_claim_ids"))}:
+                errors.append(f"audit {audit_id}: checked source {source_id} is not linked to its subject claim")
+        retrieved: set[str] = set()
+        families: set[str] = set()
+        for query_id in _items(audit.get("independent_search_ids")):
+            query = searches.get(str(query_id))
+            if not query or str(query.get("executed_by_agent_id")) != str(audit.get("auditor_agent_id")):
+                errors.append(f"audit {audit_id}: independent search provenance is invalid")
+            elif units.get(str(query.get("research_unit_id")), {}).get("unit_type") != "decisive_audit":
+                errors.append(f"audit {audit_id}: independent search is not from the decisive-audit unit")
+            else:
+                retrieved.update(str(value) for value in _items(query.get("verified_source_ids")))
+                families.add(str(query.get("query_family")))
+                if subject_id not in {str(value) for value in _items(query.get("produced_claim_ids"))}:
+                    errors.append(f"audit {audit_id}: search {query_id} is not bound to the subject claim")
+        if families != set(AUDIT_QUERY_FAMILIES):
+            errors.append(f"audit {audit_id}: each claim requires verification and counterevidence searches")
+        if not checked.issubset(retrieved):
+            errors.append(f"audit {audit_id}: checked sources were not independently retrieved")
+        rationale = " ".join(str(audit.get("rationale", "")).casefold().split())
+        if rationale in rationales and rationales[rationale] != audit_id:
+            errors.append(f"audit {audit_id}: rationale duplicates {rationales[rationale]}; use claim-specific reasoning")
+        elif rationale:
+            rationales[rationale] = audit_id
+        expected_status = (
+            "independently_verified" if audit.get("verdict") == "supported"
+            else "qualified" if audit.get("verdict") == "qualified"
+            else "conflicted"
+        )
+        if subject_id in claims and claims[subject_id].get("audit_status") != expected_status:
+            errors.append(f"audit {audit_id}: claim audit_status disagrees with the verdict")
+    if final:
+        decisive = {
+            str(value) for candidate in candidates.values() for value in _items(candidate.get("decisive_claim_ids"))
+        }
+        audited = {
+            str(row.get("subject_id")) for row in audits.values() if row.get("subject_type") == "claim"
+        }
+        if audited != decisive:
+            errors.append("audit records must cover every and only decisive candidate claims")
+
+
+def _validate_council_records(
+    indexes: dict[str, dict[str, dict[str, Any]]], errors: list[str]
+) -> None:
+    candidates = indexes["candidate_records.jsonl"]
+    claims = indexes["claim_ledger.jsonl"]
+    councils = indexes["council_records.jsonl"]
+    sources = indexes["source_corpus.jsonl"]
+    for candidate_id, council in councils.items():
+        candidate = candidates.get(candidate_id, {})
+        if not candidate:
+            errors.append(f"council {candidate_id}: unknown candidate")
+        if council.get("disposition") not in COUNCIL_DISPOSITIONS:
+            errors.append(f"council {candidate_id}: invalid disposition")
+        if council.get("review_reason") not in {"leader", "material_conflict", "leader_and_conflict"}:
+            errors.append(f"council {candidate_id}: invalid review_reason")
+        if council.get("audit_status") != "reviewed":
+            errors.append(f"council {candidate_id}: audit_status must be reviewed")
+        reviewed = {str(value) for value in _items(council.get("reviewed_claim_ids"))}
+        checked = {str(value) for value in _items(council.get("checked_source_ids"))}
+        if not reviewed.issubset(claims):
+            errors.append(f"council {candidate_id}: reviewed_claim_ids must resolve")
+        if not checked.issubset(sources):
+            errors.append(f"council {candidate_id}: checked_source_ids must resolve")
+        if not reviewed.issubset({str(value) for value in _items(candidate.get("decisive_claim_ids"))}):
+            errors.append(f"council {candidate_id}: reviewed claims are not decisive candidate claims")
+        material = {str(value) for value in _items(candidate.get("material_conflicts"))}
+        unresolved = {str(value) for value in _items(council.get("unresolved_conflicts"))}
+        if not unresolved.issubset(material):
+            errors.append(f"council {candidate_id}: unresolved_conflicts must be material candidate conflicts")
+        if (council.get("disposition") == "conflict_unresolved") != bool(unresolved):
+            errors.append(f"council {candidate_id}: unresolved conflicts and disposition must agree")
+        endpoint = candidate.get("target_endpoint") if isinstance(candidate.get("target_endpoint"), dict) else {}
+        decision_sources = {str(value) for value in _items(candidate.get("candidate_class_source_ids"))}
+        decision_sources.update(str(value) for value in _items(endpoint.get("source_ids")))
+        readiness = candidate.get("repurposing_readiness")
+        if isinstance(readiness, dict):
+            decision_sources.update(str(value) for value in _items(readiness.get("source_ids")))
+        if not decision_sources.issubset(checked):
+            errors.append(f"council {candidate_id}: checked sources must cover class, endpoint, and readiness")
+        if council.get("candidate_class") != candidate.get("candidate_class"):
+            errors.append(f"council {candidate_id}: candidate_class assessment does not match the candidate")
+        if council.get("target_endpoint_type") != endpoint.get("endpoint_type"):
+            errors.append(f"council {candidate_id}: target endpoint assessment does not match the candidate")
+        if not str(council.get("candidate_class_assessment", "")).strip() or not str(
+            council.get("endpoint_assessment", "")
+        ).strip():
+            errors.append(f"council {candidate_id}: class and endpoint assessments are required")
+        expected = (
+            "baseline_only" if candidate.get("candidate_class") == "supportive_standard_care"
+            else "benchmark_only" if candidate.get("candidate_class") in {
+                "target_disease_investigational", "approved_for_target_disease"
+            }
+            else ""
+        )
+        if expected and council.get("disposition") != expected:
+            errors.append(f"council {candidate_id}: {candidate.get('candidate_class')} requires {expected}")
+        if not expected and council.get("disposition") in {"baseline_only", "benchmark_only"}:
+            errors.append(f"council {candidate_id}: disposition conflicts with candidate_class")
+
+
+def _validate_final_runtime(
     root: Path,
     state: dict[str, Any],
     plan: dict[str, Any],
     attempts: list[dict[str, Any]],
-    units: list[dict[str, Any]],
-    candidates: list[dict[str, Any]],
-    councils: list[dict[str, Any]],
+    indexes: dict[str, dict[str, dict[str, Any]]],
     errors: list[str],
 ) -> None:
-    if state.get("schema_version") != SCHEMA_VERSION:
-        errors.append(f"program_state.json: schema_version must be {SCHEMA_VERSION}")
-    if state.get("max_active_jobs") != MAX_ACTIVE_JOBS:
-        errors.append(f"program_state.json: max_active_jobs must be {MAX_ACTIVE_JOBS}")
-    if not _blank(state.get("active_job_id")) or not _blank(state.get("active_attempt_id")):
-        errors.append("program_state.json: no job or attempt may remain active at finalization")
-    if not _blank(state.get("pending_agent_release_id")) or not _blank(state.get("pending_agent_release_attempt_id")):
-        errors.append("program_state.json: no agent release may remain pending at finalization")
-    if not _blank(state.get("blocked_reason")):
-        errors.append("program_state.json: blocked_reason must be empty at finalization")
-    if plan.get("schema_version") != SCHEMA_VERSION:
-        errors.append(f"execution_plan.json: schema_version must be {SCHEMA_VERSION}")
-    if plan.get("max_active_jobs") != MAX_ACTIVE_JOBS:
-        errors.append(f"execution_plan.json: max_active_jobs must be {MAX_ACTIVE_JOBS}")
-    if plan.get("fixed_seed_topology") is not True:
-        errors.append("execution_plan.json: fixed_seed_topology must be true")
-
+    if state.get("schema_version") != SCHEMA_VERSION or plan.get("schema_version") != SCHEMA_VERSION:
+        errors.append(f"runtime schema_version must be {SCHEMA_VERSION}")
+    if state.get("max_active_jobs") != MAX_ACTIVE_JOBS or plan.get("max_active_jobs") != MAX_ACTIVE_JOBS:
+        errors.append("runtime max_active_jobs must be 1")
+    if state.get("active_job_id") or state.get("active_attempt_id"):
+        errors.append("no job may remain active at finalization")
+    if state.get("blocked_reason"):
+        errors.append("blocked_reason must be empty at finalization")
+    if state.get("current_phase") != "ready_for_finalization":
+        errors.append("current_phase must be ready_for_finalization")
     jobs = plan.get("jobs")
     if not isinstance(jobs, list) or not jobs:
-        errors.append("execution_plan.json: jobs must be a nonempty list")
+        errors.append("execution plan must contain jobs")
         return
-    job_by_id = _index(jobs, "job_id", "execution_plan jobs", errors)
-    role_agents = plan.get("role_agents")
-    if not isinstance(role_agents, dict) or not role_agents:
-        errors.append("execution_plan.json: role_agents must record every assigned independent role")
-        role_agents = {}
-    assigned_values = [str(value) for value in role_agents.values() if str(value).strip()]
-    if len(assigned_values) != len(set(assigned_values)):
-        errors.append("execution_plan.json: one agent is assigned to multiple independent roles")
+    job_by_id = index_rows(jobs, "job_id")
+    assigned = [str(job.get("assigned_agent_id")) for job in jobs if job.get("assigned_agent_id")]
+    if len(assigned) != len(set(assigned)):
+        errors.append("independent jobs must not share assigned agents")
     attempts_by_job: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    attempt_by_id = _index(attempts, "attempt_id", "job_attempts", errors)
-    for attempt_id, attempt in attempt_by_id.items():
-        _required(
-            attempt,
-            (
-                "job_id", "agent_id", "packet_hash", "packet_manifest_path", "expected_result_path",
-                "status", "started_at", "release_acknowledged", "released_at",
-            ),
-            f"attempt {attempt_id}",
-            errors,
-        )
-        job_id = str(attempt.get("job_id", ""))
-        attempts_by_job[job_id].append(attempt)
-        if job_id not in job_by_id:
-            errors.append(f"attempt {attempt_id}: unknown job {job_id}")
-        if attempt.get("status") not in {"complete", "failed"}:
-            errors.append(f"attempt {attempt_id}: unresolved status {attempt.get('status')}")
-        if _blank(attempt.get("finished_at")):
-            errors.append(f"attempt {attempt_id}: missing finished_at")
-        if attempt.get("release_acknowledged") is not True or _blank(attempt.get("released_at")):
-            errors.append(f"attempt {attempt_id}: agent release was not acknowledged")
-
-    unit_by_id = {str(row.get("unit_id")): row for row in units}
-    council_by_id = {str(row.get("candidate_id")): row for row in councils}
-    jobs_by_unit: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for attempt in attempts:
+        attempts_by_job[str(attempt.get("job_id"))].append(attempt)
+        if attempt.get("status") not in {"complete", "failed", "orphaned"}:
+            errors.append(f"attempt {attempt.get('attempt_id')}: unresolved status")
+        if not attempt.get("finished_at"):
+            errors.append(f"attempt {attempt.get('attempt_id')}: missing finished_at")
     for job_id, job in job_by_id.items():
-        _required(
-            job,
-            ("phase", "sequence", "kind", "role", "question", "completion_contract", "status", "packet_manifest_path", "packet_hash", "result_path", "result_hash"),
-            f"job {job_id}",
-            errors,
-        )
         if job.get("status") != "complete":
             errors.append(f"job {job_id}: final status must be complete")
-        for dependency_id in _list(job.get("depends_on")):
-            dependency = job_by_id.get(str(dependency_id))
-            if dependency is None:
-                errors.append(f"job {job_id}: unknown dependency {dependency_id}")
-            elif dependency.get("status") != "complete":
-                errors.append(f"job {job_id}: dependency {dependency_id} is incomplete")
-        unit_id = str(job.get("unit_id", ""))
-        if unit_id:
-            jobs_by_unit[unit_id].append(job)
-            if unit_id not in unit_by_id:
-                errors.append(f"job {job_id}: unknown unit {unit_id}")
-
-        role_key = (
-            f"council:{job.get('candidate_id')}:{job.get('role')}"
-            if job.get("candidate_id")
-            else f"unit:{job.get('unit_id')}:{job.get('role')}"
-            if job.get("unit_id")
-            else f"job:{job_id}:{job.get('role')}"
-        )
-        assigned_agent = str(role_agents.get(role_key, ""))
-        if not assigned_agent:
-            errors.append(f"job {job_id}: no controller role-agent assignment for {role_key}")
-        if unit_id and unit_id in unit_by_id and assigned_agent:
-            unit_agent_field = "worker_agent_id" if job.get("role") == "worker" else "auditor_agent_id"
-            if str(unit_by_id[unit_id].get(unit_agent_field, "")) != assigned_agent:
-                errors.append(f"job {job_id}: controller role agent disagrees with research unit")
-        candidate_id = str(job.get("candidate_id", ""))
-        council_role_fields = {
-            "advocate": "advocate_agent_id",
-            "skeptic": "skeptic_agent_id",
-            "fact_auditor": "fact_auditor_agent_id",
-        }
-        if candidate_id in council_by_id and assigned_agent:
-            council_field = council_role_fields.get(str(job.get("role")))
-            if council_field and str(council_by_id[candidate_id].get(council_field, "")) != assigned_agent:
-                errors.append(f"job {job_id}: controller role agent disagrees with council record")
-
-        manifest_file = _inside_file(root, job.get("packet_manifest_path"), f"job {job_id} packet manifest", errors)
-        result_file = _inside_file(root, job.get("result_path"), f"job {job_id} result", errors)
-        if result_file and str(job.get("result_hash")) != _sha256(result_file):
+        if any(job_by_id.get(str(dep), {}).get("status") != "complete" for dep in _items(job.get("depends_on"))):
+            errors.append(f"job {job_id}: dependency is incomplete")
+        manifest_path = _resolve_file(root, job.get("packet_manifest_path"), f"job {job_id} packet", errors)
+        result_path = _resolve_file(root, job.get("result_path"), f"job {job_id} result", errors)
+        if result_path and str(job.get("result_hash")) != file_hash(result_path):
             errors.append(f"job {job_id}: result hash mismatch")
-        if manifest_file:
-            manifest = _read_json(manifest_file, errors)
-            if manifest.get("schema_version") != SCHEMA_VERSION:
-                errors.append(f"job {job_id}: packet manifest schema version mismatch")
-            if manifest.get("job_id") != job_id:
-                errors.append(f"job {job_id}: packet manifest job mismatch")
-            if manifest.get("packet_hash") != job.get("packet_hash"):
+        if manifest_path:
+            manifest = read_json(manifest_path, {})
+            body = {key: value for key, value in manifest.items() if key != "packet_hash"}
+            if manifest.get("schema_version") != SCHEMA_VERSION or manifest.get("job_id") != job_id:
+                errors.append(f"job {job_id}: packet identity mismatch")
+            if manifest.get("packet_hash") != content_hash(body) or manifest.get("packet_hash") != job.get("packet_hash"):
                 errors.append(f"job {job_id}: packet hash mismatch")
-            manifest_body = {key: value for key, value in manifest.items() if key != "packet_hash"}
-            if manifest.get("packet_hash") != _content_hash(manifest_body):
-                errors.append(f"job {job_id}: packet manifest content hash mismatch")
-            if manifest.get("all_chunks_required") is not True or manifest.get("silent_truncation_permitted") is not False:
-                errors.append(f"job {job_id}: packet does not forbid silent truncation")
-            chunks = _list(manifest.get("required_chunks"))
-            if not chunks:
-                errors.append(f"job {job_id}: packet has no required chunks")
-            for chunk in chunks:
-                chunk_file = _inside_file(root, chunk.get("path"), f"job {job_id} packet chunk", errors)
-                if chunk_file and str(chunk.get("sha256")) != _sha256(chunk_file):
+            for chunk in _items(manifest.get("required_chunks")):
+                chunk_path = _resolve_file(root, chunk.get("path"), f"job {job_id} packet chunk", errors)
+                if chunk_path and str(chunk.get("sha256")) != file_hash(chunk_path):
                     errors.append(f"job {job_id}: packet chunk hash mismatch")
-                if chunk_file:
-                    packet = _read_json(chunk_file, errors)
-                    contract = packet.get("machine_contract")
-                    path_contract = packet.get("path_contract")
-                    if packet.get("schema_version") != SCHEMA_VERSION or not isinstance(contract, dict):
-                        errors.append(f"job {job_id}: packet chunk lacks the versioned machine contract")
-                    elif not all(
-                        key in contract
-                        for key in (
-                            "ledger_schemas", "result_required_fields", "completion_rule",
-                            "tool_paths", "preferred_source_resources", "path_rule", "source_enum_rule",
-                        )
-                    ):
-                        errors.append(f"job {job_id}: packet machine contract is incomplete")
-                    if str(packet.get("run_root", "")) != str(root):
-                        errors.append(f"job {job_id}: packet run_root does not match the authoritative run folder")
-                    if (
-                        not isinstance(path_contract, dict)
-                        or path_contract.get("relative_paths_resolve_against") != "run_root"
-                        or _blank(path_contract.get("missing_artifact_rule"))
-                    ):
-                        errors.append(f"job {job_id}: packet path-resolution contract is incomplete")
-                    for dependency in _list(packet.get("context", {}).get("dependency_results")):
-                        if not isinstance(dependency, dict):
-                            errors.append(f"job {job_id}: dependency result entry is not an object")
-                            continue
-                        dependency_file = _inside_file(
-                            root,
-                            dependency.get("result_path"),
-                            f"job {job_id} dependency result",
-                            errors,
-                        )
-                        if dependency_file and str(dependency.get("result_hash", "")) != _sha256(dependency_file):
-                            errors.append(f"job {job_id}: dependency result hash mismatch")
-                        if dependency.get("path_base") != "run_root":
-                            errors.append(f"job {job_id}: dependency result lacks run-root path semantics")
-                        for artifact in _list(dependency.get("artifact_manifest")):
-                            if not isinstance(artifact, dict):
-                                errors.append(f"job {job_id}: dependency artifact entry is not an object")
-                                continue
-                            artifact_file = _inside_file(
-                                root,
-                                artifact.get("path"),
-                                f"job {job_id} dependency artifact",
-                                errors,
-                            )
-                            if artifact.get("exists") is not True:
-                                errors.append(f"job {job_id}: dependency artifact manifest records a missing file")
-                            if (
-                                artifact_file
-                                and artifact.get("immutable") is True
-                                and str(artifact.get("sha256", "")) != _sha256(artifact_file)
-                            ):
-                                errors.append(f"job {job_id}: dependency artifact hash mismatch")
-
-        completed_attempts = [
+        completed = [
             row for row in attempts_by_job.get(job_id, [])
             if row.get("status") == "complete" and row.get("packet_hash") == job.get("packet_hash")
         ]
-        if not completed_attempts:
-            errors.append(f"job {job_id}: no completed attempt matches the final packet hash")
-        elif assigned_agent and any(str(row.get("agent_id")) != assigned_agent for row in completed_attempts):
-            errors.append(f"job {job_id}: completed attempt does not use assigned role agent")
+        if len(completed) != 1 or str(completed[0].get("agent_id")) != str(job.get("assigned_agent_id")):
+            errors.append(f"job {job_id}: completed attempt does not match the assigned agent and packet")
 
-    for unit_id, unit in unit_by_id.items():
-        unit_jobs = jobs_by_unit.get(unit_id, [])
-        if unit.get("unit_type") == "closure_audit":
-            kinds = {str(job.get("kind")) for job in unit_jobs}
-            if not {"closure_worker", "closure_auditor"}.issubset(kinds):
-                errors.append(f"unit {unit_id}: missing controller closure worker or independent auditor")
-        elif unit.get("unit_type") in {"broad_evidence", "subtopic_evidence", "subtopic_compound", "global_perspective"}:
-            roles = {str(job.get("role")) for job in unit_jobs}
-            if not {"worker", "auditor"}.issubset(roles):
-                errors.append(f"unit {unit_id}: controller plan lacks worker and auditor jobs")
+    units = indexes["research_units.jsonl"]
+    present_broad = {str(row.get("perspective")) for row in units.values() if row.get("unit_type") == "broad_evidence"}
+    present_global = {str(row.get("perspective")) for row in units.values() if row.get("unit_type") == "compound_perspective"}
+    if present_broad != set(BROAD_DOMAINS):
+        errors.append("research units do not contain the exact broad-evidence perspectives")
+    if present_global != set(GLOBAL_PERSPECTIVES):
+        errors.append("research units do not contain the exact independent compound perspectives")
+    if sum(row.get("unit_type") == "decisive_audit" for row in units.values()) != 1:
+        errors.append("exactly one decisive-audit unit is required")
 
-    candidate_ids = {str(row.get("candidate_id")) for row in candidates}
-    for candidate_id in candidate_ids:
-        council_jobs = sorted(
-            [job for job in jobs if str(job.get("candidate_id", "")) == candidate_id],
-            key=lambda row: int(row.get("sequence", 0)),
+    candidates = list(indexes["candidate_records.jsonl"].values())
+    council_job = next((job for job in jobs if job.get("kind") == "council"), None)
+    try:
+        from ranking import council_selection, rank_candidates
+
+        computed = rank_candidates(root, persist=False)
+        stored = {str(row.get("candidate_id")): row for row in candidates}
+        for row in computed:
+            original = stored[str(row["candidate_id"])]
+            for field in (
+                "raw_score", "total_score", "applied_cap", "rank_section", "rank", "endpoint_rank",
+                "ranking_version",
+            ):
+                if original.get(field) != row.get(field):
+                    errors.append(f"candidate {row['candidate_id']}: stored {field} differs from deterministic ranking")
+        if council_job:
+            snapshot = council_job.get("selection_snapshot")
+            if not isinstance(snapshot, list) or council_job.get("selection_snapshot_hash") != content_hash(snapshot):
+                errors.append("council selection snapshot is missing or has an invalid hash")
+                selected = set()
+            else:
+                selected = set(council_selection(snapshot))
+        else:
+            selected = set(council_selection(computed))
+    except Exception as exc:
+        errors.append(str(exc))
+        selected = set()
+    recorded = set(indexes["council_records.jsonl"])
+    if selected:
+        if not council_job or set(str(value) for value in _items(council_job.get("candidate_ids"))) != selected:
+            errors.append("council job does not match deterministic leader/conflict selection")
+        if recorded != selected:
+            errors.append("council records do not cover exactly the selected candidates")
+        if council_job:
+            reviewer = str(council_job.get("assigned_agent_id", ""))
+            if any(str(row.get("reviewer_agent_id")) != reviewer for row in indexes["council_records.jsonl"].values()):
+                errors.append("council reviewer provenance does not match its job")
+    elif council_job or recorded:
+        errors.append("council work exists without a selected candidate")
+
+
+def _load_ledgers(root: Path, errors: list[str]) -> dict[str, list[dict[str, Any]]]:
+    ledgers: dict[str, list[dict[str, Any]]] = {}
+    for filename in SCHEMAS:
+        try:
+            ledgers[filename] = read_jsonl(root / filename)
+        except Exception as exc:
+            errors.append(f"{filename}: invalid JSONL: {exc}")
+            ledgers[filename] = []
+    return ledgers
+
+
+def validate_ledgers(
+    root: Path,
+    ledgers: dict[str, list[dict[str, Any]]],
+    plan: dict[str, Any],
+    *,
+    final: bool,
+) -> list[str]:
+    errors: list[str] = []
+    indexes = _schema_rows(ledgers, errors)
+    jobs = index_rows(plan.get("jobs", []), "job_id") if isinstance(plan.get("jobs"), list) else {}
+    _validate_sources_and_searches(root, indexes, jobs, errors)
+    _validate_evidence(indexes, errors)
+    _validate_compounds(indexes, final=final, errors=errors)
+    return errors
+
+
+def validate_staged_result(
+    run_folder: str | Path,
+    job: dict[str, Any],
+    result: dict[str, Any],
+    active_agent_id: str,
+) -> list[str]:
+    root = Path(run_folder).expanduser().resolve()
+    errors: list[str] = []
+    updates = result.get("ledger_updates")
+    if not isinstance(updates, dict):
+        return ["ledger_updates must be an object"]
+    permitted = allowed_ledgers(str(job.get("kind", "")))
+    unknown = set(updates) - permitted
+    if unknown:
+        errors.append(f"job {job.get('job_id')}: unapproved ledgers {sorted(unknown)}")
+    ledgers = _load_ledgers(root, errors)
+    original_indexes = {
+        filename: index_rows(rows, SCHEMAS[filename]["key"])
+        for filename, rows in ledgers.items()
+    }
+    if job.get("kind") == "research":
+        for filename in (
+            "search_log.jsonl", "claim_ledger.jsonl", "evidence_graph.jsonl",
+            "candidate_observations.jsonl",
+        ):
+            key = SCHEMAS[filename]["key"]
+            for row in updates.get(filename, []):
+                if isinstance(row, dict) and str(row.get(key, "")) in original_indexes[filename]:
+                    errors.append(f"{filename} {row.get(key)}: research jobs may not overwrite prior records")
+    for source in updates.get("source_corpus.jsonl", []):
+        if not isinstance(source, dict):
+            continue
+        source_id = str(source.get("source_id", ""))
+        original = original_indexes["source_corpus.jsonl"].get(source_id)
+        if not original:
+            continue
+        changed = {
+            field for field in set(original) | set(source)
+            if field not in SOURCE_AGGREGATE_FIELDS and original.get(field) != source.get(field)
+        }
+        if changed:
+            errors.append(f"source {source_id}: rediscovery may not change fields {sorted(changed)}")
+    if job.get("kind") == "decisive_audit":
+        for filename, mutable_fields in AUDIT_MUTABLE_FIELDS.items():
+            key = SCHEMAS[filename]["key"]
+            for row in updates.get(filename, []):
+                if not isinstance(row, dict):
+                    continue
+                identity = str(row.get(key, ""))
+                original = original_indexes[filename].get(identity)
+                if not original:
+                    continue
+                changed = {
+                    field for field in set(original) | set(row)
+                    if field not in mutable_fields and original.get(field) != row.get(field)
+                }
+                if changed:
+                    errors.append(f"{filename} {identity}: audit may not change fields {sorted(changed)}")
+                monotonic_fields = (
+                    {"source_ids", "contrary_claim_ids", "supersedes_claim_ids"}
+                    if filename == "claim_ledger.jsonl"
+                    else {"claim_ids", "contrary_edge_ids", "supersedes_edge_ids"}
+                    if filename == "evidence_graph.jsonl"
+                    else set()
+                )
+                for field in monotonic_fields:
+                    before = {str(value) for value in _items(original.get(field))}
+                    after = {str(value) for value in _items(row.get(field))}
+                    if not before.issubset(after):
+                        errors.append(f"{filename} {identity}: audit may not discard {field}")
+    if job.get("kind") == "council":
+        selected = {str(value) for value in _items(job.get("candidate_ids"))}
+        candidate_updates = {
+            str(row.get("candidate_id")): row
+            for row in updates.get("candidate_records.jsonl", [])
+            if isinstance(row, dict)
+        }
+        if set(candidate_updates) != selected:
+            errors.append("council must return every and only selected candidate record")
+        for candidate_id, row in candidate_updates.items():
+            original = original_indexes["candidate_records.jsonl"].get(candidate_id, {})
+            changed = {
+                field for field in set(original) | set(row)
+                if field not in COUNCIL_MUTABLE_CANDIDATE_FIELDS and original.get(field) != row.get(field)
+            }
+            if changed:
+                errors.append(f"candidate {candidate_id}: council may not change fields {sorted(changed)}")
+            old_endpoint = original.get("target_endpoint", {})
+            new_endpoint = row.get("target_endpoint", {})
+            if (
+                isinstance(old_endpoint, dict)
+                and isinstance(new_endpoint, dict)
+                and old_endpoint.get("label") != new_endpoint.get("label")
+            ):
+                errors.append(f"candidate {candidate_id}: council may not change the endpoint label")
+    if job.get("kind") == "merge":
+        mutable_observation_fields = {
+            "active_moiety_key", "active_moiety_source_ids", "active_moiety_rationale",
+        }
+        for row in updates.get("candidate_observations.jsonl", []):
+            if not isinstance(row, dict):
+                continue
+            observation_id = str(row.get("observation_id", ""))
+            original = original_indexes["candidate_observations.jsonl"].get(observation_id)
+            if not original:
+                errors.append(f"observation {observation_id}: merge may normalize only existing observations")
+                continue
+            changed = {
+                field for field in set(original) | set(row)
+                if field not in mutable_observation_fields and original.get(field) != row.get(field)
+            }
+            if changed:
+                errors.append(f"observation {observation_id}: merge may not change fields {sorted(changed)}")
+    for filename, rows in updates.items():
+        if filename not in SCHEMAS:
+            continue
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            errors.append(f"{filename}: staged updates must be a list of objects")
+            continue
+        key = SCHEMAS[filename]["key"]
+        merged = index_rows(ledgers[filename], key)
+        for row in rows:
+            identity = str(row.get(key, ""))
+            if identity:
+                if filename == "source_corpus.jsonl" and identity in merged:
+                    combined = dict(row)
+                    for field in SOURCE_AGGREGATE_FIELDS:
+                        combined[field] = sorted({
+                            *(str(value) for value in _items(merged[identity].get(field))),
+                            *(str(value) for value in _items(row.get(field))),
+                        })
+                    merged[identity] = combined
+                else:
+                    merged[identity] = row
+        ledgers[filename] = list(merged.values())
+    errors.extend(validate_ledgers(root, ledgers, read_json(root / "execution_plan.json", {}), final=False))
+
+    for query in updates.get("search_log.jsonl", []):
+        if str(query.get("executed_by_agent_id", "")) != active_agent_id:
+            errors.append(f"staged query {query.get('query_id')}: executor must be the active agent")
+        if str(query.get("origin_job_id", "")) != str(job.get("job_id", "")):
+            errors.append(f"staged query {query.get('query_id')}: origin_job_id must match the active job")
+    if job.get("kind") == "research":
+        if any(row.get("research_unit_id") != job.get("unit_id") for row in updates.get("search_log.jsonl", [])):
+            errors.append("research job emitted a search for another unit")
+        if any(row.get("research_unit_id") != job.get("unit_id") for row in updates.get("candidate_observations.jsonl", [])):
+            errors.append("research job emitted an observation for another unit")
+        unit = next(
+            (row for row in ledgers["research_units.jsonl"] if str(row.get("unit_id")) == str(job.get("unit_id"))),
+            {},
         )
-        actual = [(str(job.get("stage")), str(job.get("role"))) for job in council_jobs]
-        if actual != list(COUNCIL_STAGE_ROLES):
-            errors.append(f"candidate {candidate_id}: controller council turn order is incomplete or incorrect")
-        for previous, current in zip(council_jobs, council_jobs[1:]):
-            if str(previous.get("job_id")) not in {str(value) for value in _list(current.get("depends_on"))}:
-                errors.append(f"candidate {candidate_id}: council stage {current.get('stage')} does not depend on prior turn")
+        if unit.get("unit_type") == "compound_perspective":
+            exclusions = result.get("candidate_exclusions")
+            if not isinstance(exclusions, list):
+                errors.append("compound-perspective result requires candidate_exclusions")
+            else:
+                source_ids = {str(row.get("source_id")) for row in ledgers["source_corpus.jsonl"]}
+                for position, exclusion in enumerate(exclusions, 1):
+                    label = f"candidate exclusion {position}"
+                    if not isinstance(exclusion, dict) or set(exclusion) != set(NESTED_SCHEMAS["candidate_exclusion"]):
+                        errors.append(f"{label}: fields do not match the schema")
+                        continue
+                    if not str(exclusion.get("name", "")).strip() or not str(exclusion.get("reason", "")).strip():
+                        errors.append(f"{label}: name and reason are required")
+                    cited = [str(value) for value in _items(exclusion.get("source_ids"))]
+                    if not cited or not _unique(cited) or not set(cited).issubset(source_ids):
+                        errors.append(f"{label}: source_ids must be nonempty, unique, and resolve")
+    if job.get("kind") in {"research", "decisive_audit"}:
+        unit = next(
+            (row for row in ledgers["research_units.jsonl"] if str(row.get("unit_id")) == str(job.get("unit_id"))),
+            {},
+        )
+        staged_families = {
+            str(row.get("query_family"))
+            for row in updates.get("search_log.jsonl", [])
+            if str(row.get("research_unit_id")) == str(job.get("unit_id"))
+        }
+        if staged_families != set(unit.get("planned_query_families", [])):
+            errors.append("research result must complete every and only predeclared query family")
+    if job.get("kind") == "merge":
+        observations = {
+            str(row.get("observation_id")) for row in ledgers["candidate_observations.jsonl"]
+        }
+        covered = {
+            str(value)
+            for candidate in ledgers["candidate_records.jsonl"]
+            for value in _items(candidate.get("observation_ids"))
+        }
+        if covered != observations:
+            errors.append("merge result must retain every and only independent candidate observation")
+        try:
+            from ranking import rank_rows
+
+            synthetic_audits = [
+                {"subject_type": "claim", "subject_id": claim_id, "verdict": "supported"}
+                for claim_id in {
+                    str(value)
+                    for candidate in ledgers["candidate_records.jsonl"]
+                    for value in _items(candidate.get("decisive_claim_ids"))
+                }
+            ]
+            rank_rows(
+                ledgers["candidate_records.jsonl"],
+                ledgers["source_corpus.jsonl"],
+                ledgers["claim_ledger.jsonl"],
+                synthetic_audits,
+                ledgers["evidence_graph.jsonl"],
+            )
+        except Exception as exc:
+            errors.append(str(exc))
+    if job.get("kind") == "decisive_audit":
+        decisive = {
+            str(value)
+            for candidate in ledgers["candidate_records.jsonl"]
+            for value in _items(candidate.get("decisive_claim_ids"))
+        }
+        audited = {
+            str(row.get("subject_id"))
+            for row in ledgers["audit_records.jsonl"]
+            if row.get("subject_type") == "claim"
+        }
+        if audited != decisive:
+            errors.append("decisive audit must cover every and only decisive candidate claims")
+        all_candidates = {
+            str(row.get("candidate_id")) for row in ledgers["candidate_records.jsonl"]
+        }
+        updated_candidates = {
+            str(row.get("candidate_id")) for row in updates.get("candidate_records.jsonl", [])
+        }
+        if updated_candidates != all_candidates:
+            errors.append("decisive audit must reassess every candidate record, including scores and caps")
+        if any(str(row.get("auditor_agent_id")) != active_agent_id for row in updates.get("audit_records.jsonl", [])):
+            errors.append("audit record provenance must match the active independent auditor")
+        try:
+            from ranking import rank_rows
+
+            rank_rows(
+                ledgers["candidate_records.jsonl"],
+                ledgers["source_corpus.jsonl"],
+                ledgers["claim_ledger.jsonl"],
+                ledgers["audit_records.jsonl"],
+                ledgers["evidence_graph.jsonl"],
+            )
+        except Exception as exc:
+            errors.append(str(exc))
+    if job.get("kind") == "council":
+        selected = {str(value) for value in _items(job.get("candidate_ids"))}
+        recorded = {str(row.get("candidate_id")) for row in updates.get("council_records.jsonl", [])}
+        if recorded != selected:
+            errors.append("council result must cover exactly the controller-selected candidates")
+        if any(str(row.get("reviewer_agent_id")) != active_agent_id for row in updates.get("council_records.jsonl", [])):
+            errors.append("council record provenance must match the active reviewer")
+        try:
+            from ranking import rank_rows
+
+            rank_rows(
+                ledgers["candidate_records.jsonl"],
+                ledgers["source_corpus.jsonl"],
+                ledgers["claim_ledger.jsonl"],
+                ledgers["audit_records.jsonl"],
+                ledgers["evidence_graph.jsonl"],
+            )
+        except Exception as exc:
+            errors.append(str(exc))
+    return list(dict.fromkeys(errors))
 
 
 def validate_run(run_folder: str | Path) -> list[str]:
     root = Path(run_folder).expanduser().resolve()
-    errors: list[str] = []
     if not root.is_dir():
         return [f"Run folder does not exist: {root}"]
-
-    for name in REQUIRED_FILES:
-        if not (root / name).is_file():
-            errors.append(f"Missing required file: {name}")
-    for directory in ("dossiers", "packets", "staging", "raw_sources"):
-        if not (root / directory).is_dir():
-            errors.append(f"Missing required directory: {directory}")
-    if errors:
-        return errors
-
-    case = _read_json(root / "case.json", errors)
-    state = _read_json(root / "program_state.json", errors)
-    plan = _read_json(root / "execution_plan.json", errors)
-    orchestration = _read_jsonl(root / "orchestration.jsonl", errors)
-    attempts = _read_jsonl(root / "job_attempts.jsonl", errors)
-    sources = _read_jsonl(root / "source_corpus.jsonl", errors)
-    searches = _read_jsonl(root / "search_log.jsonl", errors)
-    claims = _read_jsonl(root / "claim_ledger.jsonl", errors)
-    edges = _read_jsonl(root / "evidence_graph.jsonl", errors)
-    subtopics = _read_jsonl(root / "subtopic_registry.jsonl", errors)
-    units = _read_jsonl(root / "research_units.jsonl", errors)
-    audits = _read_jsonl(root / "unit_audits.jsonl", errors)
-    candidates = _read_jsonl(root / "candidate_records.jsonl", errors)
-    councils = _read_jsonl(root / "council_records.jsonl", errors)
-    exchanges = _read_jsonl(root / "council_exchanges.jsonl", errors)
-
-    _validate_runtime(root, state, plan, attempts, units, candidates, councils, errors)
-
-    _required(case, ("human_gene", "worm_gene", "allele_mode"), "case.json", errors)
-    for gate in (
-        "broad_evidence_complete",
-        "subtopic_closure_complete",
-        "de_novo_perspectives_complete",
-        "candidate_universe_complete",
-        "council_complete",
-    ):
-        if state.get(gate) is not True:
-            errors.append(f"program_state.json: {gate} must be true")
-    if state.get("current_phase") != "ready_for_finalization":
-        errors.append("program_state.json: current_phase must be ready_for_finalization")
-    for event_number, event in enumerate(orchestration, 1):
-        _required(event, ("event_id", "status"), f"orchestration event {event_number}", errors)
-
-    source_by_id = _index(sources, "source_id", "source_corpus", errors)
-    search_by_id = _index(searches, "query_id", "search_log", errors)
-    claim_by_id = _index(claims, "claim_id", "claim_ledger", errors)
-    edge_by_id = _index(edges, "edge_id", "evidence_graph", errors)
-    subtopic_by_id = _index(subtopics, "subtopic_id", "subtopic_registry", errors)
-    unit_by_id = _index(units, "unit_id", "research_units", errors)
-    audit_by_id = _index(audits, "audit_id", "unit_audits", errors)
-    candidate_by_id = _index(candidates, "candidate_id", "candidate_records", errors)
-    council_by_id = _index(councils, "candidate_id", "council_records", errors)
-    exchange_by_id = _index(exchanges, "exchange_id", "council_exchanges", errors)
-    plan_job_by_id = _index(plan.get("jobs", []), "job_id", "execution_plan jobs", errors)
-
-    for required_name, mapping in (
-        ("source_corpus", source_by_id),
-        ("search_log", search_by_id),
-        ("claim_ledger", claim_by_id),
-        ("evidence_graph", edge_by_id),
-        ("subtopic_registry", subtopic_by_id),
-        ("research_units", unit_by_id),
-        ("unit_audits", audit_by_id),
-    ):
-        if not mapping:
-            errors.append(f"{required_name}: must not be empty")
-
-    for source_id, source in source_by_id.items():
-        _present(source, LEDGER_SCHEMAS["source_corpus.jsonl"], f"source {source_id}", errors)
-        _required(
-            source,
-            (
-                "canonical_identifier", "identifier_type", "title", "source_kind", "source_family",
-                "screen_decision", "original_pointer", "verification_method", "verification_scope",
-                "compaction_receipt_path", "compaction_record_hash",
-            ),
-            f"source {source_id}",
-            errors,
-        )
-        unexpected = set(source) - SOURCE_ALLOWED_FIELDS
-        if unexpected:
-            errors.append(f"source {source_id}: unrecognized or uncompact source fields {sorted(unexpected)}")
-        if source.get("screen_decision") not in {"include", "exclude"}:
-            errors.append(f"source {source_id}: screen_decision must be include or exclude")
-        prohibited = PROHIBITED_SOURCE_PAYLOAD_FIELDS.intersection(source)
-        if prohibited:
-            errors.append(f"source {source_id}: prohibited bulky payload fields {sorted(prohibited)}")
-        receipt_file = _inside_file(
-            root, source.get("compaction_receipt_path"), f"source {source_id} compaction receipt", errors
-        )
-        if receipt_file:
-            receipt = _read_json(receipt_file, errors)
-            records = _list(receipt.get("records"))
-            matching = [
-                record for record in records
-                if isinstance(record, dict)
-                and str(record.get("compact_record_hash")) == str(source.get("compaction_record_hash"))
-            ]
-            if receipt.get("schema_version") != 2 or receipt.get("compactor") != "compact_source_payload.py":
-                errors.append(f"source {source_id}: invalid compaction receipt schema")
-            if len(matching) != 1:
-                errors.append(f"source {source_id}: compaction record hash does not resolve exactly once")
-            elif (
-                str(matching[0].get("canonical_identifier", "")) != str(source.get("canonical_identifier", ""))
-                or str(matching[0].get("title", "")) != str(source.get("title", ""))
-            ):
-                errors.append(f"source {source_id}: canonical identity disagrees with compact receipt")
-            elif str(matching[0].get("query_id", "")) not in {
-                str(value) for value in _list(source.get("discovery_query_ids"))
-            }:
-                errors.append(f"source {source_id}: compact receipt query lacks reverse source linkage")
-        for unit_id in _list(source.get("discovered_by_units")):
-            if str(unit_id) not in unit_by_id:
-                errors.append(f"source {source_id}: unknown discovered_by unit {unit_id}")
-        for query_id in _list(source.get("discovery_query_ids")):
-            if str(query_id) not in search_by_id:
-                errors.append(f"source {source_id}: unknown discovery query {query_id}")
-        for claim_id in _list(source.get("supported_claim_ids")):
-            if str(claim_id) not in claim_by_id:
-                errors.append(f"source {source_id}: unknown supported claim {claim_id}")
-
-    searches_by_unit: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for query_id, query in search_by_id.items():
-        _present(query, LEDGER_SCHEMAS["search_log.jsonl"], f"query {query_id}", errors)
-        _required(
-            query,
-            (
-                "research_unit_id", "query_family", "resource", "query", "compact_payload_paths",
-                "pagination_trace", "acquired_source_ids", "original_verified_source_ids",
-                "executed_by_agent_id", "executor_role", "origin_job_id", "outcome", "closure_note",
-            ),
-            f"query {query_id}",
-            errors,
-        )
-        unit_id = str(query.get("research_unit_id", ""))
-        searches_by_unit[unit_id].append(query)
-        if unit_id not in unit_by_id:
-            errors.append(f"query {query_id}: unknown research unit {unit_id}")
-        subtopic_id = str(query.get("subtopic_id", ""))
-        if subtopic_id and subtopic_id not in subtopic_by_id:
-            errors.append(f"query {query_id}: unknown subtopic {subtopic_id}")
-        result_count = _integer(query.get("result_count"), f"query {query_id} result_count", errors)
-        dedup_count = _integer(query.get("deduplicated_count"), f"query {query_id} deduplicated_count", errors)
-        screened_count = _integer(query.get("screened_count"), f"query {query_id} screened_count", errors)
-        acquired_count = _integer(query.get("acquired_count"), f"query {query_id} acquired_count", errors)
-        verified_count = _integer(
-            query.get("original_verified_count"), f"query {query_id} original_verified_count", errors
-        )
-        page_count = _integer(query.get("page_count"), f"query {query_id} page_count", errors)
-        if None not in (result_count, dedup_count, screened_count, acquired_count, verified_count):
-            if dedup_count > result_count:
-                errors.append(f"query {query_id}: deduplicated_count exceeds result_count")
-            if screened_count != dedup_count:
-                errors.append(f"query {query_id}: every deduplicated record must be screened")
-            if not (verified_count <= acquired_count <= screened_count):
-                errors.append(f"query {query_id}: verification/acquisition/screening counts are inconsistent")
-            if len(_list(query.get("retained_source_ids"))) > verified_count:
-                errors.append(f"query {query_id}: retained sources exceed original-verified records")
-        if page_count is not None and page_count < 1:
-            errors.append(f"query {query_id}: page_count must show at least one retrieved response page")
-        if query.get("pagination_complete") is not True or query.get("continuation_exhausted") is not True:
-            errors.append(f"query {query_id}: pagination or continuation is not exhausted")
-        _validate_query_depth(root, query_id, query, source_by_id, errors)
-        executor_role = str(query.get("executor_role", ""))
-        executor_id = str(query.get("executed_by_agent_id", ""))
-        unit = unit_by_id.get(unit_id, {})
-        expected_executor = str(
-            unit.get("auditor_agent_id" if executor_role == "auditor" else "worker_agent_id", "")
-        )
-        if executor_role not in {"worker", "auditor"} or not executor_id or executor_id != expected_executor:
-            errors.append(f"query {query_id}: executor provenance does not match its controller-assigned role")
-        origin_job = plan_job_by_id.get(str(query.get("origin_job_id", "")))
-        expected_job_role = "worker" if executor_role == "worker" else (
-            "closure_auditor" if unit.get("unit_type") == "closure_audit" else "auditor"
-        )
-        if (
-            origin_job is None
-            or str(origin_job.get("unit_id", "")) != unit_id
-            or str(origin_job.get("role", "")) != expected_job_role
-        ):
-            errors.append(f"query {query_id}: origin_job_id does not prove the recorded executor role")
-        closure_note = str(query.get("closure_note", "")).casefold()
-        if not closure_note or any(phrase in closure_note for phrase in BAD_COMPLETION_PHRASES):
-            errors.append(f"query {query_id}: invalid or rhetorical closure note")
-        if query.get("rate_limit_pending") is not False:
-            errors.append(f"query {query_id}: rate_limit_pending must be false")
-        if str(query.get("outcome", "")).lower() in {"pending", "failed", "rate_limited"}:
-            errors.append(f"query {query_id}: unresolved outcome {query.get('outcome')}")
-        for source_id in _list(query.get("retained_source_ids")):
-            source = source_by_id.get(str(source_id))
-            if source is None:
-                errors.append(f"query {query_id}: unknown retained source {source_id}")
-            else:
-                if query_id not in {str(value) for value in _list(source.get("discovery_query_ids"))}:
-                    errors.append(f"query {query_id}: source {source_id} lacks reverse query linkage")
-                if unit_id not in {str(value) for value in _list(source.get("discovered_by_units"))}:
-                    errors.append(f"query {query_id}: source {source_id} lacks reverse unit linkage")
-        for child_id in _list(query.get("new_subtopic_ids")):
-            if str(child_id) not in subtopic_by_id:
-                errors.append(f"query {query_id}: unknown new subtopic {child_id}")
-        for claim_id in _list(query.get("new_claim_ids")):
-            if str(claim_id) not in claim_by_id:
-                errors.append(f"query {query_id}: unknown new claim {claim_id}")
-        for candidate_id in _list(query.get("new_candidate_ids")):
-            if str(candidate_id) not in candidate_by_id:
-                errors.append(f"query {query_id}: unknown new candidate {candidate_id}")
-        unit = unit_by_id.get(unit_id, {})
-        if _list(query.get("new_candidate_ids")) and unit.get("unit_type") not in {"subtopic_compound", "global_perspective"}:
-            errors.append(f"query {query_id}: evidence-only unit emitted candidates")
-
-    for claim_id, claim in claim_by_id.items():
-        _required(
-            claim,
-            ("subtopic_id", "claim", "evidence_kind", "calibration", "directionality", "allele_relevance", "audit_status"),
-            f"claim {claim_id}",
-            errors,
-        )
-        if str(claim.get("subtopic_id", "")) not in subtopic_by_id:
-            errors.append(f"claim {claim_id}: unknown subtopic {claim.get('subtopic_id')}")
-        if claim.get("calibration") not in CALIBRATIONS:
-            errors.append(f"claim {claim_id}: invalid calibration {claim.get('calibration')}")
-        if claim.get("audit_status") not in VERIFIED:
-            errors.append(f"claim {claim_id}: audit_status is not verified")
-        source_ids = [str(value) for value in _list(claim.get("source_ids"))]
-        if not source_ids:
-            errors.append(f"claim {claim_id}: no source_ids")
-        for source_id in source_ids:
-            source = source_by_id.get(source_id)
-            if source is None:
-                errors.append(f"claim {claim_id}: unknown source {source_id}")
-                continue
-            if not all(source.get(field) is True for field in ("metadata_verified", "original_acquired", "content_verified")):
-                errors.append(f"claim {claim_id}: source {source_id} lacks original-content verification")
-            if source.get("screen_decision") != "include":
-                errors.append(f"claim {claim_id}: source {source_id} is not included")
-            if _blank(source.get("original_pointer")) or _blank(source.get("verification_method")) or _blank(source.get("verification_scope")):
-                errors.append(f"claim {claim_id}: source {source_id} lacks verification traceability")
-            if claim_id not in {str(value) for value in _list(source.get("supported_claim_ids"))}:
-                errors.append(f"claim {claim_id}: source {source_id} lacks reverse claim linkage")
-        for contrary_id in _list(claim.get("contrary_claim_ids")):
-            if str(contrary_id) not in claim_by_id:
-                errors.append(f"claim {claim_id}: unknown contrary claim {contrary_id}")
-
-    for edge_id, edge in edge_by_id.items():
-        _present(edge, LEDGER_SCHEMAS["evidence_graph.jsonl"], f"edge {edge_id}", errors)
-        _required(
-            edge,
-            ("from_node", "to_node", "relation", "direction", "directionality_status", "allele_mode_effect", "claim_ids", "audit_status"),
-            f"edge {edge_id}",
-            errors,
-        )
-        if edge.get("audit_status") not in VERIFIED:
-            errors.append(f"edge {edge_id}: audit_status is not verified")
-        if edge.get("directionality_status") not in {"supports_rescue", "opposes_rescue", "ambiguous"}:
-            errors.append(f"edge {edge_id}: invalid directionality_status")
-        edge_claims = [str(value) for value in _list(edge.get("claim_ids"))]
-        if not edge_claims:
-            errors.append(f"edge {edge_id}: no claim_ids")
-        for claim_id in edge_claims:
-            if claim_id not in claim_by_id:
-                errors.append(f"edge {edge_id}: unknown claim {claim_id}")
-
-    workers: dict[str, str] = {}
-    auditors: dict[str, str] = {}
-    units_by_type_and_perspective: set[tuple[str, str]] = set()
-    for unit_id, unit in unit_by_id.items():
-        _required(unit, ("unit_type", "worker_agent_id", "auditor_agent_id", "status", "audit_status"), f"unit {unit_id}", errors)
-        worker = str(unit.get("worker_agent_id", ""))
-        auditor = str(unit.get("auditor_agent_id", ""))
-        if worker == auditor and worker:
-            errors.append(f"unit {unit_id}: worker and auditor must differ")
-        if worker in workers:
-            errors.append(f"units {workers[worker]} and {unit_id}: worker agent reused")
-        else:
-            workers[worker] = unit_id
-        if auditor in auditors:
-            errors.append(f"units {auditors[auditor]} and {unit_id}: auditor agent reused")
-        else:
-            auditors[auditor] = unit_id
-        if unit.get("status") not in FINAL_UNIT_STATUSES:
-            errors.append(f"unit {unit_id}: invalid final status {unit.get('status')}")
-        if unit.get("audit_status") not in VERIFIED:
-            errors.append(f"unit {unit_id}: audit_status is not verified")
-        planned = {str(value) for value in _list(unit.get("planned_query_families"))}
-        completed = {str(value) for value in _list(unit.get("completed_query_families"))}
-        if not planned or planned != completed:
-            errors.append(f"unit {unit_id}: planned and completed query families must be equal and nonempty")
-        unit_type = str(unit.get("unit_type", ""))
-        required_families = required_query_families(unit_type)
-        missing_families = required_families - planned
-        if missing_families:
-            errors.append(f"unit {unit_id}: missing required query families {sorted(missing_families)}")
-        logged_families = {str(query.get("query_family", "")) for query in searches_by_unit.get(unit_id, [])}
-        worker_logged_families = {
-            str(query.get("query_family", ""))
-            for query in searches_by_unit.get(unit_id, [])
-            if query.get("executor_role") == "worker"
-        }
-        if planned - logged_families:
-            errors.append(f"unit {unit_id}: declared families lack searches {sorted(planned - logged_families)}")
-        if logged_families - planned:
-            errors.append(f"unit {unit_id}: search families were not predeclared {sorted(logged_families - planned)}")
-        if planned - worker_logged_families:
-            errors.append(f"unit {unit_id}: worker did not execute declared families {sorted(planned - worker_logged_families)}")
-        independent_ids = [str(value) for value in _list(unit.get("independent_audit_query_ids"))]
-        if not independent_ids:
-            errors.append(f"unit {unit_id}: no independent audit query")
-        for query_id in independent_ids:
-            query = search_by_id.get(query_id)
-            if query is None:
-                errors.append(f"unit {unit_id}: unknown independent audit query {query_id}")
-            elif str(query.get("research_unit_id")) != unit_id:
-                errors.append(f"unit {unit_id}: audit query {query_id} belongs to another unit")
-            elif query.get("query_family") not in {"missing_branch", "counterevidence"}:
-                errors.append(f"unit {unit_id}: audit query {query_id} is not a missing-branch or counterevidence search")
-            elif query.get("executor_role") != "auditor" or str(query.get("executed_by_agent_id")) != auditor:
-                errors.append(f"unit {unit_id}: audit query {query_id} was not independently executed by its auditor")
-        if not searches_by_unit.get(unit_id):
-            errors.append(f"unit {unit_id}: no search records")
-        if unit.get("rate_limit_pending") is not False:
-            errors.append(f"unit {unit_id}: rate_limit_pending must be false")
-        if not _empty_collection(unit.get("known_high_yield_search_remaining")):
-            errors.append(f"unit {unit_id}: known high-yield searches remain")
-        if unit.get("unresolved_repair_count") != 0:
-            errors.append(f"unit {unit_id}: unresolved_repair_count must be 0")
-        if unit.get("status") == "evidence_absent_complete":
-            if _list(unit.get("candidate_ids")):
-                errors.append(f"unit {unit_id}: evidence-absent unit cannot have candidates")
-            if _blank(unit.get("absence_reason")):
-                errors.append(f"unit {unit_id}: evidence-absent unit needs an absence_reason")
-        units_by_type_and_perspective.add((str(unit.get("unit_type", "")), str(unit.get("perspective", ""))))
-
-    if set(workers).intersection(auditors):
-        errors.append("research_units: an agent cannot serve as any worker and any auditor in the same run")
-    present_broad = {perspective for unit_type, perspective in units_by_type_and_perspective if unit_type == "broad_evidence"}
-    for missing in sorted(set(BROAD_DOMAINS) - present_broad):
-        errors.append(f"research_units: missing broad evidence domain {missing}")
-    present_global = {perspective for unit_type, perspective in units_by_type_and_perspective if unit_type == "global_perspective"}
-    required_global = set(GLOBAL_PERSPECTIVES)
-    has_prior_screen = bool(case.get("prior_screen_path") or case.get("prior_screen_rows"))
-    if has_prior_screen and str(case.get("benchmark_mode", "")).casefold() != "blinded":
-        required_global.add("prior_screen_context")
-    if str(case.get("benchmark_mode", "")).casefold() == "blinded" and "prior_screen_context" in present_global:
-        errors.append("research_units: blinded benchmark may not expose prior_screen_context")
-    if case.get("wt_behavioural_parameters") or case.get("disease_model_behavioural_parameters"):
-        required_global.add("behavioural_data_first")
-    for missing in sorted(required_global - present_global):
-        errors.append(f"research_units: missing global perspective {missing}")
-    if not any(unit.get("unit_type") == "closure_audit" for unit in units):
-        errors.append("research_units: missing closure_audit unit")
-
-    audits_by_unit: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for audit_id, audit in audit_by_id.items():
-        _required(
-            audit,
-            ("unit_id", "auditor_agent_id", "perspective_distinctness_verified", "source_overlap_assessment", "final_status", "closure_basis"),
-            f"audit {audit_id}",
-            errors,
-        )
-        unit_id = str(audit.get("unit_id", ""))
-        audits_by_unit[unit_id].append(audit)
-        unit = unit_by_id.get(unit_id)
-        if unit is None:
-            errors.append(f"audit {audit_id}: unknown unit {unit_id}")
-            continue
-        if audit.get("auditor_agent_id") != unit.get("auditor_agent_id"):
-            errors.append(f"audit {audit_id}: auditor does not match unit {unit_id}")
-        if audit.get("final_status") != "verified":
-            errors.append(f"audit {audit_id}: final_status must be verified")
-        if audit.get("perspective_distinctness_verified") is not True:
-            errors.append(f"audit {audit_id}: perspective distinctness is not verified")
-        checked = [str(value) for value in _list(audit.get("checked_source_ids"))]
-        if unit.get("status") == "audited_complete" and not checked:
-            errors.append(f"audit {audit_id}: no decisive source checks")
-        for source_id in checked:
-            if source_id not in source_by_id:
-                errors.append(f"audit {audit_id}: unknown checked source {source_id}")
-        audit_queries = {str(value) for value in _list(audit.get("independent_query_ids"))}
-        unit_queries = {str(value) for value in _list(unit.get("independent_audit_query_ids"))}
-        if not audit_queries or audit_queries != unit_queries:
-            errors.append(f"audit {audit_id}: independent queries do not match unit {unit_id}")
-        findings = _list(audit.get("material_findings"))
-        repairs = _list(audit.get("repairs_completed"))
-        if findings and len(repairs) < len(findings):
-            errors.append(f"audit {audit_id}: not every material finding has a completed repair")
-        closure = str(audit.get("closure_basis", "")).lower()
-        if any(phrase in closure for phrase in BAD_COMPLETION_PHRASES):
-            errors.append(f"audit {audit_id}: invalid completion rationale")
-    for unit_id in unit_by_id:
-        if len(audits_by_unit.get(unit_id, [])) != 1:
-            errors.append(f"unit {unit_id}: expected exactly one final unit audit")
-
-    claims_by_subtopic: dict[str, list[str]] = defaultdict(list)
-    for claim_id, claim in claim_by_id.items():
-        claims_by_subtopic[str(claim.get("subtopic_id", ""))].append(claim_id)
-    for subtopic_id, subtopic in subtopic_by_id.items():
-        _required(subtopic, ("name", "relation_to_case", "status", "closure_reason"), f"subtopic {subtopic_id}", errors)
-        parent_id = str(subtopic.get("parent_id", ""))
-        if parent_id and parent_id not in subtopic_by_id:
-            errors.append(f"subtopic {subtopic_id}: unknown parent {parent_id}")
-        if subtopic.get("status") not in FINAL_UNIT_STATUSES:
-            errors.append(f"subtopic {subtopic_id}: invalid final status")
-        required_unit_ids = [str(value) for value in _list(subtopic.get("required_research_unit_ids"))]
-        for unit_id in required_unit_ids:
-            if unit_id not in unit_by_id:
-                errors.append(f"subtopic {subtopic_id}: unknown required unit {unit_id}")
-        own_units = [unit for unit in units if str(unit.get("subtopic_id", "")) == subtopic_id]
-        if not any(unit.get("unit_type") == "subtopic_evidence" for unit in own_units):
-            errors.append(f"subtopic {subtopic_id}: missing subtopic_evidence unit")
-        if subtopic.get("candidate_relevant") is True and not any(unit.get("unit_type") == "subtopic_compound" for unit in own_units):
-            errors.append(f"subtopic {subtopic_id}: candidate-relevant subtopic lacks compound unit")
-        if subtopic.get("status") == "audited_complete" and not claims_by_subtopic.get(subtopic_id):
-            errors.append(f"subtopic {subtopic_id}: audited completion has no claims")
-        seen: set[str] = set()
-        cursor = subtopic_id
-        while cursor:
-            if cursor in seen:
-                errors.append(f"subtopic {subtopic_id}: parent cycle detected")
-                break
-            seen.add(cursor)
-            cursor = str(subtopic_by_id.get(cursor, {}).get("parent_id", ""))
-
-    structure_key_pattern = re.compile(
-        r"^(INCHIKEY:[A-Z]{14}-[A-Z]{10}-[A-Z]|SMILES-SHA256:[0-9A-F]{64})$",
-        re.IGNORECASE,
-    )
-    normalized_structure_keys: dict[str, str] = {}
-    candidate_paths_by_candidate: dict[str, dict[str, dict[str, Any]]] = {}
-    for candidate_id, candidate in candidate_by_id.items():
-        _present(candidate, LEDGER_SCHEMAS["candidate_records.jsonl"], f"candidate {candidate_id}", errors)
-        _required(
-            candidate,
-            (
-                "canonical_name", "canonical_identifier", "registry_identifiers", "structure_identity_key",
-                "chemical_node_id", "identity_source_ids", "entity_type", "human_gene", "worm_gene",
-                "allele_mode", "worm_model", "origin", "source_research_unit_ids", "causal_paths",
-                "rationale", "phenomic_interpretation", "decisive_uncertainty", "dossier_path",
-                "council_disposition", "fact_audit_status",
-            ),
-            f"candidate {candidate_id}",
-            errors,
-        )
-        if candidate.get("entity_type") != "discrete_chemical":
-            errors.append(f"candidate {candidate_id}: entity_type must be discrete_chemical")
-        if candidate.get("identity_verified") is not True:
-            errors.append(f"candidate {candidate_id}: identity_verified must be true")
-        identity_source_ids = [str(value) for value in _list(candidate.get("identity_source_ids"))]
-        for source_id in identity_source_ids:
-            source = source_by_id.get(source_id)
-            if source is None:
-                errors.append(f"candidate {candidate_id}: unknown identity source {source_id}")
-            elif not all(source.get(field) is True for field in ("metadata_verified", "original_acquired", "content_verified")):
-                errors.append(f"candidate {candidate_id}: identity source {source_id} is not verified")
-            elif source.get("screen_decision") != "include" or any(
-                _blank(source.get(field)) for field in ("original_pointer", "verification_method", "verification_scope")
-            ):
-                errors.append(f"candidate {candidate_id}: identity source {source_id} lacks verification traceability")
-        chemical_id = str(candidate.get("canonical_identifier", "")).strip()
-        registry_identifiers = candidate.get("registry_identifiers")
-        if not isinstance(registry_identifiers, dict) or not registry_identifiers:
-            errors.append(f"candidate {candidate_id}: registry_identifiers must be a nonempty object")
-        elif chemical_id not in {str(value) for value in registry_identifiers.values()}:
-            errors.append(f"candidate {candidate_id}: canonical identifier is absent from registry_identifiers")
-        structure_key = str(candidate.get("structure_identity_key", "")).strip().upper()
-        if not structure_key_pattern.match(structure_key):
-            errors.append(f"candidate {candidate_id}: invalid structure_identity_key")
-        if structure_key in normalized_structure_keys:
-            errors.append(
-                f"candidates {normalized_structure_keys[structure_key]} and {candidate_id}: duplicate cross-registry chemical identity"
-            )
-        else:
-            normalized_structure_keys[structure_key] = candidate_id
-        chemical_node_id = str(candidate.get("chemical_node_id", ""))
-        if chemical_node_id != f"CHEM:{structure_key}":
-            errors.append(f"candidate {candidate_id}: chemical_node_id must be derived from structure_identity_key")
-        for field in ("human_gene", "worm_gene", "allele_mode"):
-            if str(candidate.get(field, "")).casefold() != str(case.get(field, "")).casefold():
-                errors.append(f"candidate {candidate_id}: {field} does not match case")
-        if candidate.get("origin") not in {"de_novo", "prior_exact_model_screen", "mixed"}:
-            errors.append(f"candidate {candidate_id}: invalid origin")
-        source_units = [str(value) for value in _list(candidate.get("source_research_unit_ids"))]
-        if not source_units:
-            errors.append(f"candidate {candidate_id}: no source research units")
-        for unit_id in source_units:
-            unit = unit_by_id.get(unit_id)
-            if unit is None:
-                errors.append(f"candidate {candidate_id}: unknown source unit {unit_id}")
-            elif unit.get("unit_type") not in {"subtopic_compound", "global_perspective"}:
-                errors.append(f"candidate {candidate_id}: source unit {unit_id} is not a compound-generating unit")
-        non_prior = [unit_id for unit_id in source_units if unit_by_id.get(unit_id, {}).get("perspective") != "prior_screen_context"]
-        prior = [unit_id for unit_id in source_units if unit_by_id.get(unit_id, {}).get("perspective") == "prior_screen_context"]
-        if candidate.get("origin") == "de_novo" and not non_prior:
-            errors.append(f"candidate {candidate_id}: de_novo origin has only prior-screen units")
-        if candidate.get("origin") == "prior_exact_model_screen" and not prior:
-            errors.append(f"candidate {candidate_id}: prior-screen origin lacks a prior-screen unit")
-        if candidate.get("origin") == "mixed" and (not prior or not non_prior):
-            errors.append(f"candidate {candidate_id}: mixed origin needs prior and de novo units")
-        causal_paths = _list(candidate.get("causal_paths"))
-        path_by_id: dict[str, dict[str, Any]] = {}
-        all_path_claims: set[str] = set()
-        if not causal_paths:
-            errors.append(f"candidate {candidate_id}: no connected causal path")
-        for path_number, path in enumerate(causal_paths, 1):
-            if not isinstance(path, dict):
-                errors.append(f"candidate {candidate_id}: causal path {path_number} is not an object")
-                continue
-            _required(
-                path,
-                ("path_id", "edge_ids", "claim_ids", "start_node", "end_node", "expected_rescue_direction"),
-                f"candidate {candidate_id} causal path {path_number}",
-                errors,
-            )
-            path_id = str(path.get("path_id", ""))
-            if path_id in path_by_id:
-                errors.append(f"candidate {candidate_id}: duplicate causal path ID {path_id}")
-            path_by_id[path_id] = path
-            edge_ids = [str(value) for value in _list(path.get("edge_ids"))]
-            path_claims = {str(value) for value in _list(path.get("claim_ids"))}
-            all_path_claims.update(path_claims)
-            if not edge_ids or not path_claims:
-                errors.append(f"candidate {candidate_id} path {path_id}: edge_ids and claim_ids must be nonempty")
-                continue
-            path_edges = [edge_by_id.get(edge_id) for edge_id in edge_ids]
-            if any(edge is None for edge in path_edges):
-                errors.append(f"candidate {candidate_id} path {path_id}: unknown graph edge")
-                continue
-            concrete_edges = [edge for edge in path_edges if edge is not None]
-            if str(path.get("start_node")) != chemical_node_id or concrete_edges[0].get("from_node") != chemical_node_id:
-                errors.append(f"candidate {candidate_id} path {path_id}: path does not start at the candidate chemical node")
-            if str(path.get("end_node")) != "CASE_WILD_TYPE_PHENOTYPE" or concrete_edges[-1].get("to_node") != "CASE_WILD_TYPE_PHENOTYPE":
-                errors.append(f"candidate {candidate_id} path {path_id}: path does not terminate at wild-type phenotype restoration")
-            if path.get("expected_rescue_direction") != "toward_wild_type":
-                errors.append(f"candidate {candidate_id} path {path_id}: rescue direction is not toward_wild_type")
-            for left, right in zip(concrete_edges, concrete_edges[1:]):
-                if left.get("to_node") != right.get("from_node"):
-                    errors.append(f"candidate {candidate_id} path {path_id}: graph edges are disconnected")
-            for edge in concrete_edges:
-                edge_claims = {str(value) for value in _list(edge.get("claim_ids"))}
-                if not edge_claims.intersection(path_claims):
-                    errors.append(f"candidate {candidate_id} path {path_id}: edge {edge.get('edge_id')} has no path claim")
-                if edge.get("audit_status") not in VERIFIED or edge.get("directionality_status") != "supports_rescue":
-                    errors.append(f"candidate {candidate_id} path {path_id}: edge {edge.get('edge_id')} is not audited rescue-supporting evidence")
-            for claim_id in path_claims:
-                claim = claim_by_id.get(claim_id)
-                if claim is None:
-                    errors.append(f"candidate {candidate_id}: unknown causal path claim {claim_id}")
-                elif claim.get("calibration") in {"unresolved", "contradicted"}:
-                    errors.append(f"candidate {candidate_id}: causal path uses {claim.get('calibration')} claim {claim_id}")
-                elif str(claim.get("allele_relevance", "")).casefold() != str(case.get("allele_mode", "")).casefold():
-                    errors.append(f"candidate {candidate_id}: causal path claim {claim_id} is not allele-mode compatible")
-        candidate_paths_by_candidate[candidate_id] = path_by_id
-        candidate_queries = [query for unit_id in source_units for query in searches_by_unit.get(unit_id, [])]
-        if not any(candidate_id in {str(value) for value in _list(query.get("new_candidate_ids"))} for query in candidate_queries):
-            errors.append(f"candidate {candidate_id}: no source-unit search emitted the candidate")
-        if not any(all_path_claims.intersection({str(value) for value in _list(query.get("new_claim_ids"))}) for query in candidate_queries):
-            errors.append(f"candidate {candidate_id}: causal path was not established by a source-unit search")
-        if not any(
-            query.get("query_family") == "identity_verification"
-            and set(identity_source_ids).intersection({str(value) for value in _list(query.get("retained_source_ids"))})
-            for query in candidate_queries
-        ):
-            errors.append(f"candidate {candidate_id}: no identity-verification query retained an identity source")
-        _inside_file(root, candidate.get("dossier_path"), f"candidate {candidate_id} dossier", errors)
-        if candidate.get("council_disposition") not in {"screen", "exclude"}:
-            errors.append(f"candidate {candidate_id}: invalid council disposition")
-        if candidate.get("fact_audit_status") != "verified":
-            errors.append(f"candidate {candidate_id}: fact audit is not verified")
-        if not any(candidate_id in {str(value) for value in _list(unit.get("candidate_ids"))} for unit in units):
-            errors.append(f"candidate {candidate_id}: not emitted by any research unit")
-
-    exchanges_by_candidate: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for exchange_id, exchange in exchange_by_id.items():
-        _required(
-            exchange,
-            ("candidate_id", "role", "agent_id", "exchange_type", "content", "assertions", "claim_ids", "fact_audit_status"),
-            f"exchange {exchange_id}",
-            errors,
-        )
-        candidate_id = str(exchange.get("candidate_id", ""))
-        exchanges_by_candidate[candidate_id].append(exchange)
-        if candidate_id not in candidate_by_id:
-            errors.append(f"exchange {exchange_id}: unknown candidate {candidate_id}")
-        if exchange.get("fact_audit_status") != "verified":
-            errors.append(f"exchange {exchange_id}: fact audit is not verified")
-        claim_ids = [str(value) for value in _list(exchange.get("claim_ids"))]
-        if not claim_ids:
-            errors.append(f"exchange {exchange_id}: no audited claim references")
-        assertions = _list(exchange.get("assertions"))
-        assertion_claim_ids: set[str] = set()
-        if not assertions:
-            errors.append(f"exchange {exchange_id}: no structured material assertions")
-        for assertion_number, assertion in enumerate(assertions, 1):
-            if not isinstance(assertion, dict):
-                errors.append(f"exchange {exchange_id}: assertion {assertion_number} is not an object")
-                continue
-            _required(
-                assertion,
-                ("claim_id", "stance", "text"),
-                f"exchange {exchange_id} assertion {assertion_number}",
-                errors,
-            )
-            assertion_claim_ids.add(str(assertion.get("claim_id", "")))
-        if assertion_claim_ids != set(claim_ids):
-            errors.append(f"exchange {exchange_id}: claim_ids do not exactly match structured assertions")
-        for claim_id in claim_ids:
-            if claim_id not in claim_by_id:
-                errors.append(f"exchange {exchange_id}: unknown claim {claim_id}")
-        exchange_type = str(exchange.get("exchange_type", ""))
-        parent = str(exchange.get("responds_to_id", ""))
-        if exchange_type not in {"case", "challenge", "response"}:
-            errors.append(f"exchange {exchange_id}: invalid compact-council exchange_type {exchange_type}")
-        if exchange_type == "response" and not parent:
-            errors.append(f"exchange {exchange_id}: response lacks responds_to_id")
-        if exchange_type in {"case", "challenge"} and parent:
-            errors.append(f"exchange {exchange_id}: opening case or challenge cannot respond to another exchange")
-        if exchange_type == "challenge":
-            domains = {str(value) for value in _list(exchange.get("critique_domains"))}
-            missing_domains = SKEPTIC_CRITIQUE_DOMAINS - domains
-            if missing_domains:
-                errors.append(f"exchange {exchange_id}: sceptic checklist lacks {sorted(missing_domains)}")
-            challenge_items = _list(exchange.get("challenge_items"))
-            item_domains = {
-                str(item.get("domain")) for item in challenge_items if isinstance(item, dict)
-            }
-            if item_domains != SKEPTIC_CRITIQUE_DOMAINS or len(challenge_items) != len(SKEPTIC_CRITIQUE_DOMAINS):
-                errors.append(f"exchange {exchange_id}: sceptic challenge_items must cover each critique domain exactly once")
-            for item_number, item in enumerate(challenge_items, 1):
-                if isinstance(item, dict):
-                    _required(
-                        item,
-                        ("domain", "challenge", "claim_ids", "resolution_required"),
-                        f"exchange {exchange_id} challenge item {item_number}",
-                        errors,
-                    )
-                    if item.get("resolution_required") is not True or not _list(item.get("claim_ids")):
-                        errors.append(f"exchange {exchange_id}: challenge item {item_number} lacks a resolvable claim challenge")
-        if exchange_type == "response":
-            response_items = _list(exchange.get("response_items"))
-            response_domains = {
-                str(item.get("domain")) for item in response_items if isinstance(item, dict)
-            }
-            if response_domains != SKEPTIC_CRITIQUE_DOMAINS or len(response_items) != len(SKEPTIC_CRITIQUE_DOMAINS):
-                errors.append(f"exchange {exchange_id}: advocate response must answer each critique domain exactly once")
-            for item_number, item in enumerate(response_items, 1):
-                if isinstance(item, dict):
-                    _required(
-                        item,
-                        ("domain", "response", "claim_ids", "disposition"),
-                        f"exchange {exchange_id} response item {item_number}",
-                        errors,
-                    )
-                    if item.get("disposition") not in {"accepted", "rebutted", "qualified"} or not _list(item.get("claim_ids")):
-                        errors.append(f"exchange {exchange_id}: response item {item_number} is not substantive")
-        if parent:
-            parent_row = exchange_by_id.get(parent)
-            if parent_row is None:
-                errors.append(f"exchange {exchange_id}: unknown parent exchange {parent}")
-            elif parent_row.get("candidate_id") != candidate_id:
-                errors.append(f"exchange {exchange_id}: responds across candidates")
-
-    for candidate_id, candidate in candidate_by_id.items():
-        council = council_by_id.get(candidate_id)
-        if council is None:
-            errors.append(f"candidate {candidate_id}: missing council record")
-            continue
-        role_fields = (
-            "advocate_agent_id",
-            "skeptic_agent_id",
-            "fact_auditor_agent_id",
-        )
-        _required(council, role_fields, f"council {candidate_id}", errors)
-        candidate_exchanges = exchanges_by_candidate.get(candidate_id, [])
-        exchange_material_claims = {
-            str(value) for exchange in candidate_exchanges for value in _list(exchange.get("claim_ids"))
-        }
-        declared_material_claims = {str(value) for value in _list(council.get("material_claim_ids"))}
-        if not declared_material_claims or declared_material_claims != exchange_material_claims:
-            errors.append(f"council {candidate_id}: material_claim_ids do not exactly cover the debate")
-        role_agents = [str(council.get(field, "")) for field in role_fields]
-        if len(set(role_agents)) != len(role_agents):
-            errors.append(f"council {candidate_id}: advocate, sceptic, and fact auditor must use distinct agents")
-        if set(role_agents).intersection(set(workers) | set(auditors)):
-            errors.append(f"council {candidate_id}: council agents must be independent of research workers and auditors")
-        if council.get("direct_response_complete") is not True:
-            errors.append(f"council {candidate_id}: advocate response is incomplete")
-        if council.get("critique_checklist_complete") is not True:
-            errors.append(f"council {candidate_id}: combined sceptic checklist is incomplete")
-        if council.get("novelty_challenge_resolved") is not True:
-            errors.append(f"council {candidate_id}: therapeutic-conservatism challenge is unresolved")
-        if council.get("fact_audit_status") != "verified":
-            errors.append(f"council {candidate_id}: fact audit is not verified")
-        if council.get("disposition") != candidate.get("council_disposition"):
-            errors.append(f"council {candidate_id}: disposition disagrees with candidate record")
-        if not _empty_collection(council.get("unresolved_material_claims")):
-            errors.append(f"council {candidate_id}: unresolved material claims remain")
-        claim_verdicts = _list(council.get("claim_verdicts"))
-        if not claim_verdicts:
-            errors.append(f"council {candidate_id}: fact audit has no claim verdicts")
-        verdict_by_claim: dict[str, str] = {}
-        for verdict in claim_verdicts:
-            if not isinstance(verdict, dict):
-                errors.append(f"council {candidate_id}: claim verdict is not an object")
-                continue
-            claim_id = str(verdict.get("claim_id", ""))
-            status = str(verdict.get("verdict", ""))
-            if claim_id not in claim_by_id:
-                errors.append(f"council {candidate_id}: verdict references unknown claim {claim_id}")
-            if status not in {"supported", "qualified", "unsupported", "contradicted"}:
-                errors.append(f"council {candidate_id}: invalid claim verdict {status!r}")
-            checked_sources = [str(value) for value in _list(verdict.get("checked_source_ids"))]
-            if not checked_sources:
-                errors.append(f"council {candidate_id}: claim verdict {claim_id} has no checked sources")
-            for source_id in checked_sources:
-                source = source_by_id.get(source_id)
-                if source is None:
-                    errors.append(f"council {candidate_id}: claim verdict {claim_id} uses unknown source {source_id}")
-                elif not all(source.get(field) is True for field in ("metadata_verified", "original_acquired", "content_verified")):
-                    errors.append(f"council {candidate_id}: claim verdict {claim_id} uses an unverified source {source_id}")
-            claim_sources = {
-                str(value) for value in claim_by_id.get(claim_id, {}).get("source_ids", [])
-            }
-            if status in {"supported", "qualified"} and not set(checked_sources).intersection(claim_sources):
-                errors.append(
-                    f"council {candidate_id}: supporting verdict for {claim_id} checked no source attached to the claim"
-                )
-            verdict_by_claim[claim_id] = status
-        if set(verdict_by_claim) != declared_material_claims:
-            errors.append(f"council {candidate_id}: fact auditor did not verdict every and only material debate claim")
-        independent_checks = _list(council.get("independent_checks"))
-        if not independent_checks:
-            errors.append(f"council {candidate_id}: fact auditor ran no independent source check")
-        for check_number, check in enumerate(independent_checks, 1):
-            if not isinstance(check, dict):
-                errors.append(f"council {candidate_id}: independent check {check_number} is not an object")
-                continue
-            if (
-                _blank(check.get("resource"))
-                or _blank(check.get("query"))
-                or str(check.get("executed_by_agent_id", "")) != str(council.get("fact_auditor_agent_id", ""))
-            ):
-                errors.append(f"council {candidate_id}: independent check {check_number} lacks valid fact-auditor provenance")
-            checked_sources = [str(value) for value in _list(check.get("checked_source_ids"))]
-            if not checked_sources:
-                errors.append(f"council {candidate_id}: independent check {check_number} has no checked sources")
-            for source_id in checked_sources:
-                source = source_by_id.get(source_id)
-                if source is None:
-                    errors.append(f"council {candidate_id}: independent check {check_number} uses unknown source {source_id}")
-                elif not all(source.get(field) is True for field in ("metadata_verified", "original_acquired", "content_verified")):
-                    errors.append(f"council {candidate_id}: independent check {check_number} uses unverified source {source_id}")
-        surviving_paths = [str(value) for value in _list(council.get("surviving_causal_path_ids"))]
-        candidate_paths = candidate_paths_by_candidate.get(candidate_id, {})
-        for path_id in surviving_paths:
-            path = candidate_paths.get(path_id)
-            if path is None:
-                errors.append(f"council {candidate_id}: surviving path uses unknown candidate path {path_id}")
-                continue
-            for claim_id in _list(path.get("claim_ids")):
-                if verdict_by_claim.get(str(claim_id)) not in {"supported", "qualified"}:
-                    errors.append(f"council {candidate_id}: surviving path {path_id} has a claim without a supporting fact-audit verdict")
-        if council.get("disposition") == "screen" and not surviving_paths:
-            errors.append(f"council {candidate_id}: screened candidate has no surviving fact-audited causal path")
-        debate_file = _inside_file(root, council.get("debate_path"), f"council {candidate_id} debate", errors)
-        fact_audit_file = _inside_file(root, council.get("fact_audit_path"), f"council {candidate_id} fact audit", errors)
-        exclusion_reason = str(council.get("exclusion_reason", ""))
-        if council.get("disposition") == "exclude" and exclusion_reason not in {
-            "wrong_direction",
-            "causal_path_refuted",
-            "assay_incompatible_confounding",
-            "chemical_identity_not_screenable",
-        }:
-            errors.append(f"council {candidate_id}: exclusion lacks an allowed material reason")
-        if council.get("disposition") == "screen" and exclusion_reason:
-            errors.append(f"council {candidate_id}: screened candidate has an exclusion reason")
-        role_to_agent = {
-            "advocate": str(council.get("advocate_agent_id", "")),
-            "skeptic": str(council.get("skeptic_agent_id", "")),
-        }
-        for exchange in candidate_exchanges:
-            expected_agent = role_to_agent.get(str(exchange.get("role", "")))
-            if expected_agent is None:
-                errors.append(f"council {candidate_id}: unknown exchange role {exchange.get('role')}")
-            elif str(exchange.get("agent_id", "")) != expected_agent:
-                errors.append(f"council {candidate_id}: exchange {exchange.get('exchange_id')} agent does not match role assignment")
-        advocate_cases = [item for item in candidate_exchanges if item.get("role") == "advocate" and item.get("exchange_type") == "case"]
-        challenges = [item for item in candidate_exchanges if item.get("role") == "skeptic" and item.get("exchange_type") == "challenge"]
-        responses = [item for item in candidate_exchanges if item.get("role") == "advocate" and item.get("exchange_type") == "response"]
-        if len(advocate_cases) != 1 or len(challenges) != 1 or len(responses) != 1 or len(candidate_exchanges) != 3:
-            errors.append(f"council {candidate_id}: compact council must contain exactly one case, challenge, and response")
-        challenge_ids = {str(item.get("exchange_id")) for item in challenges}
-        if not any(str(item.get("responds_to_id", "")) in challenge_ids for item in responses):
-            errors.append(f"council {candidate_id}: sceptic challenge lacks an advocate response")
-        if debate_file:
-            debate_text = debate_file.read_text(encoding="utf-8-sig")
-            for exchange in candidate_exchanges:
-                if str(exchange.get("exchange_id")) not in debate_text:
-                    errors.append(f"council {candidate_id}: debate file omits exchange {exchange.get('exchange_id')}")
-        if fact_audit_file:
-            fact_audit_text = fact_audit_file.read_text(encoding="utf-8-sig")
-            for exchange in candidate_exchanges:
-                if str(exchange.get("exchange_id")) not in fact_audit_text:
-                    errors.append(f"council {candidate_id}: fact audit omits exchange {exchange.get('exchange_id')}")
-
-    for candidate_id in council_by_id:
-        if candidate_id not in candidate_by_id:
-            errors.append(f"council record references unknown candidate {candidate_id}")
-
-    return errors
-
-
-def validate_staged_commit(
-    run_folder: str | Path,
-    job: dict[str, Any],
-    result_paths: list[str],
-    active_agent_id: str,
-) -> list[str]:
-    """Validate a proposed audited merge before canonical ledgers are changed."""
-    root = Path(run_folder).expanduser().resolve()
+    missing = [name for name in REQUIRED_FILES if not (root / name).is_file()]
+    missing_dirs = [name for name in ("packets", "staging", "raw_sources") if not (root / name).is_dir()]
+    if missing or missing_dirs:
+        return [*(f"Missing required file: {name}" for name in missing), *(f"Missing required directory: {name}" for name in missing_dirs)]
     errors: list[str] = []
-    case = _read_json(root / "case.json", errors)
-    snapshots: dict[str, list[dict[str, Any]]] = {
-        filename: _read_jsonl(root / filename, errors) for filename in LEDGER_SCHEMAS
-    }
-
-    for relative_path in result_paths:
-        result_file = _inside_file(root, relative_path, "staged result", errors)
-        if not result_file:
-            continue
-        result = _read_json(result_file, errors)
-        result_job_id = str(result.get("job_id", ""))
-        for field in ("job_id", "packet_hash", "all_chunks_processed", "outcome", "ledger_updates", "approved_subtopics"):
-            if field not in result:
-                errors.append(f"staged result {relative_path}: missing {field}")
-        if result.get("all_chunks_processed") is not True:
-            errors.append(f"staged result {relative_path}: all_chunks_processed must be true")
-        updates = result.get("ledger_updates")
-        if not isinstance(updates, dict):
-            errors.append(f"staged result {relative_path}: ledger_updates must be an object")
-            continue
-        for filename, rows in updates.items():
-            if filename not in LEDGER_SCHEMAS:
-                errors.append(f"staged result {relative_path}: unapproved ledger {filename}")
-                continue
-            if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-                errors.append(f"staged result {relative_path}: {filename} must contain objects")
-                continue
-            key = LEDGER_SCHEMAS[filename][0]
-            current = {str(row.get(key)): row for row in snapshots[filename]}
-            for row in rows:
-                _present(row, LEDGER_SCHEMAS[filename], f"staged {filename} row", errors)
-                identity = str(row.get(key, ""))
-                if filename == "search_log.jsonl" and str(row.get("origin_job_id", "")) != result_job_id:
-                    errors.append(
-                        f"staged search {identity}: origin_job_id must match the result that created the search"
-                    )
-                if identity:
-                    if filename == "research_units.jsonl" and identity in current:
-                        protected = {
-                            field: current[identity].get(field)
-                            for field in (
-                                "worker_agent_id", "auditor_agent_id", "status", "audit_status",
-                                "rate_limit_pending", "unresolved_repair_count",
-                            )
-                        }
-                        current[identity] = {**current[identity], **row, **protected}
-                    else:
-                        current[identity] = row
-            snapshots[filename] = list(current.values())
-
-    sources = _index(snapshots["source_corpus.jsonl"], "source_id", "staged sources", errors)
-    searches = _index(snapshots["search_log.jsonl"], "query_id", "staged searches", errors)
-    claims = _index(snapshots["claim_ledger.jsonl"], "claim_id", "staged claims", errors)
-    edges = _index(snapshots["evidence_graph.jsonl"], "edge_id", "staged edges", errors)
-    units = _index(snapshots["research_units.jsonl"], "unit_id", "staged units", errors)
-    candidates = _index(snapshots["candidate_records.jsonl"], "candidate_id", "staged candidates", errors)
-    plan = _read_json(root / "execution_plan.json", errors)
-    plan_jobs = _index(plan.get("jobs", []), "job_id", "staged execution jobs", errors)
-
-    for source_id, source in sources.items():
-        unexpected = set(source) - SOURCE_ALLOWED_FIELDS
-        if unexpected:
-            errors.append(f"staged source {source_id}: unrecognized fields {sorted(unexpected)}")
-        _required(
-            source,
-            (
-                "canonical_identifier", "identifier_type", "title", "source_kind", "source_family",
-                "screen_decision", "original_pointer", "verification_method", "verification_scope",
-                "compaction_receipt_path", "compaction_record_hash",
-            ),
-            f"staged source {source_id}",
-            errors,
-        )
-        if source.get("screen_decision") not in {"include", "exclude"}:
-            errors.append(f"staged source {source_id}: screen_decision must be include or exclude")
-        receipt_file = _inside_file(
-            root, source.get("compaction_receipt_path"), f"staged source {source_id} compaction receipt", errors
-        )
-        if receipt_file:
-            receipt = _read_json(receipt_file, errors)
-            matches = [
-                row for row in _list(receipt.get("records"))
-                if isinstance(row, dict)
-                and str(row.get("compact_record_hash")) == str(source.get("compaction_record_hash"))
-            ]
-            if receipt.get("schema_version") != 2 or receipt.get("compactor") != "compact_source_payload.py" or len(matches) != 1:
-                errors.append(f"staged source {source_id}: invalid compaction provenance")
-            elif (
-                str(matches[0].get("canonical_identifier", "")) != str(source.get("canonical_identifier", ""))
-                or str(matches[0].get("title", "")) != str(source.get("title", ""))
-            ):
-                errors.append(f"staged source {source_id}: compact identity mismatch")
-            elif str(matches[0].get("query_id", "")) not in {
-                str(value) for value in _list(source.get("discovery_query_ids"))
-            }:
-                errors.append(f"staged source {source_id}: compact receipt query lacks reverse source linkage")
-
-    for query_id, query in searches.items():
-        unit = units.get(str(query.get("research_unit_id", "")), {})
-        executor_role = str(query.get("executor_role", ""))
-        expected_agent = str(
-            unit.get("auditor_agent_id" if executor_role == "auditor" else "worker_agent_id", "")
-        )
-        if executor_role not in {"worker", "auditor"} or str(query.get("executed_by_agent_id", "")) != expected_agent:
-            errors.append(f"staged query {query_id}: executor provenance mismatch")
-        origin_job = plan_jobs.get(str(query.get("origin_job_id", "")))
-        expected_job_role = "worker" if executor_role == "worker" else (
-            "closure_auditor" if unit.get("unit_type") == "closure_audit" else "auditor"
-        )
-        if (
-            origin_job is None
-            or str(origin_job.get("unit_id", "")) != str(query.get("research_unit_id", ""))
-            or str(origin_job.get("role", "")) != expected_job_role
-        ):
-            errors.append(f"staged query {query_id}: origin job does not match executor role")
-        counts = []
-        for field in ("result_count", "deduplicated_count", "screened_count", "acquired_count", "original_verified_count"):
-            counts.append(_integer(query.get(field), f"staged query {query_id} {field}", errors))
-        page_count = _integer(query.get("page_count"), f"staged query {query_id} page_count", errors)
-        if None not in counts:
-            result_count, dedup_count, screened_count, acquired_count, verified_count = counts
-            if dedup_count > result_count or screened_count != dedup_count or not (
-                verified_count <= acquired_count <= screened_count
-            ):
-                errors.append(f"staged query {query_id}: inconsistent depth counts")
-            if len(_list(query.get("retained_source_ids"))) > verified_count:
-                errors.append(f"staged query {query_id}: retained sources exceed verified records")
-        if page_count is not None and page_count < 1:
-            errors.append(f"staged query {query_id}: page_count must be positive")
-        if query.get("pagination_complete") is not True or query.get("continuation_exhausted") is not True:
-            errors.append(f"staged query {query_id}: retrieval continuation remains open")
-        _validate_query_depth(root, query_id, query, sources, errors, label_prefix="staged query")
-        closure_note = str(query.get("closure_note", "")).casefold()
-        if not closure_note or any(phrase in closure_note for phrase in BAD_COMPLETION_PHRASES):
-            errors.append(f"staged query {query_id}: invalid completion rationale")
-
-    for claim_id, claim in claims.items():
-        if claim.get("calibration") not in CALIBRATIONS:
-            errors.append(f"staged claim {claim_id}: invalid calibration {claim.get('calibration')}")
-        if job.get("kind") in {
-            "unit_auditor", "closure_auditor", "merge_auditor", "council_fact_auditor", "final_repair_auditor"
-        } and claim.get("audit_status") not in VERIFIED:
-            errors.append(f"staged claim {claim_id}: audited commit requires verified audit_status")
-        for source_id in _list(claim.get("source_ids")):
-            source = sources.get(str(source_id))
-            if source is None:
-                errors.append(f"staged claim {claim_id}: unknown source {source_id}")
-            elif not all(source.get(field) is True for field in ("metadata_verified", "original_acquired", "content_verified")):
-                errors.append(f"staged claim {claim_id}: source {source_id} is not original-content verified")
-            elif source.get("screen_decision") != "include":
-                errors.append(f"staged claim {claim_id}: source {source_id} is not included")
-            elif claim_id not in {str(value) for value in _list(source.get("supported_claim_ids"))}:
-                errors.append(f"staged claim {claim_id}: source {source_id} lacks reverse claim linkage")
-
-    for edge_id, edge in edges.items():
-        if edge.get("directionality_status") not in {"supports_rescue", "opposes_rescue", "ambiguous"}:
-            errors.append(f"staged edge {edge_id}: invalid directionality_status")
-        if job.get("kind") in {
-            "unit_auditor", "closure_auditor", "merge_auditor", "council_fact_auditor", "final_repair_auditor"
-        } and edge.get("audit_status") not in VERIFIED:
-            errors.append(f"staged edge {edge_id}: audited commit requires verified audit_status")
-        for claim_id in _list(edge.get("claim_ids")):
-            if str(claim_id) not in claims:
-                errors.append(f"staged edge {edge_id}: unknown claim {claim_id}")
-
-    structure_keys: dict[str, str] = {}
-    structure_key_pattern = re.compile(
-        r"^(INCHIKEY:[A-Z]{14}-[A-Z]{10}-[A-Z]|SMILES-SHA256:[0-9A-F]{64})$", re.IGNORECASE
-    )
-    for candidate_id, candidate in candidates.items():
-        if candidate.get("entity_type") != "discrete_chemical" or candidate.get("identity_verified") is not True:
-            errors.append(f"staged candidate {candidate_id}: candidate is not an identity-verified discrete chemical")
-        registry_identifiers = candidate.get("registry_identifiers")
-        if (
-            not isinstance(registry_identifiers, dict)
-            or not registry_identifiers
-            or str(candidate.get("canonical_identifier", "")) not in {str(value) for value in registry_identifiers.values()}
-        ):
-            errors.append(f"staged candidate {candidate_id}: registry identity mapping is invalid")
-        for source_id in _list(candidate.get("identity_source_ids")):
-            source = sources.get(str(source_id))
-            if source is None or not all(
-                source.get(field) is True for field in ("metadata_verified", "original_acquired", "content_verified")
-            ):
-                errors.append(f"staged candidate {candidate_id}: identity source {source_id} is not verified")
-        structure_key = str(candidate.get("structure_identity_key", "")).upper()
-        if not structure_key_pattern.match(structure_key):
-            errors.append(f"staged candidate {candidate_id}: invalid structure identity key")
-        if structure_key in structure_keys and structure_keys[structure_key] != candidate_id:
-            errors.append(f"staged candidates {structure_keys[structure_key]} and {candidate_id}: duplicate structure identity")
-        structure_keys[structure_key] = candidate_id
-        chemical_node = str(candidate.get("chemical_node_id", ""))
-        if chemical_node != f"CHEM:{structure_key}":
-            errors.append(f"staged candidate {candidate_id}: chemical node mismatch")
-        staged_paths = _list(candidate.get("causal_paths"))
-        if not staged_paths:
-            errors.append(f"staged candidate {candidate_id}: no connected causal path")
-        for path in staged_paths:
-            if not isinstance(path, dict):
-                errors.append(f"staged candidate {candidate_id}: causal path is not an object")
-                continue
-            edge_ids = [str(value) for value in _list(path.get("edge_ids"))]
-            path_edges = [edges.get(edge_id) for edge_id in edge_ids]
-            if not edge_ids or any(edge is None for edge in path_edges):
-                errors.append(f"staged candidate {candidate_id}: causal path has unknown edges")
-                continue
-            concrete = [edge for edge in path_edges if edge is not None]
-            if concrete[0].get("from_node") != chemical_node or concrete[-1].get("to_node") != "CASE_WILD_TYPE_PHENOTYPE":
-                errors.append(f"staged candidate {candidate_id}: causal path endpoints are invalid")
-            if any(left.get("to_node") != right.get("from_node") for left, right in zip(concrete, concrete[1:])):
-                errors.append(f"staged candidate {candidate_id}: causal path is disconnected")
-            if path.get("expected_rescue_direction") != "toward_wild_type":
-                errors.append(f"staged candidate {candidate_id}: causal path direction is invalid")
-            path_claims = {str(value) for value in _list(path.get("claim_ids"))}
-            if not path_claims or any(claim_id not in claims for claim_id in path_claims):
-                errors.append(f"staged candidate {candidate_id}: causal path has unknown claims")
-            if any(edge.get("directionality_status") != "supports_rescue" for edge in concrete):
-                errors.append(f"staged candidate {candidate_id}: causal path contains a non-rescue edge")
-            for claim_id in path_claims:
-                claim = claims.get(claim_id, {})
-                if claim.get("calibration") in {"unresolved", "contradicted"}:
-                    errors.append(f"staged candidate {candidate_id}: causal path uses a non-supporting claim")
-                if str(claim.get("allele_relevance", "")).casefold() != str(case.get("allele_mode", "")).casefold():
-                    errors.append(f"staged candidate {candidate_id}: causal path claim is not allele-mode compatible")
-
-    unit_id = str(job.get("unit_id", ""))
-    unit = units.get(unit_id)
-    if unit and job.get("kind") in {"unit_auditor", "closure_auditor"}:
-        planned = {str(value) for value in _list(unit.get("planned_query_families"))}
-        completed = {str(value) for value in _list(unit.get("completed_query_families"))}
-        required = required_query_families(str(unit.get("unit_type", "")))
-        unit_queries = [row for row in searches.values() if str(row.get("research_unit_id")) == unit_id]
-        worker_families = {
-            str(row.get("query_family")) for row in unit_queries if row.get("executor_role") == "worker"
-        }
-        if not planned or planned != completed or required - planned or planned - worker_families:
-            errors.append(f"staged unit {unit_id}: required worker query families are incomplete")
-        independent_ids = {str(value) for value in _list(unit.get("independent_audit_query_ids"))}
-        if not independent_ids:
-            errors.append(f"staged unit {unit_id}: independent audit query is missing")
-        for query_id in independent_ids:
-            query = searches.get(query_id, {})
-            if (
-                query.get("executor_role") != "auditor"
-                or str(query.get("executed_by_agent_id", "")) != active_agent_id
-                or query.get("query_family") not in {"missing_branch", "counterevidence"}
-            ):
-                errors.append(f"staged unit {unit_id}: independent audit query provenance is invalid")
-        matching_audits = [
-            row for row in snapshots["unit_audits.jsonl"] if str(row.get("unit_id")) == unit_id
-        ]
-        if len(matching_audits) != 1 or str(matching_audits[0].get("auditor_agent_id", "")) != active_agent_id:
-            errors.append(f"staged unit {unit_id}: independent unit audit record is missing or misattributed")
-
-    candidate_id = str(job.get("candidate_id", ""))
-    if candidate_id:
-        candidate_exchanges = [
-            row for row in snapshots["council_exchanges.jsonl"]
-            if str(row.get("candidate_id", "")) == candidate_id
-        ]
-        for exchange in candidate_exchanges:
-            exchange_id = str(exchange.get("exchange_id", ""))
-            assertions = _list(exchange.get("assertions"))
-            claim_ids = {str(value) for value in _list(exchange.get("claim_ids"))}
-            assertion_claims = {
-                str(item.get("claim_id")) for item in assertions if isinstance(item, dict)
-            }
-            if not assertions or assertion_claims != claim_ids:
-                errors.append(f"staged council exchange {exchange_id}: assertions do not cover claim_ids")
-            exchange_type = str(exchange.get("exchange_type", ""))
-            if exchange_type == "challenge":
-                items = _list(exchange.get("challenge_items"))
-                domains = {str(item.get("domain")) for item in items if isinstance(item, dict)}
-                if domains != SKEPTIC_CRITIQUE_DOMAINS or len(items) != len(SKEPTIC_CRITIQUE_DOMAINS):
-                    errors.append(f"staged council exchange {exchange_id}: incomplete sceptic domain challenges")
-            if exchange_type == "response":
-                items = _list(exchange.get("response_items"))
-                domains = {str(item.get("domain")) for item in items if isinstance(item, dict)}
-                if domains != SKEPTIC_CRITIQUE_DOMAINS or len(items) != len(SKEPTIC_CRITIQUE_DOMAINS):
-                    errors.append(f"staged council exchange {exchange_id}: incomplete advocate responses")
-        if job.get("kind") == "council_fact_auditor":
-            cases = [row for row in candidate_exchanges if row.get("exchange_type") == "case"]
-            challenges = [row for row in candidate_exchanges if row.get("exchange_type") == "challenge"]
-            responses = [row for row in candidate_exchanges if row.get("exchange_type") == "response"]
-            if len(cases) != 1 or len(challenges) != 1 or len(responses) != 1 or len(candidate_exchanges) != 3:
-                errors.append(f"staged council {candidate_id}: debate does not contain exactly three substantive exchanges")
-
-    return errors
+    try:
+        case = read_json(root / "case.json", {})
+        state = read_json(root / "program_state.json", {})
+        plan = read_json(root / "execution_plan.json", {})
+        attempts = read_jsonl(root / "job_attempts.jsonl")
+        orchestration = read_jsonl(root / "orchestration.jsonl")
+    except Exception as exc:
+        return [f"Runtime artifact is invalid: {exc}"]
+    if not required_case_present(case):
+        errors.append("case.json requires a human gene, human disease, and/or human phenotype")
+    if any(_blank(row.get("event_id")) or _blank(row.get("event")) for row in orchestration):
+        errors.append("orchestration events require event_id and event")
+    ledgers = _load_ledgers(root, errors)
+    errors.extend(validate_ledgers(root, ledgers, plan, final=True))
+    indexes = _schema_rows(ledgers, [])
+    _validate_final_runtime(root, state, plan, attempts, indexes, errors)
+    return list(dict.fromkeys(errors))
 
 
 def main(argv: list[str]) -> int:

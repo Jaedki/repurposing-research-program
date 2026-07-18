@@ -1,4 +1,4 @@
 interface:
   display_name: "Repurposing Research Program"
-  short_description: "Serial, audited evidence-to-compound research"
-  default_prompt: "Use $repurposing-research-program to research the provided human gene, worm gene, and allele mode and build an exact-compound screening panel."
+  short_description: "Human-first evidence-to-compound repurposing"
+  default_prompt: "Use $repurposing-research-program to research this human gene, disease, or phenotype and rank exact repurposing candidates."
