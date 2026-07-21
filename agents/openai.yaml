@@ -1,4 +1,4 @@
 interface:
   display_name: "Repurposing Research Program"
-  short_description: "Human-first evidence-to-compound repurposing"
-  default_prompt: "Use $repurposing-research-program to research this human gene, disease, or phenotype and rank exact repurposing candidates."
+  short_description: "Full-funnel human repurposing evidence"
+  default_prompt: "Use $repurposing-research-program to build a source-bounded, reconciled repurposing evidence portfolio for this human case."

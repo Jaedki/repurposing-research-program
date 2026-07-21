@@ -1,4 +1,18 @@
-# Deterministic Serial Runtime
+# Deterministic Runtime
+
+## Schema v7
+
+Initialize with `orchestrate_program.py init <run-folder> --schema-version 7 --case-file <case.json>`. The controller preserves the hash-bound case files and writes all runtime state under `runtime_v7/`. Select `broad_discovery`, `balanced`, or `clinical_shortlist`; override the explicit source, seed, deep-review, audit, time, cost, concurrency, record-count, and byte limits only through initialization config.
+
+Drive the run through `next -> start -> progress -> validate-result -> complete`. `next` may return several independent `start_agents` actions up to `max_active_jobs`. Each job has deterministic dependencies, a stable shard/idempotency key, one immutable packet, separately numbered attempts, persisted progress, bounded retries, and one content-derived commit. Workers write only staged results. The controller validates the role allowlist and packet/dependency hashes, acquires the run lock, and atomically updates the content-addressed canonical index. Identical duplicate completion is a no-op; different content for one identity is an error.
+
+Packets reference a shared hash-verified role contract and bounded canonical record paths. They do not repeat the global schema in every shard. Discovery packets omit ranking, audit, council, benchmark-label, unrelated-candidate, and global runtime contracts. Candidate and source shards obey both record and referenced-byte limits. Fan-in uses bounded commit-hash trees; no worker merge or audit job receives the full 500+ record population.
+
+The DAG progresses through case normalization, case modeling, source planning, discovery shards, seed union, identity shards/fan-in, preliminary triage, deep packages, ranking preparation, audit sampling, candidate audits, council/portfolio review, final validation, and output-manifest construction. Ranking preparation may invoke `v7_triage_ranking.py` to derive typed profiles and separate pre-audit therapeutic-confidence and research-priority orders; it never selects a portfolio. Audit and portfolio workers apply supplied frozen policies through `v7_audit_portfolio.py`. Final output work invokes the separately governed `v7_outputs.py` projection and emits its hash-bound manifest. Runtime transitions do not invent scientific, audit, portfolio, or output records.
+
+Budgets never remove committed records. A reached source budget can defer unstarted retrieval shards; a reached seed/deep/audit/time/cost budget can defer later work. Every deferral, failed shard, and partial state remains in status and prevents complete acceptance where required. Retry and schedule metadata is hashed in the execution projection, not the schedule-independent scientific projection. `resume` recovers a published commit or returns active/ready shards without duplicating canonical effects.
+
+## Schema v6 historical runtime
 
 Initialize with one or more human fields:
 

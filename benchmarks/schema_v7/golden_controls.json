@@ -1,0 +1,84 @@
+{
+  "benchmark_version": "schema-v7-synthetic-development-controls-v1",
+  "partition": "development",
+  "usage_state": "labels_exposed_for_harness_development",
+  "certification_eligible": false,
+  "evidence_cutoff": "2026-07-19",
+  "source_release_scope": [
+    "synthetic-2026-07-19"
+  ],
+  "network_required": false,
+  "expectation_scope": "Synthetic stage-specific controls only; negative controls are expected fixture dispositions, not universal scientific negatives.",
+  "top_k": 5,
+  "ranking_relevant_candidate_indices": [
+    1000,
+    1008,
+    1010,
+    1011
+  ],
+  "long_tail_candidate_indices": [
+    1000,
+    1008,
+    1010
+  ],
+  "positive_controls": [
+    {
+      "control_id": "GOLD-POS-DATABASE-ONLY",
+      "mapping_index": 1000,
+      "expected_seed_disposition": "admit",
+      "expected_portfolio_disposition": "finalist",
+      "rationale": "A database-only seed must survive lightweight admission without a publication quota."
+    },
+    {
+      "control_id": "GOLD-POS-SPARSE-LITERATURE",
+      "mapping_index": 1008,
+      "expected_seed_disposition": "admit",
+      "expected_portfolio_disposition": "reserve",
+      "rationale": "A sparse-literature seed remains visible and eligible for review."
+    },
+    {
+      "control_id": "GOLD-POS-OBSCURE-STRONG",
+      "mapping_index": 1010,
+      "expected_seed_disposition": "admit",
+      "expected_portfolio_disposition": "finalist",
+      "rationale": "A stronger obscure control must not be erased by publication popularity."
+    },
+    {
+      "control_id": "GOLD-POS-MULTI-ENDPOINT",
+      "mapping_index": 1011,
+      "expected_seed_disposition": "admit",
+      "expected_portfolio_disposition": "finalist",
+      "rationale": "Every required endpoint retains its own assessment."
+    }
+  ],
+  "negative_controls": [
+    {
+      "control_id": "GOLD-NEG-OUT-OF-SCOPE",
+      "mapping_index": 9,
+      "expected_seed_disposition": "reject",
+      "rationale": "A fixture-scoped non-pharmacologic record is explicitly rejected after seeding."
+    },
+    {
+      "control_id": "GOLD-NEG-UNRESOLVED-IDENTITY",
+      "mapping_index": 10,
+      "expected_seed_disposition": "quarantine",
+      "forbidden_stage": "deep",
+      "rationale": "A syntactically valid identifier does not resolve a decision-changing identity conflict."
+    },
+    {
+      "control_id": "GOLD-NEG-SAFETY-EXPOSURE",
+      "mapping_index": 1012,
+      "expected_seed_disposition": "admit",
+      "expected_portfolio_disposition": "audit_quarantined",
+      "rationale": "A serious structured safety/exposure conflict remains explicit and cannot become a finalist."
+    },
+    {
+      "control_id": "GOLD-NEG-POPULARITY-BIAS",
+      "mapping_index": 1009,
+      "expected_seed_disposition": "admit",
+      "expected_portfolio_disposition": "not_selected",
+      "must_rank_after_mapping_index": 1010,
+      "rationale": "Publication volume must not displace a stronger obscure fixture control."
+    }
+  ]
+}

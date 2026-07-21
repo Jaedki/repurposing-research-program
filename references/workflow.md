@@ -1,4 +1,6 @@
-# Human Therapeutic Workflow
+# Schema-v6 historical human therapeutic workflow
+
+Use this file only for native schema-v6 execution. New schema-v7 work follows `case-discovery-seeds.md` and the v7 domain references.
 
 ## Inputs and endpoint
 

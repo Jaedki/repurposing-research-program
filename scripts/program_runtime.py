@@ -15,6 +15,7 @@ from program_contract import (
     BROAD_DOMAINS,
     FAILURE_KINDS,
     GLOBAL_PERSPECTIVES,
+    JOB_REQUIRED_FIELDS,
     LEDGER_KEYS,
     MAX_ACTIVE_JOBS,
     RETRY_BASE_SECONDS,
@@ -23,6 +24,7 @@ from program_contract import (
     RETRYABLE_FAILURE_KINDS,
     SCHEMAS,
     SCHEMA_VERSION,
+    PROGRAM_STATE_REQUIRED_FIELDS,
     SOURCE_AGGREGATE_FIELDS,
     STALE_RUN_SECONDS,
     TERMINAL_SEARCH_COVERAGE_STATUSES,
@@ -346,6 +348,36 @@ def _assert_current_schema(root: Path) -> None:
         raise ValueError(
             f"Legacy or incompatible run is read-only: expected schema {SCHEMA_VERSION}, "
             f"found state={state.get('schema_version')!r}, plan={plan.get('schema_version')!r}"
+        )
+    required_files = {
+        "case.json",
+        "program_state.json",
+        "execution_plan.json",
+        "job_attempts.jsonl",
+        "orchestration.jsonl",
+        *SCHEMAS,
+    }
+    missing = sorted(name for name in required_files if not (root / name).is_file())
+    if missing:
+        raise ValueError(
+            "Legacy or incomplete schema-v6 artifact is read-only; native runtime files are missing: "
+            + ", ".join(missing)
+        )
+    if set(state) != set(PROGRAM_STATE_REQUIRED_FIELDS):
+        raise ValueError(
+            "Legacy or incompatible schema-v6 state is read-only: runtime fields do not match the native contract"
+        )
+    if set(plan) != {"schema_version", "max_active_jobs", "jobs", "created_at"}:
+        raise ValueError(
+            "Legacy or incompatible schema-v6 plan is read-only: plan fields do not match the native contract"
+        )
+    jobs = plan.get("jobs")
+    if not isinstance(jobs, list) or any(
+        not isinstance(job, dict) or set(job) != set(JOB_REQUIRED_FIELDS)
+        for job in jobs
+    ):
+        raise ValueError(
+            "Legacy or incompatible schema-v6 plan is read-only: job fields do not match the native contract"
         )
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write transparent sectioned candidate rankings and referenced rationales."""
+"""Build native schema-v7 full-funnel outputs or historical schema-v6 rankings."""
 
 from __future__ import annotations
 
@@ -87,6 +87,18 @@ def _candidate_order(candidate: dict[str, Any]) -> tuple[int, int, str]:
 
 def build_outputs(run_folder: str | Path) -> tuple[Path, Path]:
     root = Path(run_folder).expanduser().resolve()
+    case_revision_path = root / "case_revision.json"
+    if case_revision_path.is_file():
+        try:
+            import json
+
+            case_revision = json.loads(case_revision_path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            case_revision = {}
+        if isinstance(case_revision, dict) and case_revision.get("schema_version") == 7:
+            from v7_outputs import write_full_funnel_outputs
+
+            return write_full_funnel_outputs(root)
     errors = validate_run(root)
     if errors:
         raise ValueError("Run validation failed; outputs were not written:\n" + "\n".join(f"- {e}" for e in errors))

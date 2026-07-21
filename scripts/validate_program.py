@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Schema-v6 structural, provenance, scientific-audit, and runtime validation."""
+"""Public validator for native schema-v7 and historical schema-v6 runs."""
 
 from __future__ import annotations
 
@@ -1625,7 +1625,7 @@ def validate_staged_result(
     return list(dict.fromkeys(errors))
 
 
-def validate_run(run_folder: str | Path) -> list[str]:
+def _validate_v6_run(run_folder: str | Path) -> list[str]:
     root = Path(run_folder).expanduser().resolve()
     if not root.is_dir():
         return [f"Run folder does not exist: {root}"]
@@ -1651,6 +1651,25 @@ def validate_run(run_folder: str | Path) -> list[str]:
     indexes = _schema_rows(ledgers, [])
     _validate_final_runtime(root, state, plan, attempts, indexes, errors)
     return list(dict.fromkeys(errors))
+
+
+def validate_run(run_folder: str | Path) -> list[str]:
+    """Route by artifact version while retaining the historical schema-v6 entry point."""
+
+    root = Path(run_folder).expanduser().resolve()
+    for filename in ("schema_manifest.json", "case_revision.json"):
+        path = root / filename
+        if not path.is_file():
+            continue
+        try:
+            value = read_json(path, {})
+        except Exception:
+            value = {}
+        if isinstance(value, dict) and value.get("schema_version") == 7:
+            from v7_validation import validate_run as validate_v7_run
+
+            return validate_v7_run(root, final=True)
+    return _validate_v6_run(root)
 
 
 def main(argv: list[str]) -> int:

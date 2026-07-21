@@ -1,39 +1,48 @@
 ---
 name: repurposing-research-program
-description: "Run the deterministic living-evidence repurposing programme for a supplied human gene, disease, or phenotype. Use when the user wants exact drugs or natural compounds discovered through independent evidence perspectives, independently audited, and deterministically ranked for human therapeutic benefit."
+description: "Run or extend a deterministic, provenance-complete human therapeutic repurposing programme for a supplied gene, disease, or phenotype. Use for schema-v7 case modeling, source-bounded exact-compound discovery, seed screening, identity normalization, deep evidence, audit, separate evidence/novelty/diversity rankings, full-funnel outputs, or read-only inspection of historical schema-v3 through schema-v6 artifacts."
 ---
 
 # Repurposing Research Program
 
-Produce a ranked set of exact compounds and a reusable evidence graph for a human therapeutic outcome.
+Produce source-bounded exact-compound hypotheses and a reconciled evidence portfolio for expert review. Treat every result as hypothesis generation, not clinical advice or proof of efficacy.
 
-## Scope
+## Choose the schema path
 
-At least one human gene, disease, or phenotype identifies the case. Input may be ordinary language or structured. If all three are absent, ask one concise question. Organism, cell, organoid, behavioural, and other experimental-model details are optional context, not required inputs or terminal endpoints.
+- Use native schema v7 for new work. Require at least one human gene, disease, or phenotype and at least one supplied endpoint. Preserve typed unknowns and blocking ambiguity; do not infer a generic endpoint.
+- Use schema v6 only when explicitly requested or when continuing a native schema-v6 run. Keep its perspectives, route markers, integer rubric, validator, and final files historical.
+- Inspect schema-v3 through schema-v6 artifacts read-only. Never resume, append, finalize, repair, or rewrite them through v7.
 
-## Authority
+## Run schema v7
 
-Read the human-readable contracts before initialization:
+Run commands from this skill folder, or replace each relative script path with its absolute path.
 
-- `references/workflow.md`: stages, isolation, endpoint, and closure
-- `references/evidence.md`: evidence, search, sources, and exact compounds
-- `references/runtime.md`: controller lifecycle, packets, retries, and resume
-- `references/ranking.md`: audit, ranking, council, and outputs
+1. Read `references/case-discovery-seeds.md`, then initialize with `scripts/orchestrate_program.py init <run-folder> --schema-version 7 --case-file <case.json>`. Resolve a `needs_resolution` case before seed work.
+2. Read `references/runtime.md`. Drive only controller actions: `next -> start -> progress -> validate-result -> complete`. Run every ready shard up to configured concurrency; give each worker only its emitted three-line prompt. Use `fail` for controlled retries and `recover-active` after interruption.
+3. For retrieval, read `references/retrieval-adapters.md` plus the relevant source-family reference. Declare source universes and query plans before traversal. Preserve every eligible mapping, negative/null context, unsupported capability, continuation, and source-specific gap.
+4. Normalize and dispose every canonical seed through `scripts/v7_production_disposition.py` using frozen authority assertions; preserve unresolved/conflicting identity and every exact form. Then read `references/deep-evidence-identity.md` before deep evidence and verify decision claims against retained original content.
+5. For triage, audit, council, and portfolio work, read `references/triage-ranking.md` and `references/audit-council-portfolio.md`. Keep evidence strength, novelty/information value, readiness, uncertainty, and portfolio diversity separate.
+6. Read `references/outputs-validation.md`. Build the canonical projection with `scripts/build_final_outputs.py <run-folder>` and validate through the single public entry point `scripts/validate_program.py <run-folder>`. Treat any interim audit, failure, budget deferral, or unresolved reconciliation as diagnostic partial.
 
-Runtime code and emitted artifacts are authoritative:
+Workers write only staged results. The controller validates and atomically commits content-addressed canonical records. Identical replay is a no-op; conflicting content for one identity fails. Keep schedule-specific attempts and retries out of the scientific projection.
 
-- `scripts/program_contract.py` owns schemas, controlled values, perspective and query contracts, retry parameters, ranking components and caps, and invariants.
-- `scripts/orchestrate_program.py` and `scripts/program_runtime.py` own state transitions, immutable packets, job isolation, checkpoints, retries, commits, and finalization.
-- `scripts/validate_program.py`, `scripts/ranking.py`, and `scripts/build_final_outputs.py` own validation, deterministic ranking, and final output construction.
+## Reference routing
 
-The references describe these contracts. If prose differs from the controller packet, runtime artifacts, or validation result, the runtime governs.
+- `references/case-discovery-seeds.md`: v7 case, factorized discovery, structural routes, seeds, disposition, screening, and reconciliation
+- `references/runtime.md`: v7 concurrent lifecycle and historical v6 runtime
+- `references/retrieval-adapters.md`: generic v7 declarations, receipts, bounded coverage, cache, and replay
+- `references/chemical-target-adapters.md`: Open Targets, ChEMBL, BindingDB, PubChem, and UniChem boundaries
+- `references/extended-discovery-adapters.md`: clinical-trial, preprint, ChEBI, multimodal planner, unsupported-source, and anti-popularity boundaries
+- `references/deep-evidence-identity.md`: original-content grounding, authoritative identity, exact forms, and corrections
+- `references/triage-ranking.md`: typed decision features, safety/exposure, triage, and separate pre-audit orders
+- `references/audit-council-portfolio.md`: stratified audit, correction authority, council, and diversified portfolio policy
+- `references/outputs-validation.md`: generated v7 artifact inventory, reconciliation, and focused validation domains
+- `references/workflow.md`, `references/evidence.md`, `references/ranking.md`: historical schema-v6 workflow, evidence, ranking, and outputs
 
-## Execution and outputs
+Treat typed Python records and controller artifacts as authoritative. References explain when to use them; they do not redefine field schemas or controlled values.
 
-Initialize `repurposing_program_runs/<human-case-slug>_<YYYYMMDD_HHMMSS>/` with `scripts/orchestrate_program.py init` and the supplied human fields. Subsequent work follows controller actions until `finalize`.
+## Closure and handoff
 
-Each `start_agent` action maps to one isolated subagent with `fork_turns="none"`; its exact three-line `spawn_prompt` is the complete handoff. The subagent processes every packet chunk and writes only the expected staged result. A result passes `validate-result` before `complete`; canonical state changes only through controller commit. Controlled failures are recorded with `fail`, and retry timing remains controller-owned.
+Never manufacture a candidate quota, use citation density as admission, collapse identity by name, hide source gaps, substitute structural validation for scientific audit, or expose benchmark answers to a live run. The strongest closure claim is `complete within the declared source releases and query plan`; otherwise name the bounded or failed branches.
 
-At a checkpoint, report that progress is persisted and that `continue` resumes deterministically. At `finalize`, run `scripts/build_final_outputs.py <run_folder>`. It validates the run and creates `ranked_compound_candidates.csv` and `candidate_justifications.md`; final outputs are runtime-built rather than hand-edited.
-
-The programme is hypothesis generation for expert review. Report closure as `no known decision-changing search branch remains within the documented scope`; this does not claim universal exhaustiveness or clinical efficacy.
+At a checkpoint, report that canonical progress is persisted and `resume` is deterministic. At completion, report the output status, reconciled counts, material gaps, and expert-review framing.

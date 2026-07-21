@@ -1,4 +1,6 @@
-# Ranking, Audit, Council, and Outputs
+# Schema-v6 historical ranking, audit, council, and outputs
+
+Use this file only for native schema-v6 runs. Schema v7 uses `triage-ranking.md`, `audit-council-portfolio.md`, and `outputs-validation.md`.
 
 ## Independent audit
 

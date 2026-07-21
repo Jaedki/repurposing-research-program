@@ -1,4 +1,6 @@
-# Living Evidence and Search Contract
+# Schema-v6 historical living evidence and search contract
+
+Use this file only for native schema-v6 ledgers and workers. Schema v7 uses the typed discovery, retrieval, deep-evidence, and output references.
 
 ## Evidence records
 
