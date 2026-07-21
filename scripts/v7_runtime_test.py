@@ -144,16 +144,19 @@ def _records_for_action(root: Path, action: dict[str, Any]) -> tuple[dict[str, l
             "identity_resolutions": [
                 {"identity_resolution_id": f"IDENTITY-{value}"} for value in suffixes
             ],
-            "screening_decisions": [
-                {"decision_id": f"IDENTITY-DISPOSITION-{value}"} for value in suffixes
+            "seed_dispositions": [
+                {"seed_disposition_id": f"SEED-DISPOSITION-{value}"} for value in suffixes
             ],
             "normalized_interventions": [
                 {"normalized_intervention_id": f"NI-{value}"} for value in suffixes
             ],
         }, {}
     if role == "preliminary_triage_worker":
-        suffixes = [value.removeprefix("NI-") for value in identities]
+        suffixes = [value.removeprefix("SEED-DISPOSITION-") for value in identities]
         return {
+            "screening_decisions": [
+                {"decision_id": f"SCREENING-DECISION-{value}"} for value in suffixes
+            ],
             "screen_records": [{"screen_record_id": f"SCREEN-{value}"} for value in suffixes],
             "screened_candidates": [
                 {"screened_candidate_id": f"CANDIDATE-{value}"} for value in suffixes
@@ -165,6 +168,9 @@ def _records_for_action(root: Path, action: dict[str, Any]) -> tuple[dict[str, l
     if role == "deep_evidence_worker":
         suffixes = [value.removeprefix("CANDIDATE-") for value in identities]
         return {
+            "deep_selection_records": [
+                {"selection_record_id": f"SELECTION-{value}"} for value in suffixes
+            ],
             "deep_evidence_packages": [
                 {"package_id": f"PACKAGE-{value}"} for value in suffixes
             ],
@@ -173,6 +179,9 @@ def _records_for_action(root: Path, action: dict[str, Any]) -> tuple[dict[str, l
     if role == "ranking_preparation_worker":
         suffixes = [value.removeprefix("DEEP-") for value in identities]
         return {
+            "decision_profiles": [
+                {"profile_id": f"PROFILE-{value}"} for value in suffixes
+            ],
             "ranking_preparation_records": [
                 {"preparation_id": f"PREP-{value}"} for value in suffixes
             ]
@@ -202,6 +211,9 @@ def _records_for_action(root: Path, action: dict[str, Any]) -> tuple[dict[str, l
             ],
             "portfolio_review_records": [
                 {"portfolio_review_id": f"PORTFOLIO-{value}"} for value in suffixes
+            ],
+            "portfolio_rank_records": [
+                {"candidate_id": f"DEEP-{value}"} for value in suffixes
             ],
         }, {}
     if role == "final_structural_validator":

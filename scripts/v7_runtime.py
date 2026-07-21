@@ -1144,7 +1144,7 @@ def _advance_dag_locked(
                 "identity_shards",
                 "identity_fan_in",
                 "preliminary_triage",
-                ("normalized_interventions",),
+                ("seed_dispositions",),
                 True,
             ),
             (

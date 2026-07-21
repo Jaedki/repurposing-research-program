@@ -1257,7 +1257,7 @@ def select_diversified_portfolio(
 ) -> PortfolioSelection:
     rows = list(frames)
     by_candidate = {row.candidate_id: row for row in rows}
-    if len(by_candidate) != len(rows) or not rows:
+    if len(by_candidate) != len(rows):
         raise AuditPortfolioError("portfolio frame must contain unique candidates")
     for row in rows:
         if row.preparation.candidate_id != row.candidate_id or row.diversity.candidate_id != row.candidate_id:

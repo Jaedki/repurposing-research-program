@@ -89,13 +89,19 @@ EXPECTED_PRODUCTION_INTERFACES: tuple[dict[str, str], ...] = (
         "test_id": "V7-PROD-SCREEN-DEEP",
         "call": "adapter.screen_and_deepen(case_revision, admitted_frame, frozen_evidence)",
         "required_result": "screen_records, deep_selection, deep_packages, structured safety/exposure",
-        "reason": "PENDING: no all-admitted schema-v7 screen/deep aggregate implements screen_and_deepen.",
+        "reason": "IMPLEMENTED: v7_production_screen_deep.V7ScreenDeepAdapter provides the persisted all-admitted screen/deep aggregate without benchmark-oracle imports.",
     },
     {
         "test_id": "V7-PROD-PORTFOLIO",
         "call": "adapter.audit_and_select(case_revision, deep_frame, frozen_audit_plan)",
         "required_result": "audit_report, seven decision outputs, portfolio_dispositions, canonical order",
-        "reason": "PENDING: no retrieval-backed persisted schema-v7 audit/portfolio aggregate implements audit_and_select.",
+        "reason": "IMPLEMENTED: v7_production_portfolio.V7PortfolioAdapter provides the persisted retrieval-backed audit/correction/council/portfolio aggregate without benchmark-oracle imports.",
+    },
+    {
+        "test_id": "V7-PROD-PROGRAM",
+        "call": "adapter.execute(case_revision, source_plan, frozen_pages, resolver_factory, evidence_factory, audit_factory)",
+        "required_result": "all eight persisted stages, complete runtime, canonical full-funnel outputs, stable replay",
+        "reason": "IMPLEMENTED: v7_production_program.V7ProgramAdapter composes the real production adapters and runtime without benchmark-oracle imports.",
     },
     {
         "test_id": "V7-PROD-RUNTIME",
@@ -111,9 +117,9 @@ EXPECTED_PRODUCTION_INTERFACES: tuple[dict[str, str], ...] = (
     },
     {
         "test_id": "V7-PROD-LEGACY",
-        "call": "adapter.inspect_legacy(path); adapter.request_legacy_operation(path, operation)",
-        "required_result": "read-only inspection plus refusal of resume/write/append/finalize for schema-v3..v6",
-        "reason": "IMPLEMENTED: v7_case_model.V7CompatibilityAdapter provides real read-only inspection/refusal.",
+        "call": "adapter.inspect_legacy(path); adapter.copy_migrate(path, new_path); adapter.request_legacy_operation(path, operation)",
+        "required_result": "read-only inspection, byte-preserving immutable legacy-derived copy, and refusal of resume/write/append/finalize for schema-v3..v6",
+        "reason": "IMPLEMENTED: v7_case_model.V7CompatibilityAdapter provides real inspection, copy-only migration, hash verification, and mutation refusal.",
     },
     {
         "test_id": "V7-PROD-OUTPUTS",
@@ -172,6 +178,8 @@ class V7ProductionAdapter(Protocol):
     ) -> Iterable[Mapping[str, Any]]: ...
 
     def inspect_legacy(self, path: Path) -> Mapping[str, Any]: ...
+
+    def copy_migrate(self, source: Path, destination: Path) -> Mapping[str, Any]: ...
 
     def request_legacy_operation(self, path: Path, operation: str) -> Mapping[str, Any]: ...
 

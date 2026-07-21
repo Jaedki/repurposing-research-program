@@ -309,6 +309,14 @@ def _optional_text(value: Any, label: str) -> str | None:
     return _text(value, label)
 
 
+def _verbatim_text(value: Any, label: str) -> str:
+    """Retain source coordinates exactly while rejecting empty excerpts."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise DeepEvidenceError(f"{label} is required")
+    return value
+
+
 def _strings(values: Iterable[str], label: str, *, required: bool = False) -> tuple[str, ...]:
     rows = tuple(sorted({_text(value, label) for value in values}))
     if required and not rows:
@@ -421,7 +429,7 @@ def make_evidence_span(
     exact_excerpt: str | None = None,
     structured_pointer: StructuredEvidencePointer | None = None,
 ) -> EvidenceSpan:
-    excerpt = _optional_text(exact_excerpt, "exact_excerpt")
+    excerpt = None if exact_excerpt is None else _verbatim_text(exact_excerpt, "exact_excerpt")
     if support_kind is EvidenceSupportKind.EXACT_EXCERPT:
         if excerpt is None or structured_pointer is not None:
             raise DeepEvidenceError("exact-excerpt spans require only exact_excerpt")

@@ -14,6 +14,7 @@ from typing import Any, Iterable, Mapping
 
 from v7_output_contract import (
     ARTIFACT_SPECS,
+    EXPERIMENTAL_USE_POLICY,
     OUTPUT_CONTRACT_VERSION,
     OUTPUT_DIRECTORY,
     OutputStatus,
@@ -356,7 +357,12 @@ def _audit_rows(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 def _candidate_markdown(cards: Iterable[Mapping[str, Any]]) -> str:
     cards_value = list(cards)
-    lines = ["# Candidate evidence cards", "", "Hypothesis generation for expert review; not clinical advice.", ""]
+    lines = [
+        "# Candidate evidence cards",
+        "",
+        EXPERIMENTAL_USE_POLICY,
+        "",
+    ]
     if not cards_value:
         lines.append("No completed deep candidates were present in the canonical snapshot.")
     for card in cards_value:
@@ -424,7 +430,9 @@ def _summary_markdown(
             "",
             f"Status: **{snapshot.get('output_status')}**.",
             "",
-            "This is bounded-scope hypothesis generation for expert review. It is not a clinical recommendation, proof of efficacy, or claim of universal exhaustiveness.",
+            EXPERIMENTAL_USE_POLICY,
+            "",
+            "Results are bounded to the declared sources and query plan and do not claim universal exhaustiveness.",
             "",
             "## Funnel",
             "",

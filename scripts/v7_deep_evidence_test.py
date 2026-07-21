@@ -597,6 +597,27 @@ class DeepEvidenceIdentityTests(unittest.TestCase):
             retained_payloads=retained,
         )
 
+    def test_exact_excerpt_preserves_multiline_original_source_bytes(self):
+        payload = b'{\r\n  "record": {\r\n    "result": "null"\r\n  }\r\n}'
+        source, retained = _source(
+            "MULTILINE-JSON", payload, scope=SourceContentScope.ORIGINAL_DATABASE_RECORD
+        )
+        excerpt = payload.decode("utf-8")
+        span = make_evidence_span(
+            source,
+            claim_id="DEEP-CLAIM-MULTILINE",
+            support_kind=EvidenceSupportKind.EXACT_EXCERPT,
+            stable_locator="record",
+            exact_excerpt=excerpt,
+        )
+        self.assertEqual(span.exact_excerpt, excerpt)
+        validate_evidence_span(
+            span,
+            source,
+            verification_mode=VerificationMode.ORIGINAL_CONTENT_REQUIRED,
+            retained_payloads=retained,
+        )
+
     def test_source_and_claim_corrections_retain_history_and_supersede_cleanly(self):
         package, retained = _package()
         candidate = package.screened_candidate

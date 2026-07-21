@@ -13,8 +13,12 @@ def validate(snapshot: Mapping[str, Any]) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     deep_ids = {str(row.get("candidate_id")) for row in rows(snapshot, "deep_candidates")}
     assignments = rows(snapshot, "audit_assignments")
-    assignment_by_candidate = index(assignments, "candidate_id")
-    if set(assignment_by_candidate) != deep_ids:
+    assignments_by_candidate: dict[str, list[dict[str, Any]]] = {}
+    for assignment in assignments:
+        candidate_id = str(assignment.get("candidate_id") or "")
+        if candidate_id:
+            assignments_by_candidate.setdefault(candidate_id, []).append(assignment)
+    if set(assignments_by_candidate) != deep_ids:
         issues.append(issue("audit_council", "ASSIGNMENT_COVERAGE", "audit assignments must cover every and only deep candidate"))
     assignment_by_id = index(assignments, "assignment_id")
     audits = rows(snapshot, "audit_records")
@@ -37,8 +41,11 @@ def validate(snapshot: Mapping[str, Any]) -> list[ValidationIssue]:
     for row in portfolio:
         candidate_id = str(row.get("candidate_id", ""))
         disposition = enum_value(row.get("disposition"))
-        assignment = assignment_by_candidate.get(candidate_id, {})
-        if disposition in {"finalist", "reserve"} and enum_value(assignment.get("selection_status")) != "selected_for_audit":
+        candidate_assignments = assignments_by_candidate.get(candidate_id, [])
+        if disposition in {"finalist", "reserve"} and not any(
+            enum_value(assignment.get("selection_status")) == "selected_for_audit"
+            for assignment in candidate_assignments
+        ):
             issues.append(issue("audit_council", "UNAUDITED_CAPACITY", f"{candidate_id} cannot enter finalist/reserve capacity while unaudited"))
         if disposition == "council_blocked" and candidate_id not in councils:
             issues.append(issue("audit_council", "COUNCIL_LINK", f"council-blocked candidate {candidate_id} lacks a council record"))

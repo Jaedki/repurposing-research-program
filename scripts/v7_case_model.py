@@ -26,6 +26,7 @@ SCHEMA_VERSION = 7
 CASE_MODEL_VERSION = "schema-v7-case-v1"
 PROVENANCE_VERSION = "schema-v7-case-provenance-v1"
 ENDPOINT_ID_RULE = "schema-v7-endpoint-id-v1"
+LEGACY_MIGRATION_VERSION = "schema-v7-legacy-copy-migration-v1"
 
 
 class CaseInputError(ValueError):
@@ -2631,6 +2632,181 @@ def _artifact_hashes(path: Path) -> tuple[dict[str, str], int]:
     return hashes, total_bytes
 
 
+def _legacy_mapping_manifest(
+    *,
+    source_schema_version: int,
+    source_kind: str,
+    source_content_sha256: str,
+    source_file_sha256: Mapping[str, str],
+) -> dict[str, Any]:
+    unknown = {
+        "status": ValueStatus.UNKNOWN.value,
+        "value": None,
+        "reason": (
+            "The legacy schema does not carry a semantics-preserving native schema-v7 "
+            "value; copy migration never invents or renormalizes scientific content."
+        ),
+    }
+    return {
+        "mapping_version": LEGACY_MIGRATION_VERSION,
+        "source_schema_version": source_schema_version,
+        "source_artifact_kind": source_kind,
+        "source_content_sha256": source_content_sha256,
+        "source_file_sha256": dict(sorted(source_file_sha256.items())),
+        "native_v7_equivalence": False,
+        "scientific_mappings": {
+            "normalized_case": unknown,
+            "source_universes_and_query_plans": unknown,
+            "candidate_seeds": unknown,
+            "normalized_interventions_and_dispositions": unknown,
+            "screen_records": unknown,
+            "deep_evidence_packages": unknown,
+            "audit_and_portfolio": unknown,
+            "full_funnel_outputs": unknown,
+        },
+        "prohibited_transformations": [
+            "in_place_upgrade",
+            "chemical_renormalization",
+            "missing_to_false_or_zero",
+            "semantic_equivalence_claim",
+            "native_v7_acceptance",
+        ],
+    }
+
+
+def copy_migrate_legacy(source: str | Path, destination: str | Path) -> dict[str, Any]:
+    """Copy a legacy artifact byte-for-byte into one immutable legacy-derived container."""
+
+    source_path = Path(source).expanduser().resolve()
+    destination_path = Path(destination).expanduser().resolve()
+    source_version = detect_schema_version(source_path)
+    if source_version not in {3, 4, 5, 6}:
+        raise CaseInputError("copy migration accepts only schema-v3 through schema-v6 artifacts")
+    if destination_path == source_path or source_path in destination_path.parents:
+        raise CaseInputError("copy-migration destination must be outside the legacy source artifact")
+    if destination_path.exists() and (
+        not destination_path.is_dir() or any(destination_path.iterdir())
+    ):
+        raise CaseInputError(f"Migration destination is not empty: {destination_path}")
+
+    before_hashes, before_bytes = _artifact_hashes(source_path)
+    source_projection_sha256 = content_sha256(before_hashes)
+    source_kind = "file" if source_path.is_file() else "folder"
+    mapping = _legacy_mapping_manifest(
+        source_schema_version=source_version,
+        source_kind=source_kind,
+        source_content_sha256=source_projection_sha256,
+        source_file_sha256=before_hashes,
+    )
+    source_path_record = str(source_path)
+    destination_existed = destination_path.is_dir()
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(
+            prefix=f".{destination_path.name}.legacy-derived-",
+            dir=str(destination_path.parent),
+        )
+    )
+    try:
+        preserved_root = staging / "legacy_original"
+        if source_path.is_file():
+            preserved_root.mkdir()
+            shutil.copyfile(source_path, preserved_root / source_path.name)
+        else:
+            shutil.copytree(source_path, preserved_root)
+        copied_hashes, copied_bytes = _artifact_hashes(preserved_root)
+        if copied_hashes != before_hashes or copied_bytes != before_bytes:
+            raise CaseInputError("Legacy byte/hash verification failed during copy migration")
+        after_hashes, after_bytes = _artifact_hashes(source_path)
+        if after_hashes != before_hashes or after_bytes != before_bytes:
+            raise CaseInputError("Legacy source changed during copy migration")
+
+        mapping_payload = _pretty_json_bytes(mapping)
+        _atomic_write(staging / "legacy_mapping_manifest.json", mapping_payload)
+        manifest = {
+            "artifact_type": "schema_v7_legacy_derived_container",
+            "schema_version": SCHEMA_VERSION,
+            "migration_version": LEGACY_MIGRATION_VERSION,
+            "source_schema_version": source_version,
+            "source_artifact_kind": source_kind,
+            "source_path": source_path_record,
+            "source_content_sha256": source_projection_sha256,
+            "source_file_sha256": dict(sorted(before_hashes.items())),
+            "source_file_count": len(before_hashes),
+            "source_total_bytes": before_bytes,
+            "legacy_original_root": "legacy_original",
+            "legacy_mapping_manifest": "legacy_mapping_manifest.json",
+            "legacy_mapping_manifest_sha256": hashlib.sha256(mapping_payload).hexdigest().upper(),
+            "container_state": "immutable_legacy_derived",
+            "native_v7": False,
+            "resumable": False,
+            "finalizable": False,
+            "supported_operations": ["inspect"],
+        }
+        _atomic_write(staging / "schema_manifest.json", _pretty_json_bytes(manifest))
+        if destination_existed:
+            destination_path.rmdir()
+        staging.replace(destination_path)
+    except Exception:
+        if staging.exists():
+            shutil.rmtree(staging)
+        if destination_existed and not destination_path.exists():
+            destination_path.mkdir()
+        raise
+    return manifest
+
+
+def _verify_legacy_derived_container(target: Path, manifest: Mapping[str, Any]) -> None:
+    if not target.is_dir():
+        raise CaseInputError("Legacy-derived schema-v7 inspection requires a container directory")
+    if manifest.get("artifact_type") != "schema_v7_legacy_derived_container":
+        raise CaseInputError("Unsupported legacy-derived artifact type")
+    if (
+        manifest.get("schema_version") != SCHEMA_VERSION
+        or manifest.get("migration_version") != LEGACY_MIGRATION_VERSION
+        or manifest.get("source_schema_version") not in {3, 4, 5, 6}
+        or manifest.get("container_state") != "immutable_legacy_derived"
+        or manifest.get("native_v7") is not False
+        or manifest.get("resumable") is not False
+        or manifest.get("finalizable") is not False
+    ):
+        raise CaseInputError("Legacy-derived manifest policy/version mismatch")
+    preserved = target / "legacy_original"
+    mapping_path = target / "legacy_mapping_manifest.json"
+    if not preserved.is_dir() or not mapping_path.is_file():
+        raise CaseInputError("Legacy-derived container is incomplete")
+    actual_files = {
+        path.relative_to(target).as_posix()
+        for path in target.rglob("*")
+        if path.is_file()
+    }
+    allowed = {
+        "schema_manifest.json",
+        "legacy_mapping_manifest.json",
+        *(f"legacy_original/{name}" for name in manifest.get("source_file_sha256", {})),
+    }
+    if actual_files != allowed:
+        raise CaseInputError("Legacy-derived container contains missing or unexpected files")
+    copied_hashes, copied_bytes = _artifact_hashes(preserved)
+    if copied_hashes != manifest.get("source_file_sha256"):
+        raise CaseInputError("Legacy-derived preserved-byte hash mismatch")
+    if copied_bytes != manifest.get("source_total_bytes"):
+        raise CaseInputError("Legacy-derived preserved-byte count mismatch")
+    if content_sha256(copied_hashes) != manifest.get("source_content_sha256"):
+        raise CaseInputError("Legacy-derived source projection hash mismatch")
+    actual_mapping_hash = hashlib.sha256(mapping_path.read_bytes()).hexdigest().upper()
+    if actual_mapping_hash != manifest.get("legacy_mapping_manifest_sha256"):
+        raise CaseInputError("Legacy-derived mapping-manifest hash mismatch")
+    mapping = _read_json_object(mapping_path)
+    if (
+        mapping.get("mapping_version") != LEGACY_MIGRATION_VERSION
+        or mapping.get("source_schema_version") != manifest.get("source_schema_version")
+        or mapping.get("source_file_sha256") != manifest.get("source_file_sha256")
+        or mapping.get("native_v7_equivalence") is not False
+    ):
+        raise CaseInputError("Legacy-derived mapping manifest does not match the container")
+
+
 _NATIVE_CASE_ARTIFACTS = {
     "case_input.json",
     "case_revision.json",
@@ -2777,15 +2953,25 @@ def inspect_artifact(path: str | Path) -> dict[str, Any]:
         if manifest.get("artifact_type") == "schema_v7_native_case_container":
             _verify_native_case_container(target, manifest)
             native_verified = True
+        elif manifest.get("artifact_type") == "schema_v7_legacy_derived_container":
+            _verify_legacy_derived_container(target, manifest)
         elif version == SCHEMA_VERSION:
             raise CaseInputError("Unsupported schema-v7 container type")
     elif version == SCHEMA_VERSION and target.is_dir():
         raise CaseInputError("Schema-v7 container lacks schema_manifest.json")
     hashes, total_bytes = _artifact_hashes(target)
+    legacy_derived = (
+        target.is_dir()
+        and (target / "schema_manifest.json").is_file()
+        and _read_json_object(target / "schema_manifest.json").get("artifact_type")
+        == "schema_v7_legacy_derived_container"
+    )
     legacy = version in {3, 4, 5, 6}
     mode = (
         "read_only"
         if legacy
+        else "immutable_legacy_derived"
+        if legacy_derived
         else "native_read_only_inspection"
         if native_verified
         else "unsupported_read_only"
@@ -2795,7 +2981,8 @@ def inspect_artifact(path: str | Path) -> dict[str, Any]:
         "artifact_kind": "file" if target.is_file() else "folder",
         "mode": mode,
         "legacy": legacy,
-        "integrity": "verified" if native_verified else "not_applicable",
+        "legacy_derived": legacy_derived,
+        "integrity": "verified" if native_verified or legacy_derived else "not_applicable",
         "file_count": len(hashes),
         "total_bytes": total_bytes,
         "content_sha256": content_sha256(hashes),
@@ -2812,6 +2999,9 @@ class V7CompatibilityAdapter:
         if result["schema_version"] not in {3, 4, 5, 6}:
             raise CaseInputError("inspect_legacy accepts only schema-v3 through schema-v6 artifacts")
         return result
+
+    def copy_migrate(self, source: Path, destination: Path) -> Mapping[str, Any]:
+        return copy_migrate_legacy(source, destination)
 
     def request_legacy_operation(self, path: Path, operation: str) -> Mapping[str, Any]:
         normalized_operation = _canonical_token(operation)
@@ -2865,8 +3055,24 @@ def is_v7_case_container(path: str | Path) -> bool:
     )
 
 
+def is_v7_legacy_derived_container(path: str | Path) -> bool:
+    target = Path(path).expanduser().resolve()
+    manifest = target / "schema_manifest.json" if target.is_dir() else target
+    if not manifest.is_file():
+        return False
+    try:
+        value = _read_json_object(manifest)
+    except CaseInputError:
+        return False
+    return (
+        value.get("schema_version") == SCHEMA_VERSION
+        and value.get("artifact_type") == "schema_v7_legacy_derived_container"
+    )
+
+
 __all__ = [
     "CASE_MODEL_VERSION",
+    "LEGACY_MIGRATION_VERSION",
     "SCHEMA_VERSION",
     "CaseBundle",
     "CaseInputError",
@@ -2890,10 +3096,12 @@ __all__ = [
     "build_case_bundle",
     "canonical_bytes",
     "content_sha256",
+    "copy_migrate_legacy",
     "detect_schema_version",
     "initialize_case",
     "inspect_artifact",
     "is_v7_case_container",
+    "is_v7_legacy_derived_container",
     "validate_case_revision",
     "validation_metadata",
 ]

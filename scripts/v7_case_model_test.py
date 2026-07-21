@@ -34,8 +34,10 @@ from v7_case_model import (
     V7CompatibilityAdapter,
     ValueStatus,
     build_case_bundle,
+    copy_migrate_legacy,
     initialize_case,
     inspect_artifact,
+    is_v7_legacy_derived_container,
     validate_case_revision,
     validation_metadata,
 )
@@ -679,6 +681,93 @@ class ValidationAndInitializationTests(unittest.TestCase):
 
 
 class CompatibilityAndCliTests(unittest.TestCase):
+    def test_copy_migration_preserves_every_legacy_byte_and_emits_typed_unknowns(self) -> None:
+        fixture = (LEGACY_ROOT / "schema-v5.json").read_bytes()
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "legacy-run"
+            source.mkdir()
+            (source / "program_state.json").write_bytes(fixture)
+            (source / "opaque-payload.bin").write_bytes(b"legacy payload\x00\xff")
+            before = snapshot(source)
+            destination = base / "legacy-derived"
+
+            manifest = copy_migrate_legacy(source, destination)
+
+            self.assertEqual(snapshot(source), before)
+            self.assertEqual(snapshot(destination / "legacy_original"), before)
+            self.assertEqual(manifest["source_schema_version"], 5)
+            self.assertEqual(manifest["container_state"], "immutable_legacy_derived")
+            self.assertFalse(manifest["native_v7"])
+            self.assertFalse(manifest["resumable"])
+            self.assertFalse(manifest["finalizable"])
+            self.assertTrue(is_v7_legacy_derived_container(destination))
+            inspection = inspect_artifact(destination)
+            self.assertEqual(inspection["mode"], "immutable_legacy_derived")
+            self.assertTrue(inspection["legacy_derived"])
+            self.assertEqual(inspection["integrity"], "verified")
+            mapping = json.loads(
+                (destination / "legacy_mapping_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertFalse(mapping["native_v7_equivalence"])
+            self.assertTrue(mapping["scientific_mappings"])
+            self.assertTrue(
+                all(
+                    row == {
+                        "status": "unknown",
+                        "value": None,
+                        "reason": (
+                            "The legacy schema does not carry a semantics-preserving native schema-v7 "
+                            "value; copy migration never invents or renormalizes scientific content."
+                        ),
+                    }
+                    for row in mapping["scientific_mappings"].values()
+                )
+            )
+
+    def test_copy_migration_cli_is_atomic_and_legacy_derived_runtime_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = LEGACY_ROOT / "schema-v4.json"
+            destination = base / "legacy-derived"
+            migrated = run_cli("copy-migrate-legacy", source, destination)
+            self.assertEqual(migrated.returncode, 0, migrated.stderr)
+            self.assertEqual(
+                json.loads(migrated.stdout)["result"]["artifact_type"],
+                "schema_v7_legacy_derived_container",
+            )
+            before = snapshot(destination)
+            refused = run_cli("status", destination)
+            self.assertEqual(refused.returncode, 1, refused.stdout)
+            self.assertIn("immutable inspection artifacts", refused.stderr)
+            self.assertEqual(snapshot(destination), before)
+
+            occupied = base / "occupied"
+            occupied.mkdir()
+            (occupied / "keep.txt").write_text("keep", encoding="utf-8")
+            rejected = run_cli("copy-migrate-legacy", source, occupied)
+            self.assertEqual(rejected.returncode, 1, rejected.stdout)
+            self.assertEqual((occupied / "keep.txt").read_text(encoding="utf-8"), "keep")
+
+    def test_legacy_derived_tamper_and_nested_destination_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "legacy-run"
+            source.mkdir()
+            (source / "program_state.json").write_bytes(
+                (LEGACY_ROOT / "schema-v3.json").read_bytes()
+            )
+            with self.assertRaisesRegex(CaseInputError, "outside the legacy source"):
+                copy_migrate_legacy(source, source / "derived")
+            self.assertEqual(set(snapshot(source)), {"program_state.json"})
+
+            destination = base / "derived"
+            copy_migrate_legacy(source, destination)
+            preserved = destination / "legacy_original" / "program_state.json"
+            preserved.write_bytes(preserved.read_bytes() + b"tamper")
+            with self.assertRaisesRegex(CaseInputError, "preserved-byte hash mismatch"):
+                inspect_artifact(destination)
+
     def test_schema_v3_through_v6_standalone_fixtures_remain_byte_identical(self) -> None:
         adapter = V7CompatibilityAdapter()
         checksums = json.loads(
@@ -789,10 +878,35 @@ class CompatibilityAndCliTests(unittest.TestCase):
             ):
                 self.assertEqual(after_status[name], before[name], name)
 
-    def test_cli_init_without_schema_flag_keeps_default_v6_behavior(self) -> None:
+    def test_cli_init_without_schema_flag_defaults_new_runs_to_v7(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            run_folder = Path(temporary) / "default-v6-run"
+            run_folder = Path(temporary) / "default-v7-run"
             initialized = run_cli("init", run_folder, "--human-gene", "TP53")
+
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            payload = json.loads(initialized.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["result"]["schema_version"], 7)
+            self.assertEqual(
+                json.loads((run_folder / "schema_manifest.json").read_text(encoding="utf-8"))[
+                    "schema_version"
+                ],
+                7,
+            )
+            self.assertTrue((run_folder / "runtime_v7" / "execution_plan.json").is_file())
+            self.assertFalse((run_folder / "program_state.json").exists())
+
+    def test_explicit_schema_v6_initialization_remains_available(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_folder = Path(temporary) / "explicit-v6-run"
+            initialized = run_cli(
+                "init",
+                run_folder,
+                "--schema-version",
+                6,
+                "--human-gene",
+                "TP53",
+            )
 
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
             payload = json.loads(initialized.stdout)
@@ -819,6 +933,22 @@ class CompatibilityAndCliTests(unittest.TestCase):
     def test_case_file_schema_version_negotiates_or_rejects_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            case_v6_file = root / "case-v6.json"
+            case_v6_file.write_text(
+                json.dumps({"schema_version": 6, "human_gene": "TP53"}),
+                encoding="utf-8",
+            )
+            negotiated_v6_root = root / "negotiated-v6"
+            negotiated_v6 = run_cli(
+                "init", negotiated_v6_root, "--case-file", case_v6_file
+            )
+            self.assertEqual(negotiated_v6.returncode, 0, negotiated_v6.stderr)
+            self.assertEqual(
+                json.loads(negotiated_v6.stdout)["result"]["schema_version"], 6
+            )
+            self.assertTrue((negotiated_v6_root / "program_state.json").is_file())
+            self.assertFalse((negotiated_v6_root / "schema_manifest.json").exists())
+
             case_file = root / "case-v7.json"
             case_file.write_text(
                 json.dumps({"schema_version": 7, "human_gene": "TP53"}),

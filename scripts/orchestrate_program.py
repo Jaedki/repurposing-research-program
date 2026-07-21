@@ -22,8 +22,13 @@ from program_runtime import (
     status,
     validate_result,
 )
+from v7_case_model import V7CompatibilityAdapter
 from v7_case_model import initialize_case as initialize_v7_case
-from v7_case_model import inspect_artifact, is_v7_case_container
+from v7_case_model import (
+    inspect_artifact,
+    is_v7_case_container,
+    is_v7_legacy_derived_container,
+)
 from v7_runtime import (
     complete_job as complete_v7_job,
     fail_job as fail_v7_job,
@@ -86,6 +91,9 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--max-candidate-records-per-shard", type=int)
     init.add_argument("--max-shard-source-bytes", type=int)
     init.add_argument("--max-packet-bytes", type=int)
+    migrate = commands.add_parser("copy-migrate-legacy")
+    migrate.add_argument("legacy_path")
+    migrate.add_argument("destination")
     for name in ("next", "resume", "status"):
         sub = commands.add_parser(name)
         sub.add_argument("run_folder")
@@ -154,16 +162,23 @@ def _v7_runtime_config(args: argparse.Namespace) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    root = Path(args.run_folder).expanduser().resolve()
     try:
-        if args.command == "init":
+        if args.command == "copy-migrate-legacy":
+            source = Path(args.legacy_path).expanduser().resolve()
+            destination = Path(args.destination).expanduser().resolve()
+            result = V7CompatibilityAdapter().copy_migrate(source, destination)
+        else:
+            root = Path(args.run_folder).expanduser().resolve()
+        if args.command == "copy-migrate-legacy":
+            pass
+        elif args.command == "init":
             preliminary_case = _case(args)
             declared_version = preliminary_case.get("schema_version")
             if declared_version is not None and (
                 type(declared_version) is not int or declared_version not in {6, 7}
             ):
                 raise ValueError("Case-file schema_version must be 6 or 7")
-            selected_version = args.schema_version or declared_version or 6
+            selected_version = args.schema_version or declared_version or 7
             if declared_version is not None and declared_version != selected_version:
                 raise ValueError(
                     f"Case-file schema_version {declared_version} conflicts with "
@@ -178,6 +193,11 @@ def main(argv: list[str] | None = None) -> int:
                 result = initialize(root, case)
         elif args.command == "inspect":
             result = inspect_artifact(root)
+        elif is_v7_legacy_derived_container(root):
+            raise ValueError(
+                "legacy-derived schema-v7 containers are immutable inspection artifacts; "
+                "resume, write, append, finalize, and native-v7 execution are prohibited"
+            )
         elif is_v7_case_container(root):
             if not is_v7_runtime(root):
                 initialize_v7_runtime(root, {})

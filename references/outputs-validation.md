@@ -6,7 +6,7 @@ This reference is generated from `scripts/v7_output_contract.py` and describes o
 
 Build outputs only from a canonical committed snapshot. Run the focused validators before writing, write into `outputs_v7/` atomically, then validate artifact hashes and row counts through the same public `scripts/validate_program.py <run-folder>` entry point. A diagnostic partial may expose preserved records and gaps, but it must not claim complete portfolio status.
 
-Every human-readable file must state bounded scope, material gaps, hypothesis-generation status, and expert-review intent. Benchmark results are a separate post-run join and never enter these artifacts.
+Every human-readable file must state bounded scope, material gaps, and this policy: "Schema v7 is an experimental research tool; outputs are not independently scientifically certified and must not be treated as clinical advice or proof of efficacy." Benchmark results are a separate post-run join and never enter these artifacts.
 
 ## Artifact contract
 
@@ -29,7 +29,7 @@ Every human-readable file must state bounded scope, material gaps, hypothesis-ge
 | `uncertainty_and_evidence_gaps.md` | `text/markdown` | one section per gap category | Concise expert-readable uncertainty and evidence-gap summary. |
 | `audit_coverage_and_corrections.jsonl` | `application/x-ndjson` | one summary plus one row per audit assignment or correction | Audit denominators, assignments, outcomes, unaudited state, and append-only corrections. |
 | `machine_readable_provenance.jsonl` | `application/x-ndjson` | one row per provenance subject | Snapshot, commit, ledger, contract, and emitted-artifact hashes. |
-| `full_funnel_summary.md` | `text/markdown` | one run summary | Bounded-scope full-funnel summary with reconciliation and expert-review framing. |
+| `full_funnel_summary.md` | `text/markdown` | one run summary | Bounded-scope full-funnel summary with reconciliation and experimental non-certification framing. |
 
 `artifact_manifest.json` binds the output contract version, canonical snapshot hash, output status, reconciliation record, artifact SHA-256 values, byte sizes, and logical row counts.
 

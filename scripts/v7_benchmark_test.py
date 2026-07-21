@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Active harness checks and explicit pending schema-v7 production acceptance tests."""
+"""Active harness checks and schema-v7 production acceptance tests."""
 
 from __future__ import annotations
 
@@ -9,12 +9,10 @@ import json
 import sys
 import tempfile
 import unittest
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from v7_benchmark import (
-    EXPECTED_PRODUCTION_INTERFACES,
     candidate_id,
     canonical_reduce,
     canonical_sha256,
@@ -30,7 +28,7 @@ from v7_benchmark import (
     validate_legacy_fixtures,
     validate_projection,
 )
-from v7_case_model import V7CompatibilityAdapter, build_case_bundle
+from v7_case_model import V7CompatibilityAdapter, build_case_bundle, initialize_case
 from v7_chemical_target_adapters import OpenTargetsEntityKind, make_open_targets_plan
 from v7_packets import canonical_bytes
 from v7_production_discovery import V7DiscoveryAdapter, validate_discovery_aggregate
@@ -39,6 +37,15 @@ from v7_production_disposition import (
     V7DispositionAdapter,
     validate_disposition_aggregate,
 )
+from v7_production_screen_deep import (
+    V7ScreenDeepAdapter,
+    validate_screen_deep_aggregate,
+)
+from v7_production_screen_deep_test import make_production_fixture
+from v7_production_portfolio import V7PortfolioAdapter, validate_portfolio_aggregate
+from v7_production_portfolio_test import make_portfolio_fixture
+from v7_production_program import V7ProgramAdapter
+from v7_production_program_test import _audit, _evidence, _resolver, _source_plan
 from v7_runtime import V7RuntimeAdapter
 from v7_outputs import V7OutputAdapter
 from v7_outputs_test import make_complete_snapshot
@@ -46,12 +53,6 @@ from v7_outputs_test import make_complete_snapshot
 
 def issue_codes(manifest: dict[str, Any], projection: dict[str, Any], golden: dict[str, Any]) -> set[str]:
     return {issue.code for issue in validate_projection(manifest, projection, golden)}
-
-
-def pending_production(test_id: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    interface = next(row for row in EXPECTED_PRODUCTION_INTERFACES if row["test_id"] == test_id)
-    reason = f"{interface['reason']} Expected interface: {interface['call']}"
-    return unittest.skip(reason)
 
 
 class BenchmarkFixtureTests(unittest.TestCase):
@@ -264,7 +265,30 @@ class BaselineMetricTests(unittest.TestCase):
         self.assertEqual(metrics["runtime"]["network_calls"], 0)
 
 
-class PendingProductionAcceptanceTests(unittest.TestCase):
+class ProductionProtocolAcceptanceTests(unittest.TestCase):
+    def test_production_program_executes_all_eight_stages(self) -> None:
+        fixture = json.loads(
+            (
+                Path(__file__).resolve().parents[1]
+                / "benchmarks"
+                / "schema_v7"
+                / "chemical_target_adapters"
+                / "frozen_responses.json"
+            ).read_text(encoding="utf-8")
+        )
+        case = build_case_bundle(fixture["case_input"]).case_revision
+        source_plan, pages = _source_plan(case)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "program"
+            initialize_case(root, fixture["case_input"])
+            result = V7ProgramAdapter(root).execute(
+                case, source_plan, pages, _resolver, _evidence, _audit
+            )
+            self.assertTrue((root / "outputs_v7" / "artifact_manifest.json").is_file())
+        self.assertEqual(result["stage_status"], {str(index): "pass" for index in range(1, 9)})
+        self.assertEqual(result["runtime_status"], "complete")
+        self.assertTrue(result["output_manifest_id"].startswith("V7OUTPUT-"))
+
     def test_production_discovery_against_frozen_transport(self) -> None:
         fixture_path = (
             Path(__file__).resolve().parents[1]
@@ -472,13 +496,104 @@ class PendingProductionAcceptanceTests(unittest.TestCase):
         self.assertEqual(result["identity_denominators"]["N_identity_all"], 2)
         self.assertEqual(result["identity_denominators"]["N_identity_admitted"], 2)
 
-    @pending_production("V7-PROD-SCREEN-DEEP")
     def test_production_screen_and_deep_packages_against_fixture(self) -> None:
-        self.fail("Unskip only when a schema-v7 production adapter implements screen_and_deepen.")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            case, admitted_frame, frozen_evidence = make_production_fixture(root)
+            adapter = V7ScreenDeepAdapter(root / "screen-deep")
+            result = adapter.screen_and_deepen(
+                case, admitted_frame, frozen_evidence
+            )
+            replay = adapter.screen_and_deepen(
+                case,
+                admitted_frame,
+                {
+                    **frozen_evidence,
+                    "candidate_screens": list(
+                        reversed(frozen_evidence["candidate_screens"])
+                    ),
+                    "deep_results": list(reversed(frozen_evidence["deep_results"])),
+                },
+            )
+            self.assertEqual(result, replay)
+            self.assertTrue(
+                adapter.aggregate_path(
+                    case.case_revision_id, result["screen_deep_plan_id"]
+                ).is_file()
+            )
+            self.assertTrue(
+                adapter.selection_path(
+                    case.case_revision_id, result["screen_deep_plan_id"]
+                ).is_file()
+            )
+        validate_screen_deep_aggregate(case, result)
+        self.assertEqual(
+            {
+                "screen_records",
+                "deep_selection",
+                "deep_packages",
+                "structured_safety",
+                "structured_exposure",
+            }
+            - set(result),
+            set(),
+        )
+        self.assertEqual(result["reconciliation"]["N_admit"], 5)
+        self.assertEqual(result["reconciliation"]["N_screened"], 3)
+        self.assertEqual(result["reconciliation"]["N_selected_deep"], 2)
+        self.assertEqual(result["reconciliation"]["N_screen_only"], 1)
+        self.assertEqual(result["reconciliation"]["N_deep"], 2)
+        self.assertTrue(result["reconciliation"]["screen_equation_balanced"])
+        self.assertTrue(result["reconciliation"]["selection_equation_balanced"])
+        self.assertTrue(result["reconciliation"]["deep_equation_balanced"])
+        self.assertTrue(result["stage_gate_passed"])
 
-    @pending_production("V7-PROD-PORTFOLIO")
-    def test_production_audit_and_portfolio_against_golden_controls(self) -> None:
-        self.fail("Unskip only when a schema-v7 production adapter implements audit_and_select.")
+    def test_production_audit_and_portfolio_against_frozen_stage6(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            case, deep_frame, frozen_audit_plan = make_portfolio_fixture(
+            root, revision="portfolio-protocol-production-r1"
+            )
+            adapter = V7PortfolioAdapter(root / "portfolio")
+            result = adapter.audit_and_select(case, deep_frame, frozen_audit_plan)
+            replay_input = copy.deepcopy(frozen_audit_plan)
+            replay_input["audit_outcomes"].reverse()
+            replay = adapter.audit_and_select(case, deep_frame, replay_input)
+            self.assertEqual(result, replay)
+            self.assertTrue(
+                adapter.freeze_path(
+                    case.case_revision_id, result["portfolio_plan_id"]
+                ).is_file()
+            )
+            self.assertTrue(
+                adapter.aggregate_path(
+                    case.case_revision_id, result["portfolio_plan_id"]
+                ).is_file()
+            )
+        validate_portfolio_aggregate(case, result)
+        self.assertEqual(
+            {
+                "audit_report",
+                "seven_decision_outputs",
+                "portfolio_dispositions",
+                "canonical_order",
+            }
+            - set(result),
+            set(),
+        )
+        self.assertTrue(result["stage_gate_passed"])
+        self.assertTrue(result["audit_report"]["coverage_reconciled"])
+        self.assertEqual(result["reconciliation"]["N_deep"], 2)
+        self.assertEqual(result["reconciliation"]["N_finalist"], 1)
+        self.assertEqual(result["reconciliation"]["N_reserve"], 1)
+        self.assertTrue(result["reconciliation"]["portfolio_equation_balanced"])
+        self.assertTrue(result["reconciliation"]["three_rankings_cover_every_deep_candidate"])
+        self.assertTrue(
+            all(
+                not row["novelty_or_diversity_modified_therapeutic_support"]
+                for row in result["seven_decision_outputs"]
+            )
+        )
 
     def test_production_replay_and_interrupted_commit_recovery(self) -> None:
         adapter = V7RuntimeAdapter()
@@ -521,17 +636,24 @@ class PendingProductionAcceptanceTests(unittest.TestCase):
     def test_production_legacy_v3_through_v6_read_only_handling(self) -> None:
         adapter = V7CompatibilityAdapter()
         legacy_root = Path(__file__).resolve().parents[1] / "benchmarks" / "schema_v7" / "legacy"
-        for version in (3, 4, 5, 6):
-            path = legacy_root / f"schema-v{version}.json"
-            before = path.read_bytes()
-            inspection = adapter.inspect_legacy(path)
-            self.assertEqual(inspection["schema_version"], version)
-            self.assertEqual(inspection["mode"], "read_only")
-            for operation in ("resume", "write", "append", "finalize"):
-                decision = adapter.request_legacy_operation(path, operation)
-                self.assertFalse(decision["allowed"], (version, operation, decision))
-                self.assertEqual(decision["mode"], "read_only")
-            self.assertEqual(path.read_bytes(), before)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for version in (3, 4, 5, 6):
+                path = legacy_root / f"schema-v{version}.json"
+                before = path.read_bytes()
+                inspection = adapter.inspect_legacy(path)
+                self.assertEqual(inspection["schema_version"], version)
+                self.assertEqual(inspection["mode"], "read_only")
+                for operation in ("resume", "write", "append", "finalize"):
+                    decision = adapter.request_legacy_operation(path, operation)
+                    self.assertFalse(decision["allowed"], (version, operation, decision))
+                    self.assertEqual(decision["mode"], "read_only")
+                migrated = adapter.copy_migrate(path, root / f"schema-v{version}-derived")
+                self.assertEqual(migrated["source_schema_version"], version)
+                self.assertFalse(migrated["native_v7"])
+                copied = root / f"schema-v{version}-derived" / "legacy_original" / path.name
+                self.assertEqual(copied.read_bytes(), before)
+                self.assertEqual(path.read_bytes(), before)
 
     def test_production_full_funnel_output_reconciliation(self) -> None:
         result = V7OutputAdapter().build_full_funnel(make_complete_snapshot())

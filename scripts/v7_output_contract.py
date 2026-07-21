@@ -11,8 +11,12 @@ from typing import Any, Mapping
 
 
 SCHEMA_VERSION = 7
-OUTPUT_CONTRACT_VERSION = "schema-v7-full-funnel-outputs-v1"
+OUTPUT_CONTRACT_VERSION = "schema-v7-full-funnel-outputs-v2"
 OUTPUT_DIRECTORY = "outputs_v7"
+EXPERIMENTAL_USE_POLICY = (
+    "Schema v7 is an experimental research tool; outputs are not independently "
+    "scientifically certified and must not be treated as clinical advice or proof of efficacy."
+)
 
 
 class OutputStatus(str, Enum):
@@ -195,7 +199,7 @@ ARTIFACT_SPECS: tuple[OutputArtifactSpec, ...] = (
     OutputArtifactSpec(
         "full_funnel_summary.md",
         "text/markdown",
-        "Bounded-scope full-funnel summary with reconciliation and expert-review framing.",
+        "Bounded-scope full-funnel summary with reconciliation and experimental non-certification framing.",
         "one run summary",
         True,
     ),
@@ -241,7 +245,7 @@ This reference is generated from `scripts/v7_output_contract.py` and describes o
 
 Build outputs only from a canonical committed snapshot. Run the focused validators before writing, write into `{OUTPUT_DIRECTORY}/` atomically, then validate artifact hashes and row counts through the same public `scripts/validate_program.py <run-folder>` entry point. A diagnostic partial may expose preserved records and gaps, but it must not claim complete portfolio status.
 
-Every human-readable file must state bounded scope, material gaps, hypothesis-generation status, and expert-review intent. Benchmark results are a separate post-run join and never enter these artifacts.
+Every human-readable file must state bounded scope, material gaps, and this policy: "{EXPERIMENTAL_USE_POLICY}" Benchmark results are a separate post-run join and never enter these artifacts.
 
 ## Artifact contract
 
@@ -276,6 +280,7 @@ __all__ = [
     "DeepCompletionDisposition",
     "DeepSelectionDisposition",
     "DeepSelectionRecord",
+    "EXPERIMENTAL_USE_POLICY",
     "FullFunnelReconciliation",
     "OUTPUT_CONTRACT_VERSION",
     "OUTPUT_DIRECTORY",

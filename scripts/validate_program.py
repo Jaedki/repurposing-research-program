@@ -1666,6 +1666,11 @@ def validate_run(run_folder: str | Path) -> list[str]:
         except Exception:
             value = {}
         if isinstance(value, dict) and value.get("schema_version") == 7:
+            if value.get("artifact_type") == "schema_v7_legacy_derived_container":
+                return [
+                    "Legacy-derived schema-v7 containers are immutable compatibility artifacts "
+                    "and cannot be accepted as native schema-v7 runs"
+                ]
             from v7_validation import validate_run as validate_v7_run
 
             return validate_v7_run(root, final=True)

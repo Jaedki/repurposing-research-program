@@ -51,14 +51,21 @@ COLLECTION_ID_FIELDS: Mapping[str, str] = {
     "source_mappings": "mapping_id",
     "discovery_routes": "route_id",
     "candidate_seeds": "seed_id",
+    "seed_dispositions": "seed_disposition_id",
     "identity_resolutions": "identity_resolution_id",
     "screening_decisions": "decision_id",
     "normalized_interventions": "normalized_intervention_id",
+    "quarantined_seeds": "quarantine_id",
     "screen_records": "screen_record_id",
     "screened_candidates": "screened_candidate_id",
+    "seed_candidate_mappings": "link_id",
     "triage_dispositions": "disposition_id",
+    "deep_selection_records": "selection_record_id",
     "deep_evidence_packages": "package_id",
     "deep_candidates": "candidate_id",
+    "decision_profiles": "profile_id",
+    "structured_safety": "safety_record_id",
+    "structured_exposure": "exposure_record_id",
     "ranking_preparation_records": "preparation_id",
     "audit_assignments": "assignment_id",
     "audit_records": "audit_record_id",
@@ -66,6 +73,7 @@ COLLECTION_ID_FIELDS: Mapping[str, str] = {
     "portfolio_review_items": "review_item_id",
     "council_records": "council_record_id",
     "portfolio_review_records": "portfolio_review_id",
+    "portfolio_rank_records": "candidate_id",
     "validation_reports": "validation_report_id",
     "output_manifests": "output_manifest_id",
 }
@@ -198,10 +206,11 @@ ROLE_CONTRACTS: Mapping[str, Mapping[str, Any]] = {
         inputs=("candidate_seeds", "source_mappings", "discovery_routes"),
         outputs=(
             "identity_resolutions",
-            "screening_decisions",
+            "seed_dispositions",
             "normalized_interventions",
+            "quarantined_seeds",
         ),
-        required_outputs=("identity_resolutions", "screening_decisions"),
+        required_outputs=("identity_resolutions", "seed_dispositions"),
         case_fields=("case_id", "case_revision_id", "endpoints"),
     ),
     "preliminary_triage_worker": _role(
@@ -210,9 +219,15 @@ ROLE_CONTRACTS: Mapping[str, Mapping[str, Any]] = {
             "Apply only the declared lightweight triage rules to the assigned normalized interventions. "
             "Keep endpoint assessments explicit and do not build deep dossiers or ranks."
         ),
-        inputs=("normalized_interventions", "identity_resolutions", "screening_decisions"),
-        outputs=("screen_records", "screened_candidates", "triage_dispositions"),
-        required_outputs=("screen_records", "triage_dispositions"),
+        inputs=("seed_dispositions", "normalized_interventions", "identity_resolutions"),
+        outputs=(
+            "screening_decisions",
+            "screen_records",
+            "screened_candidates",
+            "seed_candidate_mappings",
+            "triage_dispositions",
+        ),
+        required_outputs=("screening_decisions", "screen_records", "triage_dispositions"),
         case_fields=_CASE_CONSTRAINTS,
     ),
     "deep_evidence_worker": _role(
@@ -222,8 +237,14 @@ ROLE_CONTRACTS: Mapping[str, Mapping[str, Any]] = {
             "using exact identities and endpoint-specific evidence. Do not rank or select a portfolio."
         ),
         inputs=("screened_candidates", "screen_records"),
-        outputs=("deep_evidence_packages", "deep_candidates"),
-        required_outputs=("deep_evidence_packages",),
+        outputs=(
+            "deep_selection_records",
+            "deep_evidence_packages",
+            "deep_candidates",
+            "structured_safety",
+            "structured_exposure",
+        ),
+        required_outputs=("deep_selection_records", "deep_evidence_packages"),
         case_fields=_CASE_CONSTRAINTS,
     ),
     "ranking_preparation_worker": _role(
@@ -234,8 +255,8 @@ ROLE_CONTRACTS: Mapping[str, Mapping[str, Any]] = {
             "decision tables. Do not apply audit, council, portfolio-membership, or output policy."
         ),
         inputs=("deep_candidates", "deep_evidence_packages"),
-        outputs=("ranking_preparation_records",),
-        required_outputs=("ranking_preparation_records",),
+        outputs=("decision_profiles", "ranking_preparation_records"),
+        required_outputs=("decision_profiles", "ranking_preparation_records"),
         case_fields=("case_id", "case_revision_id", "endpoints"),
     ),
     "audit_sampling_worker": _role(
@@ -270,8 +291,8 @@ ROLE_CONTRACTS: Mapping[str, Mapping[str, Any]] = {
             "three-rank portfolio records; do not redesign scores, audit rules, or user-facing outputs."
         ),
         inputs=("portfolio_review_items", "audit_records"),
-        outputs=("council_records", "portfolio_review_records"),
-        required_outputs=("portfolio_review_records",),
+        outputs=("council_records", "portfolio_review_records", "portfolio_rank_records"),
+        required_outputs=("portfolio_review_records", "portfolio_rank_records"),
         case_fields=_CASE_CONSTRAINTS,
     ),
     "final_structural_validator": _role(

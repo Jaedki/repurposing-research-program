@@ -423,6 +423,17 @@ class CouncilTests(unittest.TestCase):
 
 
 class ClusteringAndPortfolioTests(unittest.TestCase):
+    def test_empty_candidate_funnel_emits_complete_empty_portfolio(self) -> None:
+        selection = select_diversified_portfolio(
+            (),
+            make_portfolio_policy(finalist_capacity=1, reserve_capacity=1),
+        )
+        self.assertEqual(selection.status, PortfolioSelectionStatus.COMPLETE)
+        self.assertEqual(selection.records, ())
+        self.assertEqual(selection.finalist_ids, ())
+        self.assertEqual(selection.reserve_ids, ())
+        self.assertEqual(selection.additional_audit_required_ids, ())
+
     def test_mechanism_clustering_is_transitive_and_deterministic(self) -> None:
         features = (
             _diversity("A", target="T1", mechanism="", route="R1", scaffold="S1", modality="M1", endpoint="E1", development="D1", uncertainty="low"),

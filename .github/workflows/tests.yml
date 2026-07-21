@@ -53,6 +53,15 @@ jobs:
       - name: Test schema-v7 persisted production disposition aggregate
         run: python scripts/v7_production_disposition_test.py
 
+      - name: Test schema-v7 persisted production screen and deep aggregate
+        run: python scripts/v7_production_screen_deep_test.py
+
+      - name: Test schema-v7 persisted production audit and portfolio aggregate
+        run: python scripts/v7_production_portfolio_test.py
+
+      - name: Test schema-v7 complete eight-stage production programme
+        run: python scripts/v7_production_program_test.py
+
       - name: Test schema-v7 benchmark production protocols
         run: python scripts/v7_benchmark_test.py
 

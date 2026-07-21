@@ -10,7 +10,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from v7_output_contract import ARTIFACT_SPECS, OUTPUT_CONTRACT_VERSION, render_reference_contract
+from v7_output_contract import (
+    ARTIFACT_SPECS,
+    EXPERIMENTAL_USE_POLICY,
+    OUTPUT_CONTRACT_VERSION,
+    render_reference_contract,
+)
 from v7_outputs import V7OutputAdapter, V7OutputError, build_full_funnel, write_full_funnel_outputs
 from v7_validation import validate_output_artifacts, validate_snapshot
 from v7_validation.common import snapshot_sha256
@@ -241,6 +246,10 @@ class FullFunnelOutputTests(unittest.TestCase):
         self.assertEqual(result["reconciliation"]["identity_admitted_count"], 1)
         self.assertEqual(result["reconciliation"]["deep_count"], 1)
         self.assertEqual(result["reconciliation"]["finalist_count"], 1)
+        summary = result["artifact_payloads"]["full_funnel_summary.md"]
+        cards = result["artifact_payloads"]["candidate_evidence_cards.md"]
+        self.assertIn(EXPERIMENTAL_USE_POLICY, summary)
+        self.assertIn(EXPERIMENTAL_USE_POLICY, cards)
 
     def test_written_artifacts_validate_hashes_and_ledger_counts(self) -> None:
         snapshot = make_complete_snapshot()

@@ -43,6 +43,10 @@ The aggregate emits normalized interventions, active moieties and their typed ex
 
 Give every admitted representative one lightweight screen record. Assess every case endpoint explicitly; a required applicable endpoint cannot be `not_assessed`. Preserve preclinical-only hypotheses in a visible stratum. Keep baseline care outside repurposing ranks.
 
+Call `V7ScreenDeepAdapter.screen_and_deepen(case_revision, admitted_frame, frozen_evidence)` for the persisted Stage 5-6 reduction. Supply exactly one typed screen input per Stage 4 admit. The adapter derives the screen outcome from the eligibility, contraindication, preliminary safety/exposure, development/readiness, case-fit, and per-endpoint records; typed unknowns preserve sparse hypotheses and do not become negative evidence.
+
+Freeze `capacity`, all controlled strata and stratum capacities, round-robin allocation, candidate-ID ties, selected IDs, and every screen-only reason. The adapter writes that immutable frame before validating any selected deep result. It records all three screening/deep equations and refuses replay drift under one evidence revision. Publication volume is absent from admission and selection, and no composite decision score is accepted.
+
 ## Reconciliation
 
 Require these equations before the relevant stage passes:
@@ -53,3 +57,5 @@ Require these equations before the relevant stage passes:
 - `N_selected_deep = N_deep + N_deep_quarantined + N_deep_failed`
 
 Report resolved-all, admitted, baseline, admitted breadth-group, and active-moiety identity denominators separately. `N_identity_admitted` equals `N_admit`. Never substitute physical line counts or pad the conditional breadth aspiration.
+
+For a complete production run, supply the frozen Stage 2 pages and Stage 4-7 input factories to `V7ProgramAdapter.execute`. It composes these reducers without bypassing their persisted aggregates; every discovered seed must still appear exactly once in the Stage 4 disposition ledger before any downstream work begins.
