@@ -1,49 +1,67 @@
 ---
 name: repurposing-research-program
-description: "Run or extend a deterministic, provenance-complete human therapeutic repurposing programme for a supplied gene, disease, or phenotype. Use for schema-v7 case modeling, source-bounded exact-compound discovery, seed screening, identity normalization, deep evidence, audit, separate evidence/novelty/diversity rankings, full-funnel outputs, or read-only inspection of historical schema-v3 through schema-v6 artifacts."
+description: "Run a source-backed, agent-assisted programme to identify existing drugs for a supplied genetic disease and optional gene."
 ---
 
 # Repurposing Research Program
 
-Produce source-bounded exact-compound hypotheses and a reconciled evidence portfolio for experimental investigation. Treat every result as hypothesis generation.
+Identify existing drugs whose established mode of action could plausibly reverse, compensate for, slow, or ameliorate a specific evidence-backed element of the supplied disease pathology. A prior literature association between the drug and the disease is not required.
 
-Schema v7 is an experimental research tool; outputs are not independently scientifically certified and must not be treated as clinical advice or proof of efficacy.
+Treat every result as an experimental hypothesis, never clinical advice or proof of efficacy.
 
-## Choose the schema path
+## Run the programme
 
-- Use schema v7 for new ordinary work when no schema is specified and whenever v7 is explicitly requested. It is released for normal experimental use under V7-D006. Require at least one human gene, disease, or phenotype and at least one supplied endpoint; preserve typed unknowns and blocking ambiguity, and do not infer a generic endpoint.
-- Use schema v6 only when explicitly requested, declared by the case, or continuing a native schema-v6 run. Keep its perspectives, route markers, integer rubric, validator, and final files historical.
-- Inspect schema-v3 through schema-v6 artifacts read-only. Never resume, append, finalize, repair, or rewrite them through v7. If an immutable derived container is required, use `scripts/orchestrate_program.py copy-migrate-legacy <source> <new-folder>`; this copies and hashes the original bytes, fills v7-only fields with typed unknowns, and remains ineligible for native v7 execution.
+Run commands from this skill folder, or use absolute script paths.
 
-## Run schema v7
+1. Initialize a run. Supply the exact MONDO ID when known:
 
-Run commands from this skill folder, or replace each relative script path with its absolute path.
+   ```powershell
+   python scripts/orchestrate_program.py init <run-folder> --disease "<disease>" [--gene <gene>] [--mondo MONDO:...]
+   ```
 
-1. Read `references/case-discovery-seeds.md`, then initialize with `scripts/orchestrate_program.py init <run-folder> --schema-version 7 --case-file <case.json>`. Resolve a `needs_resolution` case before seed work.
-2. Read `references/runtime.md`. For a complete source-frozen run, use `V7ProgramAdapter.execute` in `scripts/v7_production_program.py`; it composes the real discovery, disposition, screen/deep, portfolio, runtime, validation, and output boundaries across all eight stages. For direct runtime recovery or diagnostic operation, drive only controller actions: `next -> start -> progress -> validate-result -> complete`. Run every ready shard up to configured concurrency; give each worker only its emitted three-line prompt. Use `fail` for controlled retries and `recover-active` after interruption.
-3. For retrieval, read `references/retrieval-adapters.md` plus the relevant source-family reference. Declare source universes and query plans before traversal. Preserve every eligible mapping, negative/null context, unsupported capability, continuation, and source-specific gap.
-4. Normalize and dispose every canonical seed through `scripts/v7_production_disposition.py` using frozen authority assertions; preserve unresolved/conflicting identity and every exact form. Read `references/deep-evidence-identity.md`, then call `V7ScreenDeepAdapter.screen_and_deepen` with the persisted admitted frame and frozen evidence. Require the immutable all-admitted screen and deep-selection frame to persist before original-content deep validation.
-5. For triage, audit, council, and portfolio work, read `references/triage-ranking.md` and `references/audit-council-portfolio.md`. Call `V7PortfolioAdapter.audit_and_select` only with the passing persisted deep frame and a fully frozen audit plan. Keep evidence strength, novelty/information value, readiness, uncertainty, and portfolio diversity separate.
-6. Read `references/outputs-validation.md`. `V7ProgramAdapter` writes canonical outputs after the committed ledgers validate. To rebuild from an already complete canonical snapshot, use `scripts/build_final_outputs.py <run-folder>`. Always validate through `scripts/validate_program.py <run-folder>` and treat any interim audit, failure, budget deferral, or unresolved reconciliation as diagnostic partial.
-Workers write only staged results. The controller validates and atomically commits content-addressed canonical records. Identical replay is a no-op; conflicting content for one identity fails. Keep schedule-specific attempts and retries out of the scientific projection.
+2. Call `next`. Python performs any ready deterministic controller work, then writes exactly one content packet and returns its path and worker prompt.
 
-## Reference routing
+3. Give one research agent only that packet. The agent writes one JSON result matching `result_contract`. Submit it:
 
-- `references/case-discovery-seeds.md`: v7 case, factorized discovery, structural routes, seeds, disposition, screening, and reconciliation
-- `references/runtime.md`: v7 concurrent lifecycle and historical v6 runtime
-- `references/retrieval-adapters.md`: generic v7 declarations, receipts, bounded coverage, cache, and replay
-- `references/chemical-target-adapters.md`: Open Targets, ChEMBL, BindingDB, PubChem, and UniChem boundaries
-- `references/extended-discovery-adapters.md`: clinical-trial, preprint, ChEBI, multimodal planner, unsupported-source, and anti-popularity boundaries
-- `references/deep-evidence-identity.md`: original-content grounding, authoritative identity, exact forms, and corrections
-- `references/triage-ranking.md`: typed decision features, safety/exposure, triage, and separate pre-audit orders
-- `references/audit-council-portfolio.md`: stratified audit, correction authority, council, and diversified portfolio policy
-- `references/outputs-validation.md`: generated v7 artifact inventory, reconciliation, and focused validation domains
-- `references/workflow.md`, `references/evidence.md`, `references/ranking.md`: historical schema-v6 workflow, evidence, ranking, and outputs
+   ```powershell
+   python scripts/orchestrate_program.py submit <run-folder> <result.json>
+   ```
 
-Treat typed Python records and controller artifacts as authoritative. References explain when to use them; they do not redefine field schemas or controlled values.
+4. Repeat `next -> agent -> submit`. The controller progresses through:
 
-## Closure and handoff
+   - pathology-only Monarch and DisMech ingestion;
+   - one deep pathology-research packet per selected node;
+   - a frozen, content-addressed living evidence graph;
+   - one mechanism-directed candidate-seed packet per eligible pathology node;
+   - one evidence-review packet per canonical candidate ID;
+   - independent audit and deterministic ranking.
 
-Never manufacture a candidate quota, use citation density as admission, collapse identity by name, hide source gaps, substitute structural validation for scientific audit, or expose benchmark answers to a live run. The strongest ordinary-run closure claim is `complete within the declared source releases and query plan`; otherwise name the bounded or failed branches. Apply the experimental-use policy above to every completion handoff.
+5. When status is `ready_to_build`, run:
 
-At a checkpoint, report that canonical progress is persisted and `resume` is deterministic. At completion, report the output status, reconciled counts, material gaps, and experimental-use policy.
+   ```powershell
+   python scripts/orchestrate_program.py build <run-folder>
+   ```
+
+Use `status` at any time. Resume means calling `next`; accepted results are immutable and content-addressed. Lean orchestration is not a limit on research depth: workers should investigate each packet as deeply as the evidence permits.
+
+## Hard boundaries
+
+- Pathology construction is treatment-blind. Pathology packets must not contain drug, compound, treatment, therapeutic, or candidate fields.
+- Candidate generation starts only after every pathology-node result is accepted and Python freezes the graph snapshot.
+- Candidate eligibility follows `pathology element -> desired biological change -> established drug mode of action`. Direct disease-drug literature is optional.
+- Monarch associations are pathology-category allowlisted. DisMech treatment content is excluded before packet construction.
+- Workers create research content only. Python controls source receipts, task order, item cursors, packet lineage, validation, persistence, candidate aggregation, ranking order, and outputs.
+
+## Evidence safeguards
+
+- Preserve source IDs, exact identity, contradictions, negative results, unresolved identity, exclusions, and explicit gaps.
+- Every graph assertion cites retained pathology sources.
+- Every candidate separately cites pathology evidence and drug mode-of-action evidence.
+- Never persist API keys, access tokens, authorization headers, or secrets.
+- Placebo, vehicle, and sham are comparators, not candidates.
+- Unresolved identity stays visible and may be reviewed; it must not silently erase the programme.
+- `complete` requires at least one audited eligible candidate and verified hashes for all accepted results and outputs.
+
+Read [architecture.md](references/architecture.md) for ownership, [packet-contract.md](references/packet-contract.md) for worker results, and [source-adapters.md](references/source-adapters.md) before changing source ingestion.
+
+At handoff report the status, retained source count, pathology profile and assertion counts, raw and deduplicated candidate counts, material gaps, and the experimental-use policy.

@@ -1,4 +1,4 @@
 interface:
   display_name: "Repurposing Research Program"
-  short_description: "Full-funnel human repurposing evidence"
-  default_prompt: "Use $repurposing-research-program with the default schema v7 experimental workflow to build a source-bounded, reconciled exact-compound evidence portfolio for this human case and supplied endpoint."
+  short_description: "Deep pathology-first drug repurposing"
+  default_prompt: "Use $repurposing-research-program to build a deeply researched, treatment-blind disease pathology graph before generating mechanism-linked existing-drug candidates. Do not require prior disease-drug literature; follow the deterministic packet workflow."
