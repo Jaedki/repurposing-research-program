@@ -559,16 +559,71 @@ def _merge_unique(
     return [merged[key] for key in sorted(merged)]
 
 
+def _merge_text(*values: Any) -> str:
+    parts = {
+        part.strip()
+        for value in values
+        for part in str(value).split(" | ")
+        if part.strip()
+    }
+    return " | ".join(sorted(parts))
+
+
+def _merge_documents(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        document_id = str(row.get("document_id", "")).strip()
+        if not document_id:
+            raise ProgramError("documents.document_id is required")
+        current = merged.setdefault(document_id, {"document_id": document_id})
+        for field, value in row.items():
+            if field == "document_id" or value in (None, "", []):
+                continue
+            if isinstance(value, list):
+                prior = current.get(field, [])
+                if not isinstance(prior, list):
+                    raise ProgramError(f"documents.{field} changes type")
+                values = {_canonical_bytes(item): item for item in [*prior, *value]}
+                value = [values[key] for key in sorted(values)]
+            current[field] = value
+    return [merged[key] for key in sorted(merged)]
+
+
+def _merge_assertions(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        assertion_id = str(row.get("assertion_id", "")).strip()
+        if not assertion_id:
+            raise ProgramError("assertions.assertion_id is required")
+        current = merged.get(assertion_id)
+        if current is None:
+            merged[assertion_id] = {**row, "assertion_id": assertion_id}
+            continue
+        if any(
+            current[field] != row[field]
+            for field in ("subject_id", "relation", "object_id")
+        ):
+            raise ProgramError(
+                f"Conflicting assertion identities share assertion_id={assertion_id}"
+            )
+        current["source_ids"] = sorted({
+            *map(str, current["source_ids"]),
+            *map(str, row["source_ids"]),
+        })
+        current["evidence_summary"] = _merge_text(
+            current["evidence_summary"], row["evidence_summary"]
+        )
+    return [merged[key] for key in sorted(merged)]
+
+
 def _all_documents(results: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
-    return _merge_unique(
+    return _merge_documents(
         (
             row
             for result in results.values()
             for row in result.get("records", {}).get("documents", [])
             if isinstance(row, dict)
-        ),
-        "document_id",
-        "documents",
+        )
     )
 
 
@@ -762,15 +817,13 @@ def _build_graph_result(
 ) -> dict[str, Any]:
     source = results["pathology_sources"]["records"]
     records = {
-        "documents": _merge_unique(
+        "documents": _merge_documents(
             [
                 *_rows(source, "documents"),
                 *_item_collection(
                     root, results, "evidence_graph", "pathology_node_research", "documents"
                 ),
-            ],
-            "document_id",
-            "documents",
+            ]
         ),
         "source_nodes": _rows(source, "source_nodes"),
         "source_edges": _rows(source, "source_edges"),
@@ -782,12 +835,10 @@ def _build_graph_result(
             "node_id",
             "profiles",
         ),
-        "assertions": _merge_unique(
+        "assertions": _merge_assertions(
             _item_collection(
                 root, results, "evidence_graph", "pathology_node_research", "assertions"
-            ),
-            "assertion_id",
-            "assertions",
+            )
         ),
     }
     return {
@@ -816,9 +867,7 @@ def _merge_candidates(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         ):
             current[field] = sorted({*map(str, current.get(field, [])), *map(str, row.get(field, []))})
         for field in ("desired_change", "mechanism_hypothesis"):
-            current[field] = " | ".join(
-                sorted({part for value in (current[field], row[field]) for part in str(value).split(" | ")})
-            )
+            current[field] = _merge_text(current[field], row[field])
     return [merged[key] for key in sorted(merged)]
 
 
@@ -835,13 +884,11 @@ def _build_seed_result(
         for row in _rows(accepted[item_id]["records"], "candidates")
     ]
     records = {
-        "documents": _merge_unique(
+        "documents": _merge_documents(
             [
                 *_rows(results["evidence_graph"]["records"], "documents"),
                 *(row for item_id in item_ids for row in _rows(accepted[item_id]["records"], "documents")),
-            ],
-            "document_id",
-            "documents",
+            ]
         ),
         "candidates": _merge_candidates(raw_candidates),
         "exclusions": [
@@ -871,15 +918,13 @@ def _build_review_result(
         "stage": "candidate_review",
         "status": "complete",
         "records": {
-            "documents": _merge_unique(
+            "documents": _merge_documents(
                 [
                     *_all_documents(results),
                     *_item_collection(
                         root, results, "candidate_review", "candidate_review_research", "documents"
                     ),
-                ],
-                "document_id",
-                "documents",
+                ]
             ),
             "reviews": _merge_unique(
                 _item_collection(

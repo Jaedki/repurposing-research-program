@@ -162,6 +162,72 @@ class WorkflowTest(unittest.TestCase):
             self.assertIsNotNone(core.CANONICAL_DOCUMENT_ID.fullmatch(document_id))
         self.assertIsNone(core.CANONICAL_DOCUMENT_ID.fullmatch("DOC-AUTHOR-2026-TOPIC"))
 
+    def test_document_metadata_enriches_without_identity_conflict(self):
+        documents = core._merge_documents([
+            {
+                "document_id": "PMID:22312314",
+                "title": "PMID:22312314",
+                "source": "DisMech evidence",
+                "citation": "PMID:22312314",
+                "snippets": ["source snippet"],
+                "supports": ["PARTIAL"],
+            },
+            {
+                "document_id": "PMID:22312314",
+                "title": "Disruption of Axonal Transport in Motor Neuron Diseases",
+                "source": "PubMed Central",
+                "snippets": ["research snippet"],
+                "supports": ["SUPPORT"],
+            },
+        ])
+
+        self.assertEqual(len(documents), 1)
+        self.assertEqual(
+            documents[0]["title"],
+            "Disruption of Axonal Transport in Motor Neuron Diseases",
+        )
+        self.assertEqual(documents[0]["source"], "PubMed Central")
+        self.assertEqual(documents[0]["citation"], "PMID:22312314")
+        self.assertEqual(documents[0]["snippets"], ["research snippet", "source snippet"])
+        self.assertEqual(documents[0]["supports"], ["PARTIAL", "SUPPORT"])
+
+    def test_non_document_identity_conflicts_remain_strict(self):
+        with self.assertRaisesRegex(core.ProgramError, "Conflicting profiles records"):
+            core._merge_unique(
+                [
+                    {"node_id": "NODE:1", "label": "one"},
+                    {"node_id": "NODE:1", "label": "two"},
+                ],
+                "node_id",
+                "profiles",
+            )
+
+    def test_assertion_evidence_merges_but_identity_collision_fails(self):
+        assertion = {
+            "assertion_id": "ASSERTION:1",
+            "subject_id": "NODE:1",
+            "relation": "contributes_to",
+            "object_id": "NODE:2",
+            "evidence_summary": "first finding",
+            "source_ids": ["PMID:1"],
+        }
+        merged = core._merge_assertions([
+            assertion,
+            {
+                **assertion,
+                "evidence_summary": "second finding",
+                "source_ids": ["PMID:2"],
+            },
+        ])
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["source_ids"], ["PMID:1", "PMID:2"])
+        self.assertEqual(
+            merged[0]["evidence_summary"], "first finding | second finding"
+        )
+        with self.assertRaisesRegex(core.ProgramError, "Conflicting assertion identities"):
+            core._merge_assertions([assertion, {**assertion, "object_id": "NODE:3"}])
+
     @staticmethod
     def profile(item_id, node_type):
         return {
