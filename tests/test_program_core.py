@@ -79,6 +79,14 @@ class WorkflowTest(unittest.TestCase):
     def test_graph_barrier_and_mechanism_evidence_chain(self):
         action = core.next_action(self.root)
         self.assertEqual(action["next_task"], "pathology_node_research")
+        contract = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))[
+            "result_contract"
+        ]
+        self.assertEqual(contract["records"]["profiles"]["type"], "list of objects")
+        self.assertIsInstance(contract["records"]["profiles"]["required_fields"], list)
+        self.assertTrue(any("temporal_context" in rule for rule in contract["field_rules"]))
+        self.assertIn(action["packet_id"], action["worker_prompt"])
+        self.assertIn(action["suggested_result_path"], action["worker_prompt"])
         first_item = action["next_item_id"]
         node_type = json.loads(Path(action["packet_path"]).read_text())["context"]["node"][
             "node_type"
@@ -101,7 +109,9 @@ class WorkflowTest(unittest.TestCase):
         self.submit(
             action,
             {
-                "documents": [{"document_id": "MOA:1", "title": "Drug MOA", "source": "test"}],
+                "documents": [
+                    {"document_id": "PMID:2", "title": "Drug MOA", "source": "test"}
+                ],
                 "candidates": [
                     {
                         "candidate_id": "CHEMBL:1",
@@ -115,7 +125,7 @@ class WorkflowTest(unittest.TestCase):
                         "mechanism_hypothesis": "inhibits the process",
                         "graph_node_ids": ["NODE:1"],
                         "pathology_source_ids": ["SRC:1"],
-                        "mechanism_source_ids": ["MOA:1"],
+                        "mechanism_source_ids": ["PMID:2"],
                     }
                 ],
                 "exclusions": [],
@@ -124,10 +134,40 @@ class WorkflowTest(unittest.TestCase):
         action = core.next_action(self.root)
         self.assertEqual(action["next_task"], "candidate_review_research")
 
+    def test_pathology_research_requires_retained_evidence(self):
+        action = core.next_action(self.root)
+        packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
+        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
+        records["profiles"][0]["temporal_context"] = "disease progression"
+        with self.assertRaisesRegex(core.ProgramError, "temporal_context must be a list"):
+            self.submit(action, records)
+
+        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
+        records["documents"] = []
+        with self.assertRaisesRegex(core.ProgramError, "retain newly researched evidence"):
+            self.submit(action, records)
+
+        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
+        records["documents"][0]["document_id"] = "DOC-AUTHOR-2026-TOPIC"
+        records["profiles"][0]["source_ids"][-1] = "DOC-AUTHOR-2026-TOPIC"
+        with self.assertRaisesRegex(core.ProgramError, "canonical PMID"):
+            self.submit(action, records)
+
+    def test_canonical_document_identifier_families(self):
+        for document_id in (
+            "PMID:10195180", "PMCID:PMC10338806", "DOI:10.1002/ana.21147",
+            "MONARCH-ASSOC-" + "A" * 24, "CLINGEN:CCID004621",
+            "UNIPROT:P09651", "NCBI:NBK551641", "https://example.org/report",
+        ):
+            self.assertIsNotNone(core.CANONICAL_DOCUMENT_ID.fullmatch(document_id))
+        self.assertIsNone(core.CANONICAL_DOCUMENT_ID.fullmatch("DOC-AUTHOR-2026-TOPIC"))
+
     @staticmethod
     def profile(item_id, node_type):
         return {
-            "documents": [],
+            "documents": [
+                {"document_id": "PMID:1", "title": "Research evidence", "source": "test"}
+            ],
             "profiles": [
                 {
                     "node_id": item_id,
@@ -145,7 +185,7 @@ class WorkflowTest(unittest.TestCase):
                     "contradictions": [],
                     "gaps": [],
                     "uncertainty": "low",
-                    "source_ids": ["SRC:1"],
+                    "source_ids": ["SRC:1", "PMID:1"],
                 }
             ],
             "assertions": [],

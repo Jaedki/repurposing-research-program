@@ -21,13 +21,15 @@ Run commands from this skill folder, or use absolute script paths.
 
 2. Call `next`. Python performs any ready deterministic controller work, then writes exactly one content packet and returns its path and worker prompt.
 
-3. Give one research agent only that packet. The agent writes one JSON result matching `result_contract`. Submit it:
+3. Start one new research agent per packet with only this `SKILL.md`, the returned worker prompt, and the current packet—never prior packet content or a previous worker thread. It researches to evidence saturation with primary or authoritative sources, retains those sources in `records.documents`, and writes one JSON result matching `result_contract`. Submit it unchanged:
 
    ```powershell
    python scripts/orchestrate_program.py submit <run-folder> <result.json>
    ```
 
-4. Repeat `next -> agent -> submit`. The controller progresses through:
+   If validation rejects the result, discard it and give the same packet to another new agent; do not repair research JSON in the controller.
+
+4. Repeat `next -> new agent -> submit` in the visible controller chat. Do not replace this loop with a persistent or background supervisor. The controller progresses through:
 
    - pathology-only Monarch and DisMech ingestion;
    - one deep pathology-research packet per selected node;

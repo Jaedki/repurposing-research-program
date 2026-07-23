@@ -25,6 +25,14 @@ OBJECTIVE = (
 EXPERIMENTAL_USE_POLICY = (
     "Hypothesis generation only. Outputs are not clinical advice or proof of efficacy."
 )
+CANONICAL_DOCUMENT_ID = re.compile(
+    r"^(?:PMID:\d+|PMCID:PMC\d+|DOI:10\.\d{4,9}/\S+|"
+    r"(?:MONARCH-ASSOC|DISMECH-FILE)-[A-F0-9]{24}|"
+    r"(?:ORPHA|CGGV|CLINGEN|GENCC|CLINVAR|UNIPROT(?:KB)?|HPA|"
+    r"NCBI(?:-BOOKSHELF|-GENE)?|CHEMBL|PUBCHEM|DRUGBANK|DAILYMED|FDA|EMA|"
+    r"WHO|ISBN|NCT):\S+|NCT\d{8}|https://\S+)$",
+    re.IGNORECASE,
+)
 STAGES = (
     "pathology_sources",
     "evidence_graph",
@@ -117,10 +125,18 @@ ROW_FIELDS = {
     "audit_notes": ["subject_id", "finding"],
 }
 
+PATHOLOGY_PROFILE_LIST_FIELDS = (
+    "mechanisms", "cell_types", "anatomical_context", "temporal_context",
+    "upstream_causes", "downstream_consequences", "contradictions", "gaps", "source_ids",
+)
+
 FIELD_RULES = {
     "pathology_node_research": [
-        "return exactly one profile whose node_id is item_id",
-        "all assertions and profile claims cite retained sources; no treatment content",
+        "return exactly one profile whose node_id and node_type match the supplied node",
+        "retain at least one independently researched document",
+        f"profile fields {', '.join(PATHOLOGY_PROFILE_LIST_FIELDS)} are JSON lists",
+        "assertions link only supplied source-derived node IDs; all claims cite retained sources; "
+        "no treatment content",
     ],
     "candidate_seed_research": [
         "identity has status, preferred_name, and identifiers; resolved identity needs an "
@@ -669,6 +685,8 @@ def _build_packet(
         },
         "rules": [
             "Use only supplied or newly retrieved named sources; never invent citations.",
+            "Use PMID:<digits>, PMCID:PMC<digits>, DOI:<doi>, recognized accession:<id>, or "
+            "HTTPS URL document IDs; never invent DOC aliases.",
             "Preserve contradictions, negative results, unresolved identity, and source gaps.",
             "Return JSON only and do not include credentials or API keys.",
         ],
@@ -694,14 +712,18 @@ def next_action(root: str | Path) -> dict[str, Any]:
     task = str(current["next_task"])
     item_id = current.get("next_item_id")
     packet = _build_packet(run_root, case, results, task, item_id)
+    packet_path = _packet_path(run_root, task, item_id)
+    result_path = _submission_path(run_root, task, item_id)
     return {
         **current,
         "packet_id": packet["packet_id"],
-        "packet_path": str(_packet_path(run_root, task, item_id)),
-        "suggested_result_path": str(_submission_path(run_root, task, item_id)),
+        "packet_path": str(packet_path),
+        "suggested_result_path": str(result_path),
         "worker_prompt": (
-            f"Read only the content packet at {_packet_path(run_root, task, item_id)}. "
-            f"Complete the {task} task and write one JSON object matching result_contract. "
+            f"Read only the content packet at {packet_path}. Complete the {task} task and write "
+            f"one JSON object matching result_contract to {result_path}. Use this exact header: "
+            f"stage={json.dumps(task)}, item_id={json.dumps(item_id)}, "
+            f"packet_id={json.dumps(packet['packet_id'])}, status=\"complete\". "
             "Return the result path to the controller."
         ),
     }
@@ -896,10 +918,17 @@ def _advance_controller(
     _write_json(_result_path(root, stage), result)
 
 
-def _validate_documents(records: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _validate_documents(
+    records: Mapping[str, Any], *, canonical_ids: bool = False
+) -> list[dict[str, Any]]:
     documents = _contract_rows(records, "documents", "document_id")
     for index, row in enumerate(documents):
         _required(row, ("document_id", "title", "source"), f"documents[{index}]")
+        if canonical_ids and not CANONICAL_DOCUMENT_ID.fullmatch(str(row["document_id"])):
+            raise ProgramError(
+                f"documents[{index}].document_id must be a canonical PMID, PMCID, DOI, "
+                "authoritative accession, or HTTPS URL"
+            )
     return documents
 
 
@@ -928,7 +957,14 @@ def _validate_source_result(result: Mapping[str, Any]) -> None:
 def _validate_pathology_item(
     records: Mapping[str, Any], item_id: str, results: Mapping[str, Mapping[str, Any]]
 ) -> None:
-    documents = _validate_documents(records)
+    documents = _validate_documents(records, canonical_ids=True)
+    source_document_ids = _ids(
+        _rows(results["pathology_sources"]["records"], "documents"),
+        "document_id",
+        "documents",
+    )
+    if not {str(row["document_id"]) for row in documents} - source_document_ids:
+        raise ProgramError("pathology node research must retain newly researched evidence")
     profiles = _contract_rows(records, "profiles", "node_id")
     assertions = _contract_rows(records, "assertions", "assertion_id")
     if len(profiles) != 1 or str(profiles[0]["node_id"]) != item_id:
@@ -943,15 +979,12 @@ def _validate_pathology_item(
         ("summary", "normal_state", "pathological_state", "causal_role", "uncertainty"),
         "profiles[0]",
     )
-    for field in (
-        "mechanisms", "cell_types", "anatomical_context", "temporal_context",
-        "upstream_causes", "downstream_consequences", "contradictions", "gaps",
-    ):
+    for field in PATHOLOGY_PROFILE_LIST_FIELDS:
         if not isinstance(profile[field], list):
             raise ProgramError(f"profiles[0].{field} must be a list")
     node_ids = {str(row["node_id"]) for row in source_nodes}
     source_ids = {
-        *(_ids(_rows(results["pathology_sources"]["records"], "documents"), "document_id", "documents")),
+        *source_document_ids,
         *(str(row["document_id"]) for row in documents),
     }
     _references(profiles[0], "source_ids", source_ids, "profiles[0]")
@@ -973,7 +1006,7 @@ def _validate_pathology_item(
 def _validate_seed_item(
     records: Mapping[str, Any], item_id: str, results: Mapping[str, Mapping[str, Any]]
 ) -> None:
-    documents = _validate_documents(records)
+    documents = _validate_documents(records, canonical_ids=True)
     candidates = _contract_rows(records, "candidates", "candidate_id")
     _contract_rows(records, "exclusions")
     graph = results["evidence_graph"]["records"]
@@ -1038,7 +1071,7 @@ def _accepted_ids(
 def _validate_review_item(
     records: Mapping[str, Any], item_id: str, results: Mapping[str, Mapping[str, Any]]
 ) -> None:
-    documents = _validate_documents(records)
+    documents = _validate_documents(records, canonical_ids=True)
     reviews = _contract_rows(records, "reviews", "candidate_id")
     if len(reviews) != 1 or str(reviews[0]["candidate_id"]) != item_id:
         raise ProgramError("candidate review must return exactly one review for item_id")

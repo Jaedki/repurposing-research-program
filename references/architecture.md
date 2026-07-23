@@ -1,7 +1,3 @@
-# Deep research, lean controller
-
-The controller is intentionally small. The research is intentionally deep. Lean means that Python owns only deterministic workflow and integrity concerns; it does not constrain how thoroughly an agent researches a bounded packet.
-
 ## Fixed barriers
 
 | Barrier | Owner | Completion condition |

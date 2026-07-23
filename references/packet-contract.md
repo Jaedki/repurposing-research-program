@@ -25,10 +25,13 @@ The worker returns one JSON object:
 
 Python creates `pathology_sources`, the frozen `evidence_graph`, aggregated `candidate_seed_generation`, and aggregated `candidate_review` results.
 
+Research `document_id` values use a canonical PMID, PMCID, DOI, authoritative database accession, or HTTPS URL. Invented `DOC-AUTHOR-YEAR` aliases are rejected.
+
 ## Pathology records
 
 - Monarch and DisMech nodes are disease-specific claims with a typed biological level and retained sources.
 - Each node returns one detailed profile covering normal and pathological state, causal role, granular mechanisms, cell types, anatomy, timing, upstream causes, downstream consequences, contradictions, uncertainty, and gaps.
+- `records.documents` must retain at least one researched source; supplied source metadata alone is not deep node research.
 - Assertions link existing source-derived node IDs and cite retained documents.
 - Pathology nodes, edges, profiles, and assertions cannot contain treatment or candidate fields.
 
