@@ -1,7 +1,9 @@
+# Architecture
+
 ## Fixed barriers
 
 | Barrier | Owner | Completion condition |
-|---|---|---|
+| --- | --- | --- |
 | `pathology_sources` | Python | Pathology-only Monarch and DisMech records, receipts, versions, and raw hashes are retained |
 | `evidence_graph` | Python after item work | Every source-derived pathology node has one accepted deep-research profile; Python freezes the graph snapshot |
 | `candidate_seed_generation` | Python after item work | Every modifiable frozen pathology node has one accepted seed result; Python merges canonical candidate IDs |
