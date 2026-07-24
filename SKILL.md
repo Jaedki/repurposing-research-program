@@ -38,7 +38,7 @@ Install the pinned runtime dependencies once with `python -m pip install -r requ
    - a frozen, content-addressed living evidence graph;
    - deterministic clustering of every non-anchor pathology profile;
    - one mechanism-directed candidate-seed packet per pathology cluster;
-   - one evidence-review packet per canonical candidate ID;
+   - one evidence-review packet per pathology cluster after canonical candidate deduplication;
    - independent audit and deterministic ranking.
 
 5. When status is `ready_to_build`, run:
@@ -61,7 +61,7 @@ Use `status` at any time. Resume means calling `next`; accepted results are immu
 
 - Preserve source IDs, exact identity, contradictions, negative results, unresolved identity, exclusions, and explicit gaps.
 - Every graph assertion cites retained pathology sources.
-- Every candidate separately cites pathology evidence and drug mode-of-action evidence.
+- Candidate reviews use the frozen graph as disease context, retrieve primary or authoritative drug facts, and map verified pharmacology to that context. Disease-specific drug literature is secondary and reported only when decision-changing.
 - Never persist API keys, access tokens, authorization headers, or secrets.
 - Placebo, vehicle, and sham are comparators, not candidates.
 - Unresolved identity stays visible and may be reviewed; it must not silently erase the programme.

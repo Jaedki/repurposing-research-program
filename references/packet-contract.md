@@ -20,7 +20,7 @@ The worker returns one JSON object:
 
 1. `pathology_node_research`: `documents`, `profiles`, `assertions`.
 2. `candidate_seed_research`: `documents`, `candidates`, `exclusions`.
-3. `candidate_review_research`: `documents`, `reviews`.
+3. `candidate_review_research`: `documents`, `reviews`; one packet contains the deduplicated candidates assigned to one pathology cluster and requires exactly one review per supplied candidate.
 4. `audit_and_rank`: `rankings`, `audit_notes`.
 
 Python creates `pathology_sources`, the frozen `evidence_graph`, its deterministic `mechanism_clustering` partition, aggregated `candidate_seed_generation`, and aggregated `candidate_review` results.
@@ -47,5 +47,7 @@ Each seed packet contains one frozen pathology cluster. Each candidate states a 
 - `mechanism_source_ids` supporting the drug's action.
 
 No direct disease-drug citation is required. Workers use canonical authoritative candidate IDs where available; Python merges seeds with the same candidate ID before review and rejects identity conflicts.
+
+Review packets retain the batch cluster's frozen pathology profiles and the assigned candidates, including their complete cross-cluster provenance, but include document metadata only for the candidates' drug-mechanism sources. Pathology citations remain attached to the frozen graph and candidate records without duplicating other graph sections or the full pathology source library into every review packet. Workers verify drug facts with primary or authoritative sources, map them to the supplied pathology, and make every review cite at least one document retained in its result. Disease-specific drug literature is a bounded, secondary prior-art check reported only when decision-changing.
 
 Only `status=complete` results are accepted. Operational failure is not scientific content: fix or rerun the worker and submit again. Conflicting replacement of an accepted result is rejected.

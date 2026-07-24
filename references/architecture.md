@@ -8,10 +8,10 @@
 | `evidence_graph` | Python after item work | Every source-derived pathology node has one accepted deep-research profile; Python freezes the graph snapshot |
 | `mechanism_clustering` | Python | TF-IDF and fixed-seed bisecting k-means deterministically partition every non-anchor frozen profile, requesting up to `ceil(sqrt(profile count))` groups |
 | `candidate_seed_generation` | Python after item work | Every frozen pathology cluster has one accepted seed result; Python merges canonical candidate IDs |
-| `candidate_review` | Python after item work | Every canonical candidate ID has one accepted review |
+| `candidate_review` | Python after item work | Every nonempty pathology cluster review batch has one accepted result covering each assigned canonical candidate exactly once |
 | `audit_and_rank` | One independent agent, then Python | Every reviewed candidate has one audit record; Python applies the final order |
 
-Within the three item barriers, `next` selects the first missing item from a stable sorted manifest. This is a deterministic cursor, not a general DAG, queue, scheduler, or agent-controlled handoff.
+Within the three item barriers, `next` selects the first missing item from a stable sorted manifest. Candidate review reuses frozen pathology cluster IDs as batch IDs. After deduplication, Python assigns each candidate once to the origin cluster containing the greatest number of its linked graph nodes, breaking ties by cluster ID. This is a deterministic cursor, not a general DAG, queue, scheduler, or agent-controlled handoff.
 
 ## Separation of evidence
 

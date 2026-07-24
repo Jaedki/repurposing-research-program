@@ -79,10 +79,14 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
         "collections": ["documents", "candidates", "exclusions"],
     },
     "candidate_review_research": {
-        "role": "candidate evidence reviewer",
+        "role": "pathology-cluster candidate evidence reviewer",
         "task": (
-            "Review every candidate against the graph and cited evidence. Record rescue rationale, "
-            "counterevidence, limitations, evidence strength, rescue fit, and uncertainty."
+            "Treat the supplied frozen pathology profiles as authoritative disease context. For "
+            "every candidate, retrieve primary or authoritative sources that verify identity, "
+            "target and action, pharmacology, relevant exposure, and measurable readouts, then map "
+            "those facts to the supplied pathology. Disease-specific drug literature is secondary: "
+            "check it only for decision-changing prior art. Record rescue rationale, counterevidence, "
+            "limitations, evidence strength, rescue fit, and uncertainty."
         ),
         "collections": ["documents", "reviews"],
     },
@@ -152,7 +156,9 @@ FIELD_RULES = {
         "mechanism_source_ids support the drug mode of action; disease-drug citations are optional",
     ],
     "candidate_review_research": [
-        "one review per candidate; evidence_strength and rescue_fit are integers 0..4",
+        "return exactly one review for every candidate in the supplied batch and no others",
+        "each review cites at least one document retained in this result",
+        "evidence_strength and rescue_fit are integers 0..4",
         "uncertainty is low, medium, high, or unknown",
     ],
     "audit_and_rank": [
@@ -419,8 +425,8 @@ def _item_ids(stage: str, results: Mapping[str, Mapping[str, Any]]) -> list[str]
         rows = _clusters(results)
         field = "cluster_id"
     elif stage == "candidate_review":
-        rows = _rows(results["candidate_seed_generation"]["records"], "candidates")
-        field = "candidate_id"
+        rows = _review_batches(results)
+        field = "cluster_id"
     else:
         return []
     return sorted(str(row[field]) for row in rows)
@@ -697,14 +703,28 @@ def _packet_context(
         }
     seeds = results["candidate_seed_generation"]["records"]
     if task == "candidate_review_research":
-        candidate = _find(_rows(seeds, "candidates"), "candidate_id", str(item_id))
-        node_ids = set(map(str, candidate["graph_node_ids"]))
+        batch = _find(_review_batches(results), "cluster_id", str(item_id))
+        candidate_ids = set(map(str, batch["candidate_ids"]))
+        candidates = [
+            row
+            for row in _rows(seeds, "candidates")
+            if str(row["candidate_id"]) in candidate_ids
+        ]
+        cluster = _find(_clusters(results), "cluster_id", str(item_id))
+        node_ids = set(map(str, cluster["member_node_ids"]))
+        profiles = [
+            row for row in _rows(graph, "profiles") if str(row["node_id"]) in node_ids
+        ]
+        mechanism_source_ids = {
+            str(source_id)
+            for candidate in candidates
+            for source_id in candidate["mechanism_source_ids"]
+        }
         return {
-            "candidate": candidate,
-            "pathology_profiles": [
-                row for row in _rows(graph, "profiles") if str(row["node_id"]) in node_ids
-            ],
-            "source_index": _source_index(documents, _cited_ids([candidate])),
+            "cluster": cluster,
+            "candidates": candidates,
+            "pathology_profiles": profiles,
+            "source_index": _source_index(documents, mechanism_source_ids),
         }
     return {
         "candidates": _rows(seeds, "candidates"),
@@ -966,16 +986,169 @@ def _clusters(results: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
     return clusters
 
 
+def _review_batches(
+    results: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    clusters = {str(row["cluster_id"]): row for row in _clusters(results)}
+    members = {
+        cluster_id: set(map(str, row["member_node_ids"]))
+        for cluster_id, row in clusters.items()
+    }
+    grouped: dict[str, list[str]] = {cluster_id: [] for cluster_id in clusters}
+    candidates = _rows(results["candidate_seed_generation"]["records"], "candidates")
+    candidate_ids = _ids(candidates, "candidate_id", "candidates")
+    for candidate in candidates:
+        candidate_id = str(candidate["candidate_id"])
+        origin_ids = sorted(set(map(str, candidate.get("origin_cluster_ids", []))))
+        unknown = set(origin_ids) - set(clusters)
+        if not origin_ids or unknown:
+            raise ProgramError(
+                f"Candidate {candidate_id} has invalid origin_cluster_ids: {sorted(unknown)}"
+            )
+        node_ids = set(map(str, candidate.get("graph_node_ids", [])))
+        primary = min(origin_ids, key=lambda value: (-len(node_ids & members[value]), value))
+        if not node_ids & members[primary]:
+            raise ProgramError(f"Candidate {candidate_id} has no nodes in an origin cluster")
+        grouped[primary].append(candidate_id)
+
+    batches = [
+        {"cluster_id": cluster_id, "candidate_ids": sorted(ids)}
+        for cluster_id, ids in sorted(grouped.items())
+        if ids
+    ]
+    assigned = [candidate_id for batch in batches for candidate_id in batch["candidate_ids"]]
+    if len(assigned) != len(set(assigned)) or set(assigned) != candidate_ids:
+        raise ProgramError("Review batches must partition every candidate exactly once")
+    return batches
+
+
+_IDENTIFIER_KEY_ALIASES = {
+    "chembl_id": "chembl",
+    "pubchem": "pubchem_cid",
+    "pubchem_id": "pubchem_cid",
+    "rxnorm_cui": "rxnorm",
+}
+_CANDIDATE_ID_KEYS = {
+    "CHEMBL": "chembl",
+    "PUBCHEM": "pubchem_cid",
+    "PUBCHEM-SID": "pubchem_sid",
+    "UNII": "unii",
+}
+
+
+def _normalize_identifier_key(value: Any) -> str:
+    key = re.sub(r"[^a-z0-9]+", "_", str(value).casefold()).strip("_")
+    return _IDENTIFIER_KEY_ALIASES.get(key, key)
+
+
+def _normalize_identity(identity: Mapping[str, Any]) -> dict[str, Any]:
+    identifiers: dict[str, str] = {}
+    for raw_key, raw_value in identity.get("identifiers", {}).items():
+        key = _normalize_identifier_key(raw_key)
+        value = str(raw_value).strip()
+        if not key or not value:
+            continue
+        current = identifiers.get(key)
+        if current is not None and current.casefold() != value.casefold():
+            raise ProgramError(f"Conflicting identity identifier values for {key}")
+        identifiers[key] = current or value
+    return {
+        "status": str(identity.get("status", "")).casefold(),
+        "preferred_name": str(identity.get("preferred_name", "")).strip(),
+        "identifiers": identifiers,
+    }
+
+
+def _identity_anchor_state(candidate_id: str, identity: Mapping[str, Any]) -> bool | None:
+    if ":" not in candidate_id:
+        return None
+    prefix, value = candidate_id.split(":", 1)
+    key = _CANDIDATE_ID_KEYS.get(prefix.upper())
+    if key is None:
+        return None
+    identifiers = identity["identifiers"]
+    if key not in identifiers:
+        return None
+    observed = str(identifiers[key]).casefold()
+    expected = {candidate_id.casefold(), value.casefold()}
+    return observed in expected
+
+
+def _identity_names(identity: Mapping[str, Any]) -> list[str]:
+    names = [str(identity.get("preferred_name", "")).strip()]
+    synonym = str(identity.get("identifiers", {}).get("synonym", "")).strip()
+    if synonym:
+        names.append(synonym)
+    return [name.casefold() for name in names if name]
+
+
+def _names_compatible(
+    left_name: Any,
+    right_name: Any,
+    left_identity: Mapping[str, Any],
+    right_identity: Mapping[str, Any],
+) -> bool:
+    left, right = str(left_name).strip().casefold(), str(right_name).strip().casefold()
+    if left == right or left in right or right in left:
+        return True
+    left_names, right_names = _identity_names(left_identity), _identity_names(right_identity)
+    return any(a in b or b in a for a in left_names for b in right_names)
+
+
+def _merge_candidate_identity(
+    candidate_id: str,
+    current: Mapping[str, Any],
+    incoming: Mapping[str, Any],
+) -> dict[str, Any]:
+    left, right = _normalize_identity(current), _normalize_identity(incoming)
+    if left["status"] != right["status"]:
+        raise ProgramError(f"Conflicting identity status for candidate_id={candidate_id}")
+    left_anchor = _identity_anchor_state(candidate_id, left)
+    right_anchor = _identity_anchor_state(candidate_id, right)
+    if left_anchor is False or right_anchor is False:
+        raise ProgramError(f"Identity identifier conflicts with candidate_id={candidate_id}")
+    names_match = _names_compatible(
+        left["preferred_name"], right["preferred_name"], left, right
+    )
+    names_differ = left["preferred_name"].casefold() != right["preferred_name"].casefold()
+    if not names_match or (
+        names_differ and not (left_anchor is True and right_anchor is True)
+    ):
+        raise ProgramError(f"Conflicting identities share candidate_id={candidate_id}")
+    identifiers = dict(left["identifiers"])
+    for key, value in right["identifiers"].items():
+        current_value = identifiers.get(key)
+        if current_value is not None and current_value.casefold() != value.casefold():
+            if key == "synonym":
+                identifiers[key] = _merge_text(current_value, value)
+                continue
+            raise ProgramError(
+                f"Conflicting identity identifier {key} for candidate_id={candidate_id}"
+            )
+        identifiers[key] = current_value or value
+    if names_differ:
+        identifiers["synonym"] = _merge_text(
+            identifiers.get("synonym", ""), right["preferred_name"]
+        )
+    return {**left, "identifiers": dict(sorted(identifiers.items()))}
+
+
 def _merge_candidates(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
     for row in rows:
         candidate_id = str(row["candidate_id"])
         current = merged.get(candidate_id)
         if current is None:
-            merged[candidate_id] = dict(row)
+            merged[candidate_id] = {**row, "identity": _normalize_identity(row["identity"])}
             continue
-        if current["identity"] != row["identity"]:
-            raise ProgramError(f"Conflicting identities share candidate_id={candidate_id}")
+        incoming_identity = _normalize_identity(row["identity"])
+        if not _names_compatible(
+            current["name"], row["name"], current["identity"], incoming_identity
+        ):
+            raise ProgramError(f"Conflicting candidate names share candidate_id={candidate_id}")
+        current["identity"] = _merge_candidate_identity(
+            candidate_id, current["identity"], incoming_identity
+        )
         for field in (
             "graph_node_ids", "pathology_source_ids", "mechanism_source_ids", "origin_cluster_ids"
         ):
@@ -1207,6 +1380,9 @@ def _validate_seed_item(
             raise ProgramError(
                 f"{label}.identity requires an authoritative identifier when resolved"
             )
+        normalized_identity = _normalize_identity(identity)
+        if _identity_anchor_state(str(row["candidate_id"]), normalized_identity) is False:
+            raise ProgramError(f"{label}.identity conflicts with candidate_id")
         graph_refs = _references(row, "graph_node_ids", node_ids, label)
         if not graph_refs <= cluster_node_ids:
             raise ProgramError(f"{label}.graph_node_ids contains nodes outside the item cluster")
@@ -1236,14 +1412,15 @@ def _validate_review_item(
 ) -> None:
     documents = _validate_documents(records, canonical_ids=True)
     reviews = _contract_rows(records, "reviews", "candidate_id")
-    if len(reviews) != 1 or str(reviews[0]["candidate_id"]) != item_id:
-        raise ProgramError("candidate review must return exactly one review for item_id")
-    candidate_ids = _accepted_ids(results, "candidate_seed_generation", "candidates", "candidate_id")
-    if item_id not in candidate_ids:
-        raise ProgramError("candidate review item_id is not an accepted seed")
+    batch = _find(_review_batches(results), "cluster_id", item_id)
+    expected_ids = set(map(str, batch["candidate_ids"]))
+    review_ids = {str(row["candidate_id"]) for row in reviews}
+    if review_ids != expected_ids:
+        raise ProgramError("candidate review must cover exactly the supplied batch candidates")
+    retained_ids = {str(row["document_id"]) for row in documents}
     source_ids = {
         *(str(row["document_id"]) for row in _all_documents(results)),
-        *(str(row["document_id"]) for row in documents),
+        *retained_ids,
     }
     for index, row in enumerate(reviews):
         label = f"reviews[{index}]"
@@ -1263,7 +1440,9 @@ def _validate_review_item(
         if row.get("uncertainty") not in _UNCERTAINTY_ORDER:
             raise ProgramError(f"{label}.uncertainty must be low, medium, high, or unknown")
 
-        _references(row, "source_ids", source_ids, label)
+        cited_ids = _references(row, "source_ids", source_ids, label)
+        if not cited_ids & retained_ids:
+            raise ProgramError(f"{label}.source_ids needs a document retained by this review")
 
 
 def _validate_rankings(
