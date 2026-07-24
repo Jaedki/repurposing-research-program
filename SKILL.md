@@ -13,6 +13,8 @@ Treat every result as an experimental hypothesis, never clinical advice or proof
 
 Run commands from this skill folder, or use absolute script paths.
 
+Install the pinned runtime dependencies once with `python -m pip install -r requirements.txt`.
+
 1. Initialize a run. Supply the exact MONDO ID if available; if not, indicate that the ID is unknown and proceed without it:
 
    ```powershell
@@ -34,7 +36,8 @@ Run commands from this skill folder, or use absolute script paths.
    - pathology-only Monarch and DisMech ingestion;
    - one deep pathology-research packet per selected node;
    - a frozen, content-addressed living evidence graph;
-   - one mechanism-directed candidate-seed packet per eligible pathology node;
+   - deterministic clustering of every non-anchor pathology profile;
+   - one mechanism-directed candidate-seed packet per pathology cluster;
    - one evidence-review packet per canonical candidate ID;
    - independent audit and deterministic ranking.
 
@@ -49,7 +52,7 @@ Use `status` at any time. Resume means calling `next`; accepted results are immu
 ## Hard boundaries
 
 - Pathology construction is treatment-blind. Pathology packets must not contain drug, compound, treatment, therapeutic, or candidate fields.
-- Candidate generation starts only after every pathology-node result is accepted and Python freezes the graph snapshot.
+- Candidate generation starts only after every pathology-node result is accepted, Python freezes the graph snapshot, and deterministic clustering is complete.
 - Candidate eligibility follows `pathology element -> desired biological change -> established drug mode of action`. Direct disease-drug literature is optional.
 - Monarch associations are pathology-category allowlisted. DisMech treatment content is excluded before packet construction.
 - Workers create research content only. Python controls source receipts, task order, item cursors, packet lineage, validation, persistence, candidate aggregation, ranking order, and outputs.

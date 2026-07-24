@@ -23,7 +23,7 @@ The worker returns one JSON object:
 3. `candidate_review_research`: `documents`, `reviews`.
 4. `audit_and_rank`: `rankings`, `audit_notes`.
 
-Python creates `pathology_sources`, the frozen `evidence_graph`, aggregated `candidate_seed_generation`, and aggregated `candidate_review` results.
+Python creates `pathology_sources`, the frozen `evidence_graph`, its deterministic `mechanism_clustering` partition, aggregated `candidate_seed_generation`, and aggregated `candidate_review` results.
 
 Research `document_id` values use a canonical PMID, PMCID, DOI, authoritative database accession, or HTTPS URL. Invented `DOC-AUTHOR-YEAR` aliases are rejected.
 Python keeps one document per canonical ID, enriches scalar metadata in controller order, and unions list metadata without duplicates.
@@ -39,7 +39,7 @@ Python keeps one document per canonical ID, enriches scalar metadata in controll
 
 ## Candidate records
 
-Each candidate states a desired biological change, links to frozen graph nodes, and carries:
+Each seed packet contains one frozen pathology cluster. Each candidate states a desired biological change, links only to relevant members of that cluster, and carries:
 
 - exact or explicitly unresolved identity;
 - frozen graph node IDs;

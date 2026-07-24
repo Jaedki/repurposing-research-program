@@ -105,34 +105,97 @@ class WorkflowTest(unittest.TestCase):
         action = core.next_action(self.root)
         self.assertEqual(action["next_task"], "candidate_seed_research")
         self.assertTrue((self.root / "results" / "evidence_graph.json").exists())
-        self.assertEqual(action["next_item_id"], "NODE:1")
+        self.assertTrue((self.root / "results" / "mechanism_clustering.json").exists())
+        self.assertTrue(action["next_item_id"].startswith("CLUSTER-"))
+        packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(packet["context"]["cluster"]["member_node_ids"], ["NODE:1"])
+        self.assertEqual([row["node_id"] for row in packet["context"]["profiles"]], ["NODE:1"])
+        seed_records = {
+            "documents": [
+                {"document_id": "PMID:2", "title": "Drug MOA", "source": "test"}
+            ],
+            "candidates": [
+                {
+                    "candidate_id": "CHEMBL:1",
+                    "name": "Drug",
+                    "identity": {
+                        "status": "resolved",
+                        "preferred_name": "Drug",
+                        "identifiers": {"chembl": "CHEMBL:1"},
+                    },
+                    "desired_change": "normalize the process",
+                    "mechanism_hypothesis": "inhibits the process",
+                    "graph_node_ids": ["NODE:1"],
+                    "pathology_source_ids": ["SRC:1"],
+                    "mechanism_source_ids": ["PMID:2"],
+                }
+            ],
+            "exclusions": [],
+        }
+        invalid_records = json.loads(json.dumps(seed_records))
+        invalid_records["candidates"][0]["graph_node_ids"] = ["MONDO:1"]
+        with self.assertRaisesRegex(core.ProgramError, "outside the item cluster"):
+            self.submit(action, invalid_records)
         self.submit(
             action,
-            {
-                "documents": [
-                    {"document_id": "PMID:2", "title": "Drug MOA", "source": "test"}
-                ],
-                "candidates": [
-                    {
-                        "candidate_id": "CHEMBL:1",
-                        "name": "Drug",
-                        "identity": {
-                            "status": "resolved",
-                            "preferred_name": "Drug",
-                            "identifiers": {"chembl": "CHEMBL:1"},
-                        },
-                        "desired_change": "normalize the process",
-                        "mechanism_hypothesis": "inhibits the process",
-                        "graph_node_ids": ["NODE:1"],
-                        "pathology_source_ids": ["SRC:1"],
-                        "mechanism_source_ids": ["PMID:2"],
-                    }
-                ],
-                "exclusions": [],
-            },
+            seed_records,
         )
         action = core.next_action(self.root)
         self.assertEqual(action["next_task"], "candidate_review_research")
+        seeds = json.loads(
+            (self.root / "results" / "candidate_seed_generation.json").read_text()
+        )
+        self.assertEqual(
+            seeds["records"]["candidates"][0]["origin_cluster_ids"],
+            [packet["item_id"]],
+        )
+
+    def test_mechanism_clustering_is_a_deterministic_partition(self):
+        nodes = [
+            {"node_id": "NODE:1", "label": "mitochondrial energy", "node_type": "process"},
+            {"node_id": "NODE:2", "label": "oxidative metabolism", "node_type": "process"},
+            {"node_id": "NODE:3", "label": "RNA splicing", "node_type": "process"},
+            {"node_id": "NODE:4", "label": "RNA processing", "node_type": "process"},
+        ]
+        profiles = [
+            {"node_id": row["node_id"], "node_type": row["node_type"], "summary": row["label"]}
+            for row in nodes
+        ]
+        graph = {
+            "snapshot_id": "GRAPH:1",
+            "records": {"source_nodes": nodes, "profiles": profiles},
+        }
+        reversed_graph = {
+            "snapshot_id": "GRAPH:1",
+            "records": {
+                "source_nodes": list(reversed(nodes)),
+                "profiles": list(reversed(profiles)),
+            },
+        }
+        first = core._build_cluster_result({"evidence_graph": graph})
+        second = core._build_cluster_result({"evidence_graph": reversed_graph})
+
+        self.assertEqual(first["records"], second["records"])
+        clusters = core._clusters(
+            {"evidence_graph": graph, "mechanism_clustering": first}
+        )
+        self.assertEqual(len(clusters), 2)
+        self.assertEqual(
+            {node_id for cluster in clusters for node_id in cluster["member_node_ids"]},
+            {row["node_id"] for row in nodes},
+        )
+
+    def test_cluster_text_omits_citations_but_keeps_structured_detail(self):
+        self.assertEqual(
+            core._cluster_text(
+                {
+                    "mechanism": "mitochondrial rescue",
+                    "detail": "supported by PMID:123 and DOI:10.1000/example",
+                    "source_ids": ["PMID:123"],
+                }
+            ),
+            "mitochondrial rescue supported by and",
+        )
 
     def test_pathology_research_requires_retained_evidence(self):
         action = core.next_action(self.root)

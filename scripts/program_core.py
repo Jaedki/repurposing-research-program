@@ -7,11 +7,16 @@ import csv
 import hashlib
 import io
 import json
+import math
 import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+
+from sklearn import __version__ as SKLEARN_VERSION
+from sklearn.cluster import BisectingKMeans
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 from pathology_sources import SourceError, fetch_pathology_sources
 
@@ -36,20 +41,20 @@ CANONICAL_DOCUMENT_ID = re.compile(
 STAGES = (
     "pathology_sources",
     "evidence_graph",
-    "candidate_seed_generation",  # cannot start before the graph is frozen
+    "mechanism_clustering",
+    "candidate_seed_generation",
     "candidate_review",
     "audit_and_rank",
 )
-SEED_NODE_TYPES = {
-    "genetic_driver",
-    "molecular_process",
-    "biochemical_state",
-    "cellular_process",
-    "cell_state",
-    "tissue_process",
-    "organ_process",
-    "environmental_driver",
-}
+CLUSTERING_VERSION = 1
+CLUSTER_PROFILE_FIELDS = (
+    "node_type", "summary", "normal_state", "pathological_state", "causal_role",
+    "mechanisms", "cell_types", "anatomical_context", "temporal_context",
+    "upstream_causes", "downstream_consequences",
+)
+CLUSTER_CITATION = re.compile(
+    r"\b(?:PMID:\d+|PMCID:PMC\d+|DOI:10\.\d{4,9}/\S+|https://\S+)", re.IGNORECASE
+)
 
 STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
     "pathology_node_research": {
@@ -65,8 +70,8 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
     "candidate_seed_research": {
         "role": "mechanism-directed candidate seed researcher",
         "task": (
-            "For this frozen pathology node, define biological changes that could move the "
-            "pathological state toward normal, then generate up to 100 diverse existing-drug "
+            "For this frozen pathology cluster, define biological changes that could move its "
+            "pathological states toward normal, then generate up to 100 diverse existing-drug "
             "seeds whose established mode of action could cause those changes. Do not pad the "
             "list. A drug need not have any prior literature association with the disease; cite "
             "pathology evidence and mode-of-action evidence separately."
@@ -109,6 +114,7 @@ ROW_FIELDS = {
         "assertion_id", "subject_id", "relation", "object_id",
         "evidence_summary", "source_ids",
     ],
+    "clusters": ["cluster_id", "member_node_ids"],
     "candidates": [
         "candidate_id", "name", "identity", "desired_change", "mechanism_hypothesis",
         "graph_node_ids", "pathology_source_ids", "mechanism_source_ids",
@@ -141,7 +147,8 @@ FIELD_RULES = {
     "candidate_seed_research": [
         "identity has status, preferred_name, and identifiers; resolved identity needs an "
         "identifier",
-        "graph_node_ids includes item_id; pathology_source_ids support the disease mechanism",
+        "graph_node_ids contains only supplied cluster members and is non-empty; "
+        "pathology_source_ids support the disease mechanism",
         "mechanism_source_ids support the drug mode of action; disease-drug citations are optional",
     ],
     "candidate_review_research": [
@@ -409,11 +416,8 @@ def _item_ids(stage: str, results: Mapping[str, Mapping[str, Any]]) -> list[str]
     if stage == "evidence_graph":
         rows = _rows(results["pathology_sources"]["records"], "source_nodes")
     elif stage == "candidate_seed_generation":
-        rows = [
-            row
-            for row in _rows(results["evidence_graph"]["records"], "profiles")
-            if row.get("node_type") in SEED_NODE_TYPES
-        ]
+        rows = _clusters(results)
+        field = "cluster_id"
     elif stage == "candidate_review":
         rows = _rows(results["candidate_seed_generation"]["records"], "candidates")
         field = "candidate_id"
@@ -441,6 +445,7 @@ def _stop_reason(results: Mapping[str, Mapping[str, Any]]) -> str | None:
     checks = (
         ("pathology_sources", "source_nodes", "Monarch and DisMech returned no pathology nodes"),
         ("evidence_graph", "profiles", "no source-backed pathology profiles were produced"),
+        ("mechanism_clustering", "clusters", "no pathology mechanism clusters were produced"),
         ("candidate_seed_generation", "candidates", "no mechanism-linked drug seeds were produced"),
         ("candidate_review", "reviews", "no candidates received an evidence review"),
     )
@@ -498,8 +503,8 @@ def _program_status(
         next_stage = STAGES[len(results)]
         next_item_id = None
         accepted_items = 0
-        if next_stage == "pathology_sources":
-            state, next_task = "needs_controller", "pathology_sources"
+        if next_stage in {"pathology_sources", "mechanism_clustering"}:
+            state, next_task = "needs_controller", next_stage
         elif next_stage in {"evidence_graph", "candidate_seed_generation", "candidate_review"}:
             next_task = {
                 "evidence_graph": "pathology_node_research",
@@ -667,19 +672,28 @@ def _packet_context(
         }
     graph = results["evidence_graph"]["records"]
     if task == "candidate_seed_research":
-        node = _find(_rows(graph, "source_nodes"), "node_id", str(item_id))
-        profile = _find(_rows(graph, "profiles"), "node_id", str(item_id))
+        cluster = _find(_clusters(results), "cluster_id", str(item_id))
+        member_ids = set(map(str, cluster["member_node_ids"]))
+        nodes = [
+            row for row in _rows(graph, "source_nodes") if str(row["node_id"]) in member_ids
+        ]
+        profiles = [
+            row for row in _rows(graph, "profiles") if str(row["node_id"]) in member_ids
+        ]
         edges = [
             row
             for row in [*_rows(graph, "source_edges"), *_rows(graph, "assertions")]
-            if str(item_id) in {str(row["subject_id"]), str(row["object_id"])}
+            if member_ids & {str(row["subject_id"]), str(row["object_id"])}
         ]
         return {
             "graph_sha256": _sha256(_canonical_bytes(results["evidence_graph"])),
-            "node": node,
-            "profile": profile,
-            "adjacent_edges": edges,
-            "source_index": _source_index(documents, _cited_ids([node, profile, *edges])),
+            "cluster": cluster,
+            "nodes": nodes,
+            "profiles": profiles,
+            "related_edges": edges,
+            "source_index": _source_index(
+                documents, _cited_ids([*nodes, *profiles, *edges])
+            ),
         }
     seeds = results["candidate_seed_generation"]["records"]
     if task == "candidate_review_research":
@@ -848,8 +862,108 @@ def _build_graph_result(
         "snapshot_id": _stable_id("GRAPH", records),
         "records": records,
         "gaps": _item_gaps(root, results, "evidence_graph", "pathology_node_research"),
-        "notes": ["Frozen pathology-only graph; candidate seed work may now begin."],
+        "notes": ["Frozen pathology-only graph; deterministic mechanism clustering may now begin."],
     }
+
+
+def _build_cluster_result(results: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    graph_result = results["evidence_graph"]
+    graph = graph_result["records"]
+    nodes = {str(row["node_id"]): row for row in _rows(graph, "source_nodes")}
+    profiles = sorted(
+        (
+            row
+            for row in _rows(graph, "profiles")
+            if row.get("node_type") != "disease_anchor"
+        ),
+        key=lambda row: str(row["node_id"]),
+    )
+    if not profiles:
+        raise ProgramError("Cannot cluster a graph without non-anchor pathology profiles")
+    texts = []
+    for profile in profiles:
+        node = nodes[str(profile["node_id"])]
+        values: list[Any] = [node.get("label", "")]
+        values.extend(profile.get(field, "") for field in CLUSTER_PROFILE_FIELDS)
+        texts.append(_cluster_text(values))
+    cluster_count = math.isqrt(len(profiles) - 1) + 1
+    vectors = TfidfVectorizer(
+        stop_words="english", ngram_range=(1, 2), strip_accents="unicode"
+    ).fit_transform(texts)
+    labels = (
+        [0]
+        if cluster_count == 1
+        else BisectingKMeans(
+            n_clusters=cluster_count, random_state=0, n_init=10
+        ).fit_predict(vectors)
+    )
+    grouped: dict[int, list[str]] = {}
+    for label, profile in zip(labels, profiles):
+        grouped.setdefault(int(label), []).append(str(profile["node_id"]))
+    clusters = []
+    for members in grouped.values():
+        members.sort()
+        clusters.append(
+            {
+                "cluster_id": _stable_id("CLUSTER", members),
+                "member_node_ids": members,
+                "node_types": sorted({str(nodes[node_id]["node_type"]) for node_id in members}),
+            }
+        )
+    clusters.sort(key=lambda row: str(row["cluster_id"]))
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "stage": "mechanism_clustering",
+        "status": "complete",
+        "graph_snapshot_id": graph_result["snapshot_id"],
+        "graph_sha256": _sha256(_canonical_bytes(graph_result)),
+        "method": {
+            "name": "tfidf_bisecting_kmeans",
+            "version": CLUSTERING_VERSION,
+            "cluster_count_rule": "ceil_sqrt_profile_count",
+            "requested_clusters": cluster_count,
+            "cluster_count": len(clusters),
+            "random_state": 0,
+            "n_init": 10,
+            "scikit_learn": SKLEARN_VERSION,
+        },
+        "records": {"clusters": clusters},
+        "gaps": [],
+        "notes": [f"Clustered {len(profiles)} pathology profiles into {len(clusters)} groups."],
+    }
+
+
+def _cluster_text(value: Any) -> str:
+    if isinstance(value, Mapping):
+        value = [item for key, item in value.items() if key != "source_ids"]
+    if isinstance(value, (list, tuple)):
+        return " ".join(filter(None, map(_cluster_text, value)))
+    return " ".join(CLUSTER_CITATION.sub("", str(value)).split())
+
+
+def _clusters(results: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+    graph_result = results["evidence_graph"]
+    result = results["mechanism_clustering"]
+    if (
+        result.get("graph_snapshot_id") != graph_result.get("snapshot_id")
+        or result.get("graph_sha256") != _sha256(_canonical_bytes(graph_result))
+    ):
+        raise ProgramError("Mechanism clusters do not match the frozen graph")
+    records = result.get("records")
+    if not isinstance(records, dict):
+        raise ProgramError("Mechanism clustering result requires records")
+    clusters = _contract_rows(records, "clusters", "cluster_id")
+    expected = {
+        str(row["node_id"])
+        for row in _rows(graph_result["records"], "profiles")
+        if row.get("node_type") != "disease_anchor"
+    }
+    if any(not isinstance(row["member_node_ids"], list) or not row["member_node_ids"] for row in clusters):
+        raise ProgramError("Every mechanism cluster requires member_node_ids")
+    members = [str(node_id) for row in clusters for node_id in row["member_node_ids"]]
+    if len(members) != len(set(members)) or set(members) != expected:
+        raise ProgramError("Mechanism clusters must partition every non-anchor profile exactly once")
+    return clusters
 
 
 def _merge_candidates(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -863,7 +977,7 @@ def _merge_candidates(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         if current["identity"] != row["identity"]:
             raise ProgramError(f"Conflicting identities share candidate_id={candidate_id}")
         for field in (
-            "graph_node_ids", "pathology_source_ids", "mechanism_source_ids", "origin_node_ids"
+            "graph_node_ids", "pathology_source_ids", "mechanism_source_ids", "origin_cluster_ids"
         ):
             current[field] = sorted({*map(str, current.get(field, [])), *map(str, row.get(field, []))})
         for field in ("desired_change", "mechanism_hypothesis"):
@@ -877,9 +991,9 @@ def _build_seed_result(
     item_ids = _item_ids("candidate_seed_generation", results)
     accepted = _item_results(root, "candidate_seed_research", item_ids)
     if len(accepted) != len(item_ids):
-        raise ProgramError("Cannot aggregate seeds before every modifiable graph node is accepted")
+        raise ProgramError("Cannot aggregate seeds before every mechanism cluster is accepted")
     raw_candidates = [
-        {**row, "origin_node_ids": [item_id]}
+        {**row, "origin_cluster_ids": [item_id]}
         for item_id in item_ids
         for row in _rows(accepted[item_id]["records"], "candidates")
     ]
@@ -892,7 +1006,7 @@ def _build_seed_result(
         ),
         "candidates": _merge_candidates(raw_candidates),
         "exclusions": [
-            {**row, "origin_node_id": item_id}
+            {**row, "origin_cluster_id": item_id}
             for item_id in item_ids
             for row in _rows(accepted[item_id]["records"], "exclusions")
         ],
@@ -954,6 +1068,8 @@ def _advance_controller(
         _validate_source_result(result)
     elif stage == "evidence_graph":
         result = _build_graph_result(root, results)
+    elif stage == "mechanism_clustering":
+        result = _build_cluster_result(results)
     elif stage == "candidate_seed_generation":
         result = _build_seed_result(root, results)
     elif stage == "candidate_review":
@@ -1055,6 +1171,8 @@ def _validate_seed_item(
     candidates = _contract_rows(records, "candidates", "candidate_id")
     _contract_rows(records, "exclusions")
     graph = results["evidence_graph"]["records"]
+    cluster = _find(_clusters(results), "cluster_id", item_id)
+    cluster_node_ids = set(map(str, cluster["member_node_ids"]))
     node_ids = _ids(_rows(graph, "source_nodes"), "node_id", "source_nodes")
     pathology_source_ids = _ids(_rows(graph, "documents"), "document_id", "documents")
     new_mechanism_source_ids = {str(row["document_id"]) for row in documents}
@@ -1090,8 +1208,8 @@ def _validate_seed_item(
                 f"{label}.identity requires an authoritative identifier when resolved"
             )
         graph_refs = _references(row, "graph_node_ids", node_ids, label)
-        if item_id not in graph_refs:
-            raise ProgramError(f"{label}.graph_node_ids must include item_id")
+        if not graph_refs <= cluster_node_ids:
+            raise ProgramError(f"{label}.graph_node_ids contains nodes outside the item cluster")
         _references(row, "pathology_source_ids", pathology_source_ids, label)
         mechanism_refs = _references(row, "mechanism_source_ids", mechanism_source_ids, label)
         if not mechanism_refs & new_mechanism_source_ids:
@@ -1346,7 +1464,9 @@ def _provenance_rows(
                 ),
                 "pathology_source_ids": sorted(map(str, candidate["pathology_source_ids"])),
                 "mechanism_source_ids": sorted(map(str, candidate["mechanism_source_ids"])),
-                "origin_node_ids": sorted(map(str, candidate.get("origin_node_ids", []))),
+                "origin_cluster_ids": sorted(
+                    map(str, candidate.get("origin_cluster_ids", []))
+                ),
             }
         )
     return output
