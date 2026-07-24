@@ -13,7 +13,7 @@ Treat every result as an experimental hypothesis, never clinical advice or proof
 
 Run commands from this skill folder, or use absolute script paths.
 
-1. Initialize a run. Supply the exact MONDO ID when known:
+1. Initialize a run. Supply the exact MONDO ID if available; if not, indicate that the ID is unknown and proceed without it:
 
    ```powershell
    python scripts/orchestrate_program.py init <run-folder> --disease "<disease>" [--gene <gene>] [--mondo MONDO:...]
