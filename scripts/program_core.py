@@ -7,21 +7,16 @@ import csv
 import hashlib
 import io
 import json
-import math
 import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from sklearn import __version__ as SKLEARN_VERSION
-from sklearn.cluster import BisectingKMeans
-from sklearn.feature_extraction.text import TfidfVectorizer
-
 from pathology_sources import SourceError, fetch_pathology_sources
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 OBJECTIVE = (
     "Identify existing drugs whose established mode of action could plausibly alter a "
     "specific evidence-backed element of the supplied disease pathology. A prior "
@@ -40,27 +35,44 @@ CANONICAL_DOCUMENT_ID = re.compile(
 )
 STAGES = (
     "pathology_sources",
+    "pathology_curation",
     "evidence_graph",
-    "mechanism_clustering",
     "candidate_seed_generation",
     "candidate_review",
     "audit_and_rank",
 )
-CLUSTERING_VERSION = 1
-CLUSTER_PROFILE_FIELDS = (
-    "node_type", "summary", "normal_state", "pathological_state", "causal_role",
-    "mechanisms", "cell_types", "anatomical_context", "temporal_context",
-    "upstream_causes", "downstream_consequences",
-)
-CLUSTER_CITATION = re.compile(
-    r"\b(?:PMID:\d+|PMCID:PMC\d+|DOI:10\.\d{4,9}/\S+|https://\S+)", re.IGNORECASE
-)
 
 STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
+    "pathology_curation": {
+        "role": "disease pathology concept curator",
+        "task": (
+            "Convert the supplied source-derived pathology nodes into coherent run-local concepts "
+            "before research; do not minimize concept count. Merge only when one disease-specific "
+            "biological profile and one discriminating rescue readout accurately describe every "
+            "member at the same causal level. Shared genes, ontology IDs, pathways, anatomy, or "
+            "causal relationships do not establish equivalence; keep bare entities, disease "
+            "drivers, mechanisms, and phenotypes separate unless they express the same claim. "
+            "The supplied nodes are disease-specific source claims, so same-label gene-level "
+            "claims from different sources may merge when neither specifies a mutation, variant, "
+            "repeat, model genotype, or downstream mechanism; keep those more specific claims "
+            "separate from the broader gene association. "
+            "Merge true duplicate records into the retained concept so all evidence survives. "
+            "Retain original labels as aliases and assign every non-anchor source node exactly "
+            "once. Use supplied disease_context to interpret nodes, but do not create concepts "
+            "from administrative metadata alone. Mark a concept research when it is distinct "
+            "causal or modifiable biology, or "
+            "a specific phenotype that supplies a discriminating rescue readout; mark supporting "
+            "anatomy, inheritance, progression, model-system, or broad descriptive material "
+            "context_only and attach it to relevant research concepts; exclude only malformed or "
+            "irrelevant records, generic ontology noise, and self-referential disease concepts. "
+            "When uncertain, keep concepts separate. Do not introduce or discuss drugs or treatments."
+        ),
+        "collections": ["concepts"],
+    },
     "pathology_node_research": {
         "role": "disease pathology researcher",
         "task": (
-            "Research this one source-derived pathology node in exceptional disease-specific "
+            "Research this one curated pathology concept in exceptional disease-specific "
             "depth. Explain its normal state, pathological change, causal role, mechanisms, "
             "biological context, uncertainty, contradictions, and gaps. Do not research or "
             "propose drugs, treatments, or therapeutic strategies."
@@ -70,16 +82,16 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
     "candidate_seed_research": {
         "role": "mechanism-directed candidate seed researcher",
         "task": (
-            "For this frozen pathology cluster, define biological changes that could move its "
-            "pathological states toward normal, then generate up to 100 diverse existing-drug "
-            "seeds whose established mode of action could cause those changes. Do not pad the "
+            "For this frozen researched pathology concept, define a biological change that could "
+            "move its pathological state toward normal, then generate a focused set of diverse "
+            "existing-drug seeds whose established mode of action could cause those changes. Do not pad the "
             "list. A drug need not have any prior literature association with the disease; cite "
             "pathology evidence and mode-of-action evidence separately."
         ),
         "collections": ["documents", "candidates", "exclusions"],
     },
     "candidate_review_research": {
-        "role": "pathology-cluster candidate evidence reviewer",
+        "role": "pathology-concept candidate evidence reviewer",
         "task": (
             "Treat the supplied frozen pathology profiles as authoritative disease context. For "
             "every candidate, retrieve primary or authoritative sources that verify identity, "
@@ -108,6 +120,11 @@ ROW_FIELDS = {
         "edge_id", "subject_id", "relation", "object_id", "evidence_summary", "source_ids",
     ],
     "source_receipts": ["source", "version", "query", "record_count"],
+    "disease_context": ["context_id", "section", "value", "source_ids"],
+    "concepts": [
+        "concept_id", "preferred_label", "concept_type", "member_node_ids",
+        "aliases", "disposition", "reason", "related_concept_ids",
+    ],
     "profiles": [
         "node_id", "node_type", "summary", "normal_state", "pathological_state",
         "causal_role", "mechanisms", "cell_types", "anatomical_context",
@@ -118,7 +135,6 @@ ROW_FIELDS = {
         "assertion_id", "subject_id", "relation", "object_id",
         "evidence_summary", "source_ids",
     ],
-    "clusters": ["cluster_id", "member_node_ids"],
     "candidates": [
         "candidate_id", "name", "identity", "desired_change", "mechanism_hypothesis",
         "graph_node_ids", "pathology_source_ids", "mechanism_source_ids",
@@ -141,8 +157,23 @@ PATHOLOGY_PROFILE_LIST_FIELDS = (
 )
 
 FIELD_RULES = {
+    "pathology_curation": [
+        "partition every supplied non-anchor source node exactly once across concepts",
+        "concept_id is one member_node_id; choose an authoritative member ID only after same-level "
+        "equivalence is established and the ID denotes the curated concept",
+        "shared identifiers, genes, pathways, anatomy, or causal adjacency are not equivalence; "
+        "one biological profile and rescue readout must fit every merged member",
+        "same-label gene-level source claims may merge across sources; mutation-, variant-, "
+        "repeat-, model-, and mechanism-specific claims remain separate",
+        "merge true duplicate records into a retained concept; do not exclude their evidence",
+        "concept_type is driver, mechanism, phenotype, or context",
+        "disposition is research, context_only, or exclude; every decision has a concise reason",
+        "each context_only concept links to at least one research concept through "
+        "related_concept_ids; other dispositions use an empty list",
+        "aliases and member_node_ids are JSON lists; uncertain equivalence remains separate",
+    ],
     "pathology_node_research": [
-        "return exactly one profile whose node_id and node_type match the supplied node",
+        "return exactly one profile whose node_id and node_type match the supplied curated concept",
         "retain at least one independently researched document",
         f"profile fields {', '.join(PATHOLOGY_PROFILE_LIST_FIELDS)} are JSON lists",
         "assertions link only supplied source-derived node IDs; all claims cite retained sources; "
@@ -151,7 +182,7 @@ FIELD_RULES = {
     "candidate_seed_research": [
         "identity has status, preferred_name, and identifiers; resolved identity needs an "
         "identifier",
-        "graph_node_ids contains only supplied cluster members and is non-empty; "
+        "graph_node_ids contains the supplied researched concept and is non-empty; "
         "pathology_source_ids support the disease mechanism",
         "mechanism_source_ids support the drug mode of action; disease-drug citations are optional",
     ],
@@ -180,6 +211,19 @@ _SECRET_KEYS = {
 _COMPARATORS = {"placebo", "vehicle", "sham"}
 _UNCERTAINTY_ORDER = {"low": 0, "medium": 1, "high": 2, "unknown": 3}
 _PATHOLOGY_FORBIDDEN_KEYS = {"candidate", "compound", "drug", "treatment", "therapeutic"}
+_RESEARCH_CONTEXT_SECTIONS = {
+    "categories",
+    "category",
+    "classifications",
+    "description",
+    "disease_term",
+    "has_subtypes",
+    "inheritance",
+    "parents",
+    "progression",
+    "stages",
+    "synonyms",
+}
 
 
 class ProgramError(ValueError):
@@ -418,15 +462,11 @@ def _load_results(root: Path) -> dict[str, dict[str, Any]]:
 
 
 def _item_ids(stage: str, results: Mapping[str, Mapping[str, Any]]) -> list[str]:
-    field = "node_id"
-    if stage == "evidence_graph":
-        rows = _rows(results["pathology_sources"]["records"], "source_nodes")
-    elif stage == "candidate_seed_generation":
-        rows = _clusters(results)
-        field = "cluster_id"
+    field = "concept_id"
+    if stage in {"evidence_graph", "candidate_seed_generation"}:
+        rows = _research_concepts(results)
     elif stage == "candidate_review":
         rows = _review_batches(results)
-        field = "cluster_id"
     else:
         return []
     return sorted(str(row[field]) for row in rows)
@@ -448,10 +488,16 @@ def _first_missing(root: Path, task: str, item_ids: list[str]) -> tuple[str | No
 
 
 def _stop_reason(results: Mapping[str, Mapping[str, Any]]) -> str | None:
+    curation = results.get("pathology_curation")
+    if curation is not None and not any(
+        row.get("disposition") == "research"
+        for row in curation.get("records", {}).get("concepts", [])
+        if isinstance(row, dict)
+    ):
+        return "pathology curation retained no concepts requiring deep research"
     checks = (
         ("pathology_sources", "source_nodes", "Monarch and DisMech returned no pathology nodes"),
         ("evidence_graph", "profiles", "no source-backed pathology profiles were produced"),
-        ("mechanism_clustering", "clusters", "no pathology mechanism clusters were produced"),
         ("candidate_seed_generation", "candidates", "no mechanism-linked drug seeds were produced"),
         ("candidate_review", "reviews", "no candidates received an evidence review"),
     )
@@ -491,6 +537,8 @@ def _program_status(
 ) -> dict[str, Any]:
     stop = _stop_reason(results)
     manifest_path = run_root / "outputs" / "manifest.json"
+    next_task = next_item_id = None
+    accepted_items = 0
     if manifest_path.exists():
         manifest = _read_json(manifest_path)
         _verify_outputs(run_root, manifest)
@@ -502,14 +550,9 @@ def _program_status(
     elif len(results) == len(STAGES):
         state = "ready_to_build"
         next_stage = None
-        next_task = None
-        next_item_id = None
-        accepted_items = 0
     else:
         next_stage = STAGES[len(results)]
-        next_item_id = None
-        accepted_items = 0
-        if next_stage in {"pathology_sources", "mechanism_clustering"}:
+        if next_stage == "pathology_sources":
             state, next_task = "needs_controller", next_stage
         elif next_stage in {"evidence_graph", "candidate_seed_generation", "candidate_review"}:
             next_task = {
@@ -523,10 +566,6 @@ def _program_status(
             state = "needs_agent" if next_item_id is not None else "needs_controller"
         else:
             state, next_task = "needs_agent", next_stage
-    if manifest_path.exists() or stop:
-        next_task = None
-        next_item_id = None
-        accepted_items = 0
     return {
         "schema_version": SCHEMA_VERSION,
         "case_id": case["case_id"],
@@ -655,63 +694,305 @@ def _cited_ids(rows: Iterable[Mapping[str, Any]]) -> set[str]:
     }
 
 
+def _curation_concepts(
+    results: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    result = results.get("pathology_curation")
+    if not isinstance(result, Mapping) or not isinstance(result.get("records"), Mapping):
+        raise ProgramError("Pathology curation result is missing")
+    return _contract_rows(result["records"], "concepts", "concept_id")
+
+
+def _research_concepts(
+    results: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    return sorted(
+        (
+            row
+            for row in _curation_concepts(results)
+            if row.get("disposition") == "research"
+        ),
+        key=lambda row: str(row["concept_id"]),
+    )
+
+
+def _canonical_source_records(
+    results: Mapping[str, Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Project raw source records through the accepted run-local concept partition."""
+    source = results["pathology_sources"]["records"]
+    raw_nodes = _rows(source, "source_nodes")
+    raw_by_id = {str(row["node_id"]): row for row in raw_nodes}
+    raw_edges = _rows(source, "source_edges")
+    concepts = _curation_concepts(results)
+
+    node_map: dict[str, str] = {}
+    nodes: list[dict[str, Any]] = []
+    for raw in raw_nodes:
+        if raw.get("node_type") != "disease_anchor":
+            continue
+        node_id = str(raw["node_id"])
+        node_map[node_id] = node_id
+        nodes.append(
+            {
+                "node_id": node_id,
+                "label": str(raw["label"]),
+                "node_type": "disease_anchor",
+                "source_ids": sorted(set(map(str, raw["source_ids"]))),
+                "aliases": [],
+                "member_node_ids": [node_id],
+                "disposition": "context_only",
+            }
+        )
+
+    for concept in concepts:
+        if concept["disposition"] == "exclude":
+            continue
+        concept_id = str(concept["concept_id"])
+        members = sorted(set(map(str, concept["member_node_ids"])))
+        for member in members:
+            node_map[member] = concept_id
+        source_ids = sorted(
+            {
+                str(source_id)
+                for member in members
+                for source_id in raw_by_id[member]["source_ids"]
+            }
+        )
+        aliases = sorted(
+            {
+                str(value).strip()
+                for value in [
+                    *concept["aliases"],
+                    *(raw_by_id[member].get("label", "") for member in members),
+                ]
+                if str(value).strip()
+                and str(value).strip().casefold()
+                != str(concept["preferred_label"]).strip().casefold()
+            },
+            key=str.casefold,
+        )
+        nodes.append(
+            {
+                "node_id": concept_id,
+                "label": str(concept["preferred_label"]),
+                "node_type": str(concept["concept_type"]),
+                "source_ids": source_ids,
+                "aliases": aliases,
+                "member_node_ids": members,
+                "disposition": str(concept["disposition"]),
+            }
+        )
+
+    grouped_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for edge in raw_edges:
+        subject = node_map.get(str(edge["subject_id"]))
+        object_id = node_map.get(str(edge["object_id"]))
+        if not subject or not object_id or subject == object_id:
+            continue
+        relation = str(edge["relation"])
+        key = (subject, relation, object_id)
+        current = grouped_edges.setdefault(
+            key,
+            {
+                "edge_id": _stable_id(
+                    "CURATED-EDGE",
+                    {"subject_id": subject, "relation": relation, "object_id": object_id},
+                ),
+                "subject_id": subject,
+                "relation": relation,
+                "object_id": object_id,
+                "evidence_summary": "",
+                "source_ids": [],
+                "original_edge_ids": [],
+            },
+        )
+        current["evidence_summary"] = _merge_text(
+            current["evidence_summary"], edge["evidence_summary"]
+        )
+        current["source_ids"] = sorted(
+            {*map(str, current["source_ids"]), *map(str, edge["source_ids"])}
+        )
+        current["original_edge_ids"] = sorted(
+            {*map(str, current["original_edge_ids"]), str(edge["edge_id"])}
+        )
+
+    node_by_id = {str(row["node_id"]): row for row in nodes}
+    for concept in concepts:
+        if concept["disposition"] != "context_only":
+            continue
+        subject = str(concept["concept_id"])
+        for object_id in map(str, concept["related_concept_ids"]):
+            relation = "contextualizes"
+            key = (subject, relation, object_id)
+            current = grouped_edges.setdefault(
+                key,
+                {
+                    "edge_id": _stable_id(
+                        "CURATED-EDGE",
+                        {
+                            "subject_id": subject,
+                            "relation": relation,
+                            "object_id": object_id,
+                        },
+                    ),
+                    "subject_id": subject,
+                    "relation": relation,
+                    "object_id": object_id,
+                    "evidence_summary": "",
+                    "source_ids": [],
+                    "original_edge_ids": [],
+                },
+            )
+            current["evidence_summary"] = _merge_text(
+                current["evidence_summary"], concept["reason"]
+            )
+            current["source_ids"] = sorted(
+                {
+                    *map(str, current["source_ids"]),
+                    *map(str, node_by_id[subject]["source_ids"]),
+                }
+            )
+
+    return (
+        sorted(nodes, key=lambda row: str(row["node_id"])),
+        sorted(grouped_edges.values(), key=lambda row: str(row["edge_id"])),
+    )
+
+
 def _packet_context(
     task: str,
     item_id: str | None,
     results: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
     documents = _all_documents(results)
+    if task == "pathology_curation":
+        source_result = results["pathology_sources"]
+        source = source_result["records"]
+        nodes = sorted(
+            (
+                row
+                for row in _rows(source, "source_nodes")
+                if row.get("node_type") != "disease_anchor"
+            ),
+            key=lambda row: (
+                str(row.get("node_type", "")).casefold(),
+                str(row.get("label", "")).casefold(),
+                str(row.get("node_id", "")),
+            ),
+        )
+        edges = _rows(source, "source_edges")
+        disease_context = _rows(source, "disease_context")
+        return {
+            "resolved_disease": source_result.get("resolved_disease"),
+            "source_nodes": nodes,
+            "source_edges": edges,
+            "disease_context": disease_context,
+            "source_index": _source_index(
+                documents, _cited_ids([*nodes, *edges, *disease_context])
+            ),
+            "source_receipts": _rows(source, "source_receipts"),
+            "upstream_gaps": source_result.get("gaps", []),
+        }
     if task == "pathology_node_research":
         source = results["pathology_sources"]["records"]
-        node = _find(_rows(source, "source_nodes"), "node_id", str(item_id))
+        concept = _find(_research_concepts(results), "concept_id", str(item_id))
+        canonical_nodes, canonical_edges = _canonical_source_records(results)
+        node = _find(canonical_nodes, "node_id", str(item_id))
+        member_ids = set(map(str, concept["member_node_ids"]))
+        member_nodes = [
+            {
+                key: row[key]
+                for key in ("node_id", "label", "node_type", "description", "source_ids", "source_section")
+                if key in row
+            }
+            for row in _rows(source, "source_nodes")
+            if str(row["node_id"]) in member_ids
+        ]
         edges = [
             row
-            for row in _rows(source, "source_edges")
+            for row in canonical_edges
             if str(item_id) in {str(row["subject_id"]), str(row["object_id"])}
         ]
+        related_ids = {
+            str(value)
+            for edge in edges
+            for value in (edge["subject_id"], edge["object_id"])
+            if str(value) != str(item_id)
+        }
+        related_nodes = [
+            row for row in canonical_nodes if str(row["node_id"]) in related_ids
+        ]
+        disease_context = [
+            row
+            for row in _rows(source, "disease_context")
+            if row["section"] in _RESEARCH_CONTEXT_SECTIONS
+        ]
         return {
+            "concept": concept,
             "node": node,
+            "member_source_nodes": member_nodes,
+            "related_nodes": related_nodes,
             "adjacent_edges": edges,
-            "source_index": _source_index(documents, _cited_ids([node, *edges])),
+            "disease_context": disease_context,
+            "source_index": _source_index(
+                documents,
+                _cited_ids(
+                    [node, *member_nodes, *related_nodes, *edges, *disease_context]
+                ),
+            ),
             "source_receipts": _rows(source, "source_receipts"),
             "upstream_gaps": results["pathology_sources"].get("gaps", []),
         }
     graph = results["evidence_graph"]["records"]
     if task == "candidate_seed_research":
-        cluster = _find(_clusters(results), "cluster_id", str(item_id))
-        member_ids = set(map(str, cluster["member_node_ids"]))
-        nodes = [
-            row for row in _rows(graph, "source_nodes") if str(row["node_id"]) in member_ids
-        ]
-        profiles = [
-            row for row in _rows(graph, "profiles") if str(row["node_id"]) in member_ids
-        ]
+        concept = _find(_rows(graph, "source_nodes"), "node_id", str(item_id))
+        profile = _find(_rows(graph, "profiles"), "node_id", str(item_id))
         edges = [
             row
             for row in [*_rows(graph, "source_edges"), *_rows(graph, "assertions")]
-            if member_ids & {str(row["subject_id"]), str(row["object_id"])}
+            if str(item_id) in {str(row["subject_id"]), str(row["object_id"])}
+        ]
+        related_ids = {
+            str(value)
+            for edge in edges
+            for value in (edge["subject_id"], edge["object_id"])
+            if str(value) != str(item_id)
+        }
+        related_nodes = [
+            row
+            for row in _rows(graph, "source_nodes")
+            if str(row["node_id"]) in related_ids
         ]
         return {
             "graph_sha256": _sha256(_canonical_bytes(results["evidence_graph"])),
-            "cluster": cluster,
-            "nodes": nodes,
-            "profiles": profiles,
+            "concept": concept,
+            "profile": profile,
+            "related_nodes": related_nodes,
             "related_edges": edges,
             "source_index": _source_index(
-                documents, _cited_ids([*nodes, *profiles, *edges])
+                documents, _cited_ids([concept, profile, *related_nodes, *edges])
             ),
         }
     seeds = results["candidate_seed_generation"]["records"]
     if task == "candidate_review_research":
-        batch = _find(_review_batches(results), "cluster_id", str(item_id))
+        batch = _find(_review_batches(results), "concept_id", str(item_id))
         candidate_ids = set(map(str, batch["candidate_ids"]))
         candidates = [
             row
             for row in _rows(seeds, "candidates")
             if str(row["candidate_id"]) in candidate_ids
         ]
-        cluster = _find(_clusters(results), "cluster_id", str(item_id))
-        node_ids = set(map(str, cluster["member_node_ids"]))
+        node_ids = {
+            str(node_id)
+            for candidate in candidates
+            for node_id in candidate["graph_node_ids"]
+        }
+        concepts = [
+            row
+            for row in _rows(graph, "source_nodes")
+            if str(row["node_id"]) in node_ids
+        ]
         profiles = [
             row for row in _rows(graph, "profiles") if str(row["node_id"]) in node_ids
         ]
@@ -721,8 +1002,9 @@ def _packet_context(
             for source_id in candidate["mechanism_source_ids"]
         }
         return {
-            "cluster": cluster,
+            "primary_concept_id": str(item_id),
             "candidates": candidates,
+            "pathology_concepts": concepts,
             "pathology_profiles": profiles,
             "source_index": _source_index(documents, mechanism_source_ids),
         }
@@ -850,6 +1132,7 @@ def _build_graph_result(
     root: Path, results: Mapping[str, Mapping[str, Any]]
 ) -> dict[str, Any]:
     source = results["pathology_sources"]["records"]
+    canonical_nodes, canonical_edges = _canonical_source_records(results)
     records = {
         "documents": _merge_documents(
             [
@@ -859,9 +1142,10 @@ def _build_graph_result(
                 ),
             ]
         ),
-        "source_nodes": _rows(source, "source_nodes"),
-        "source_edges": _rows(source, "source_edges"),
+        "source_nodes": canonical_nodes,
+        "source_edges": canonical_edges,
         "source_receipts": _rows(source, "source_receipts"),
+        "disease_context": _rows(source, "disease_context"),
         "profiles": _merge_unique(
             _item_collection(
                 root, results, "evidence_graph", "pathology_node_research", "profiles"
@@ -882,138 +1166,36 @@ def _build_graph_result(
         "snapshot_id": _stable_id("GRAPH", records),
         "records": records,
         "gaps": _item_gaps(root, results, "evidence_graph", "pathology_node_research"),
-        "notes": ["Frozen pathology-only graph; deterministic mechanism clustering may now begin."],
+        "notes": [
+            "Frozen pathology-only graph built from the accepted run-local concept partition."
+        ],
     }
-
-
-def _build_cluster_result(results: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
-    graph_result = results["evidence_graph"]
-    graph = graph_result["records"]
-    nodes = {str(row["node_id"]): row for row in _rows(graph, "source_nodes")}
-    profiles = sorted(
-        (
-            row
-            for row in _rows(graph, "profiles")
-            if row.get("node_type") != "disease_anchor"
-        ),
-        key=lambda row: str(row["node_id"]),
-    )
-    if not profiles:
-        raise ProgramError("Cannot cluster a graph without non-anchor pathology profiles")
-    texts = []
-    for profile in profiles:
-        node = nodes[str(profile["node_id"])]
-        values: list[Any] = [node.get("label", "")]
-        values.extend(profile.get(field, "") for field in CLUSTER_PROFILE_FIELDS)
-        texts.append(_cluster_text(values))
-    cluster_count = math.isqrt(len(profiles) - 1) + 1
-    vectors = TfidfVectorizer(
-        stop_words="english", ngram_range=(1, 2), strip_accents="unicode"
-    ).fit_transform(texts)
-    labels = (
-        [0]
-        if cluster_count == 1
-        else BisectingKMeans(
-            n_clusters=cluster_count, random_state=0, n_init=10
-        ).fit_predict(vectors)
-    )
-    grouped: dict[int, list[str]] = {}
-    for label, profile in zip(labels, profiles):
-        grouped.setdefault(int(label), []).append(str(profile["node_id"]))
-    clusters = []
-    for members in grouped.values():
-        members.sort()
-        clusters.append(
-            {
-                "cluster_id": _stable_id("CLUSTER", members),
-                "member_node_ids": members,
-                "node_types": sorted({str(nodes[node_id]["node_type"]) for node_id in members}),
-            }
-        )
-    clusters.sort(key=lambda row: str(row["cluster_id"]))
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "stage": "mechanism_clustering",
-        "status": "complete",
-        "graph_snapshot_id": graph_result["snapshot_id"],
-        "graph_sha256": _sha256(_canonical_bytes(graph_result)),
-        "method": {
-            "name": "tfidf_bisecting_kmeans",
-            "version": CLUSTERING_VERSION,
-            "cluster_count_rule": "ceil_sqrt_profile_count",
-            "requested_clusters": cluster_count,
-            "cluster_count": len(clusters),
-            "random_state": 0,
-            "n_init": 10,
-            "scikit_learn": SKLEARN_VERSION,
-        },
-        "records": {"clusters": clusters},
-        "gaps": [],
-        "notes": [f"Clustered {len(profiles)} pathology profiles into {len(clusters)} groups."],
-    }
-
-
-def _cluster_text(value: Any) -> str:
-    if isinstance(value, Mapping):
-        value = [item for key, item in value.items() if key != "source_ids"]
-    if isinstance(value, (list, tuple)):
-        return " ".join(filter(None, map(_cluster_text, value)))
-    return " ".join(CLUSTER_CITATION.sub("", str(value)).split())
-
-
-def _clusters(results: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
-    graph_result = results["evidence_graph"]
-    result = results["mechanism_clustering"]
-    if (
-        result.get("graph_snapshot_id") != graph_result.get("snapshot_id")
-        or result.get("graph_sha256") != _sha256(_canonical_bytes(graph_result))
-    ):
-        raise ProgramError("Mechanism clusters do not match the frozen graph")
-    records = result.get("records")
-    if not isinstance(records, dict):
-        raise ProgramError("Mechanism clustering result requires records")
-    clusters = _contract_rows(records, "clusters", "cluster_id")
-    expected = {
-        str(row["node_id"])
-        for row in _rows(graph_result["records"], "profiles")
-        if row.get("node_type") != "disease_anchor"
-    }
-    if any(not isinstance(row["member_node_ids"], list) or not row["member_node_ids"] for row in clusters):
-        raise ProgramError("Every mechanism cluster requires member_node_ids")
-    members = [str(node_id) for row in clusters for node_id in row["member_node_ids"]]
-    if len(members) != len(set(members)) or set(members) != expected:
-        raise ProgramError("Mechanism clusters must partition every non-anchor profile exactly once")
-    return clusters
 
 
 def _review_batches(
     results: Mapping[str, Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    clusters = {str(row["cluster_id"]): row for row in _clusters(results)}
-    members = {
-        cluster_id: set(map(str, row["member_node_ids"]))
-        for cluster_id, row in clusters.items()
-    }
-    grouped: dict[str, list[str]] = {cluster_id: [] for cluster_id in clusters}
+    concept_ids = {str(row["concept_id"]) for row in _research_concepts(results)}
+    grouped: dict[str, list[str]] = {concept_id: [] for concept_id in concept_ids}
     candidates = _rows(results["candidate_seed_generation"]["records"], "candidates")
     candidate_ids = _ids(candidates, "candidate_id", "candidates")
     for candidate in candidates:
         candidate_id = str(candidate["candidate_id"])
-        origin_ids = sorted(set(map(str, candidate.get("origin_cluster_ids", []))))
-        unknown = set(origin_ids) - set(clusters)
+        origin_ids = sorted(set(map(str, candidate.get("origin_concept_ids", []))))
+        unknown = set(origin_ids) - concept_ids
         if not origin_ids or unknown:
             raise ProgramError(
-                f"Candidate {candidate_id} has invalid origin_cluster_ids: {sorted(unknown)}"
+                f"Candidate {candidate_id} has invalid origin_concept_ids: {sorted(unknown)}"
             )
         node_ids = set(map(str, candidate.get("graph_node_ids", [])))
-        primary = min(origin_ids, key=lambda value: (-len(node_ids & members[value]), value))
-        if not node_ids & members[primary]:
-            raise ProgramError(f"Candidate {candidate_id} has no nodes in an origin cluster")
+        primary = min(origin_ids, key=lambda value: (value not in node_ids, value))
+        if primary not in node_ids:
+            raise ProgramError(f"Candidate {candidate_id} has no node in an origin concept")
         grouped[primary].append(candidate_id)
 
     batches = [
-        {"cluster_id": cluster_id, "candidate_ids": sorted(ids)}
-        for cluster_id, ids in sorted(grouped.items())
+        {"concept_id": concept_id, "candidate_ids": sorted(ids)}
+        for concept_id, ids in sorted(grouped.items())
         if ids
     ]
     assigned = [candidate_id for batch in batches for candidate_id in batch["candidate_ids"]]
@@ -1150,7 +1332,7 @@ def _merge_candidates(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
             candidate_id, current["identity"], incoming_identity
         )
         for field in (
-            "graph_node_ids", "pathology_source_ids", "mechanism_source_ids", "origin_cluster_ids"
+            "graph_node_ids", "pathology_source_ids", "mechanism_source_ids", "origin_concept_ids"
         ):
             current[field] = sorted({*map(str, current.get(field, [])), *map(str, row.get(field, []))})
         for field in ("desired_change", "mechanism_hypothesis"):
@@ -1164,9 +1346,9 @@ def _build_seed_result(
     item_ids = _item_ids("candidate_seed_generation", results)
     accepted = _item_results(root, "candidate_seed_research", item_ids)
     if len(accepted) != len(item_ids):
-        raise ProgramError("Cannot aggregate seeds before every mechanism cluster is accepted")
+        raise ProgramError("Cannot aggregate seeds before every researched concept is accepted")
     raw_candidates = [
-        {**row, "origin_cluster_ids": [item_id]}
+        {**row, "origin_concept_ids": [item_id]}
         for item_id in item_ids
         for row in _rows(accepted[item_id]["records"], "candidates")
     ]
@@ -1179,7 +1361,7 @@ def _build_seed_result(
         ),
         "candidates": _merge_candidates(raw_candidates),
         "exclusions": [
-            {**row, "origin_cluster_id": item_id}
+            {**row, "origin_concept_id": item_id}
             for item_id in item_ids
             for row in _rows(accepted[item_id]["records"], "exclusions")
         ],
@@ -1241,8 +1423,6 @@ def _advance_controller(
         _validate_source_result(result)
     elif stage == "evidence_graph":
         result = _build_graph_result(root, results)
-    elif stage == "mechanism_clustering":
-        result = _build_cluster_result(results)
     elif stage == "candidate_seed_generation":
         result = _build_seed_result(root, results)
     elif stage == "candidate_review":
@@ -1273,6 +1453,7 @@ def _validate_source_result(result: Mapping[str, Any]) -> None:
     documents = _validate_documents(records)
     nodes = _contract_rows(records, "source_nodes", "node_id")
     edges = _contract_rows(records, "source_edges", "edge_id")
+    contexts = _contract_rows(records, "disease_context", "context_id")
     _contract_rows(records, "source_receipts")
     document_ids = {str(row["document_id"]) for row in documents}
     node_ids = {str(row["node_id"]) for row in nodes}
@@ -1283,9 +1464,99 @@ def _validate_source_result(result: Mapping[str, Any]) -> None:
         if str(row["subject_id"]) not in node_ids or str(row["object_id"]) not in node_ids:
             raise ProgramError(f"{label} refers to an unknown source node")
         _references(row, "source_ids", document_ids, label)
+    for index, row in enumerate(contexts):
+        _references(row, "source_ids", document_ids, f"disease_context[{index}]")
     forbidden = _forbidden_pathology_paths(records)
     if forbidden:
         raise ProgramError(f"Treatment fields reached the pathology source result: {forbidden}")
+
+
+def _validate_curation(
+    records: Mapping[str, Any], results: Mapping[str, Mapping[str, Any]]
+) -> None:
+    concepts = _contract_rows(records, "concepts", "concept_id")
+    source_nodes = _rows(results["pathology_sources"]["records"], "source_nodes")
+    expected = {
+        str(row["node_id"])
+        for row in source_nodes
+        if row.get("node_type") != "disease_anchor"
+    }
+    assigned: list[str] = []
+    retained_labels: dict[tuple[str, str], str] = {}
+    for index, concept in enumerate(concepts):
+        label = f"concepts[{index}]"
+        _required(concept, ("preferred_label", "concept_type", "disposition", "reason"), label)
+        members = concept.get("member_node_ids")
+        aliases = concept.get("aliases")
+        related = concept.get("related_concept_ids")
+        if not isinstance(members, list) or not members:
+            raise ProgramError(f"{label}.member_node_ids must be a non-empty list")
+        if not isinstance(aliases, list) or any(
+            not isinstance(value, str) or not value.strip() for value in aliases
+        ):
+            raise ProgramError(f"{label}.aliases must be a list of non-empty strings")
+        if not isinstance(related, list) or any(
+            not isinstance(value, str) or not value.strip() for value in related
+        ):
+            raise ProgramError(
+                f"{label}.related_concept_ids must be a list of non-empty strings"
+            )
+        if len(related) != len(set(related)):
+            raise ProgramError(f"{label}.related_concept_ids contains duplicates")
+        member_ids = list(map(str, members))
+        if len(member_ids) != len(set(member_ids)):
+            raise ProgramError(f"{label}.member_node_ids contains duplicates")
+        if str(concept["concept_id"]) not in member_ids:
+            raise ProgramError(f"{label}.concept_id must be one of its member_node_ids")
+        if concept["concept_type"] not in {"driver", "mechanism", "phenotype", "context"}:
+            raise ProgramError(
+                f"{label}.concept_type must be driver, mechanism, phenotype, or context"
+            )
+        if concept["disposition"] not in {"research", "context_only", "exclude"}:
+            raise ProgramError(
+                f"{label}.disposition must be research, context_only, or exclude"
+            )
+        if concept["disposition"] == "research" and concept["concept_type"] == "context":
+            raise ProgramError(f"{label} cannot research a context-only concept type")
+        if concept["disposition"] != "exclude":
+            key = (
+                str(concept["concept_type"]),
+                str(concept["preferred_label"]).strip().casefold(),
+            )
+            previous = retained_labels.get(key)
+            if previous:
+                raise ProgramError(
+                    f"{label} duplicates the retained type and label in {previous}; "
+                    "merge equivalent source claims or give distinct claims distinct labels"
+                )
+            retained_labels[key] = label
+        assigned.extend(member_ids)
+    if len(assigned) != len(set(assigned)) or set(assigned) != expected:
+        missing = sorted(expected - set(assigned))
+        unknown = sorted(set(assigned) - expected)
+        raise ProgramError(
+            "Pathology concepts must partition every supplied non-anchor node exactly once; "
+            f"missing={missing}, unknown={unknown}"
+        )
+    research_ids = {
+        str(concept["concept_id"])
+        for concept in concepts
+        if concept["disposition"] == "research"
+    }
+    for index, concept in enumerate(concepts):
+        related = set(map(str, concept["related_concept_ids"]))
+        if concept["disposition"] == "context_only":
+            if not related or not related <= research_ids:
+                raise ProgramError(
+                    f"concepts[{index}].related_concept_ids must contain only retained research concepts"
+                )
+        elif related:
+            raise ProgramError(
+                f"concepts[{index}].related_concept_ids must be empty unless context_only"
+            )
+    forbidden = _forbidden_pathology_paths(records)
+    if forbidden:
+        raise ProgramError(f"Treatment fields are forbidden in pathology curation: {forbidden}")
 
 
 def _validate_pathology_item(
@@ -1303,8 +1574,10 @@ def _validate_pathology_item(
     assertions = _contract_rows(records, "assertions", "assertion_id")
     if len(profiles) != 1 or str(profiles[0]["node_id"]) != item_id:
         raise ProgramError("pathology node research must return exactly one profile for item_id")
-    source_nodes = _rows(results["pathology_sources"]["records"], "source_nodes")
+    source_nodes, _ = _canonical_source_records(results)
     node = _find(source_nodes, "node_id", item_id)
+    if node.get("disposition") != "research":
+        raise ProgramError("pathology node research item must be a curated research concept")
     if profiles[0]["node_type"] != node["node_type"]:
         raise ProgramError("profile.node_type must match the source-derived node")
     profile = profiles[0]
@@ -1330,7 +1603,7 @@ def _validate_pathology_item(
             label,
         )
         if str(row["subject_id"]) not in node_ids or str(row["object_id"]) not in node_ids:
-            raise ProgramError(f"{label} refers to an unknown source-derived node")
+            raise ProgramError(f"{label} refers to an unknown curated pathology concept")
         _references(row, "source_ids", source_ids, label)
     forbidden = _forbidden_pathology_paths(records)
     if forbidden:
@@ -1344,8 +1617,8 @@ def _validate_seed_item(
     candidates = _contract_rows(records, "candidates", "candidate_id")
     _contract_rows(records, "exclusions")
     graph = results["evidence_graph"]["records"]
-    cluster = _find(_clusters(results), "cluster_id", item_id)
-    cluster_node_ids = set(map(str, cluster["member_node_ids"]))
+    concept = _find(_research_concepts(results), "concept_id", item_id)
+    concept_node_ids = {str(concept["concept_id"])}
     node_ids = _ids(_rows(graph, "source_nodes"), "node_id", "source_nodes")
     pathology_source_ids = _ids(_rows(graph, "documents"), "document_id", "documents")
     new_mechanism_source_ids = {str(row["document_id"]) for row in documents}
@@ -1384,8 +1657,8 @@ def _validate_seed_item(
         if _identity_anchor_state(str(row["candidate_id"]), normalized_identity) is False:
             raise ProgramError(f"{label}.identity conflicts with candidate_id")
         graph_refs = _references(row, "graph_node_ids", node_ids, label)
-        if not graph_refs <= cluster_node_ids:
-            raise ProgramError(f"{label}.graph_node_ids contains nodes outside the item cluster")
+        if not graph_refs <= concept_node_ids:
+            raise ProgramError(f"{label}.graph_node_ids contains nodes outside the item concept")
         _references(row, "pathology_source_ids", pathology_source_ids, label)
         mechanism_refs = _references(row, "mechanism_source_ids", mechanism_source_ids, label)
         if not mechanism_refs & new_mechanism_source_ids:
@@ -1412,7 +1685,7 @@ def _validate_review_item(
 ) -> None:
     documents = _validate_documents(records, canonical_ids=True)
     reviews = _contract_rows(records, "reviews", "candidate_id")
-    batch = _find(_review_batches(results), "cluster_id", item_id)
+    batch = _find(_review_batches(results), "concept_id", item_id)
     expected_ids = set(map(str, batch["candidate_ids"]))
     review_ids = {str(row["candidate_id"]) for row in reviews}
     if review_ids != expected_ids:
@@ -1498,6 +1771,7 @@ def _validate_result(
     if secrets:
         raise ProgramError(f"Credentials must never be persisted in results: {secrets}")
     validators = {
+        "pathology_curation": lambda: _validate_curation(result["records"], prior),
         "pathology_node_research": lambda: _validate_pathology_item(
             result["records"], str(item_id), prior
         ),
@@ -1643,8 +1917,8 @@ def _provenance_rows(
                 ),
                 "pathology_source_ids": sorted(map(str, candidate["pathology_source_ids"])),
                 "mechanism_source_ids": sorted(map(str, candidate["mechanism_source_ids"])),
-                "origin_cluster_ids": sorted(
-                    map(str, candidate.get("origin_cluster_ids", []))
+                "origin_concept_ids": sorted(
+                    map(str, candidate.get("origin_concept_ids", []))
                 ),
             }
         )
@@ -1672,6 +1946,7 @@ def _write_output_files(
             "snapshot_id": results["evidence_graph"]["snapshot_id"],
             "nodes": _rows(graph, "source_nodes"),
             "source_edges": _rows(graph, "source_edges"),
+            "disease_context": _rows(graph, "disease_context"),
             "profiles": _rows(graph, "profiles"),
             "assertions": assertions,
         },

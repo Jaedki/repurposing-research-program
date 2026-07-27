@@ -34,11 +34,11 @@ Install the pinned runtime dependencies once with `python -m pip install -r requ
 4. Repeat `next -> new agent -> submit` in the visible controller chat. Do not replace this loop with a persistent or background supervisor. The controller progresses through:
 
    - pathology-only Monarch and DisMech ingestion;
-   - one deep pathology-research packet per selected node;
+   - one constrained curation packet that partitions every non-anchor source node into run-local research, context-only, or excluded concepts;
+   - one deep pathology-research packet per curated research concept;
    - a frozen, content-addressed living evidence graph;
-   - deterministic clustering of every non-anchor pathology profile;
-   - one mechanism-directed candidate-seed packet per pathology cluster;
-   - one evidence-review packet per pathology cluster after canonical candidate deduplication;
+   - one mechanism-directed candidate-seed packet per researched pathology concept;
+   - one evidence-review packet per pathology concept after canonical candidate deduplication;
    - independent audit and deterministic ranking.
 
 5. When status is `ready_to_build`, run:
@@ -52,9 +52,9 @@ Use `status` at any time. Resume means calling `next`; accepted results are immu
 ## Hard boundaries
 
 - Pathology construction is treatment-blind. Pathology packets must not contain drug, compound, treatment, therapeutic, or candidate fields.
-- Candidate generation starts only after every pathology-node result is accepted, Python freezes the graph snapshot, and deterministic clustering is complete.
+- Candidate generation starts only after curation and every required pathology-concept result are accepted and Python freezes the graph snapshot.
 - Candidate eligibility follows `pathology element -> desired biological change -> established drug mode of action`. Direct disease-drug literature is optional.
-- Monarch associations are pathology-category allowlisted. DisMech treatment content is excluded before packet construction.
+- Monarch associations are pathology-category allowlisted. DisMech treatment-oriented sections and fields are excluded and remaining free text is treatment-redacted before packet construction.
 - Workers create research content only. Python controls source receipts, task order, item cursors, packet lineage, validation, persistence, candidate aggregation, ranking order, and outputs.
 
 ## Evidence safeguards

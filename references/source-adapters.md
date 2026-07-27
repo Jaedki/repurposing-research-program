@@ -2,6 +2,8 @@
 
 Source ingestion runs as the first deterministic controller barrier. Responses are cached immutably under `<run>/sources/raw/`; packets receive normalized pathology records and receipts, not credentials.
 
+Normalized non-anchor nodes remain source records until the curation barrier assigns each one exactly once to a run-local research, context-only, or excluded concept. Source adapters do not perform fuzzy semantic merging or research-value pruning.
+
 ## Monarch Initiative
 
 The adapter resolves the case to an exact MONDO entity, preferably from `--mondo`. It exhausts the v3 association endpoint with an explicit pathology allowlist:
@@ -17,7 +19,15 @@ It rejects any chemical, drug, treatment, or therapeutic category even if the up
 
 DisMech's documented source of truth is its repository YAML. The adapter pins the default branch commit, resolves the MONDO ID through `exports/mondo_emc.tsv`, fetches the matching disorder YAML, and parses it with PyYAML.
 
-Only pathology sections are exposed: disease description and mappings, inheritance, progression, mechanistic hypotheses, pathophysiology, phenotypes, biochemical findings, genetics, environmental factors, and evidence references. Treatment and clinical-trial sections and nested drug/compound/therapeutic fields are excluded before packet construction.
+Every top-level DisMech section is accounted for. Sections that can express distinct pathology concepts are normalized as source nodes:
+
+- `mechanistic_hypotheses`, `pathophysiology`, `biochemical`, and infectious-agent life-cycle or transmission mechanisms become `mechanism` nodes;
+- `phenotypes`, `histopathology`, and `imaging_findings` become `phenotype` nodes;
+- `genetic`, `variants`, `environmental`, and `infectious_agent` become `driver` nodes.
+
+All remaining pathology-safe sections are retained once in `disease_context` rather than expanded into low-value nodes. This includes disease description, classifications, mappings, inheritance, progression, stages, subtypes, prevalence, epidemiology, datasets, models, diagnostic context, discussions, and other source metadata. Curation receives the complete context; repeated research packets receive only compact disease-defining context.
+
+Treatment, clinical-trial, intervention, regimen, surrogate-endpoint, and related sections or nested fields are excluded. Named interventions from excluded sections are used only as an internal redaction lexicon and are never emitted. Remaining free text is split into sentences and any sentence containing treatment language or a named intervention is removed before source records or packets are written. Raw YAML remains cached unchanged for provenance.
 
 If no MONDO-mapped DisMech entry exists, the adapter records an explicit gap and continues with Monarch rather than treating source coverage as programme failure.
 

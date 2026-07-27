@@ -19,7 +19,7 @@ from urllib.request import Request, urlopen
 MONARCH_API = "https://api.monarchinitiative.org/v3/api"
 DISMECH_REPO_API = "https://api.github.com/repos/monarch-initiative/dismech"
 DISMECH_RAW = "https://raw.githubusercontent.com/monarch-initiative/dismech"
-USER_AGENT = "repurposing-research-program/2"
+USER_AGENT = "repurposing-research-program/3"
 
 MONARCH_PATHOLOGY_CATEGORIES = (
     "biolink:DiseaseToPhenotypicFeatureAssociation",
@@ -30,34 +30,46 @@ MONARCH_PATHOLOGY_CATEGORIES = (
     "biolink:DiseaseOrPhenotypicFeatureToLocationAssociation",
 )
 
-DISMECH_ALLOWED_SECTIONS = (
-    "name",
-    "description",
-    "category",
-    "parents",
-    "mappings",
-    "definitions",
-    "inheritance",
-    "progression",
-    "mechanistic_hypotheses",
-    "pathophysiology",
-    "phenotypes",
-    "biochemical",
-    "genetic",
-    "environmental",
-    "disease_term",
-    "references",
-)
-
 DISMECH_NODE_TYPES = {
-    "pathophysiology": "molecular_process",
+    "mechanistic_hypotheses": "mechanism",
+    "pathophysiology": "mechanism",
     "phenotypes": "phenotype",
-    "biochemical": "biochemical_state",
-    "genetic": "genetic_driver",
-    "environmental": "environmental_driver",
+    "histopathology": "phenotype",
+    "imaging_findings": "phenotype",
+    "biochemical": "mechanism",
+    "genetic": "driver",
+    "variants": "driver",
+    "environmental": "driver",
+    "infectious_agent": "driver",
+    "agent_life_cycle": "mechanism",
+    "transmission": "mechanism",
 }
 
-_BLOCKED_KEY_PARTS = ("treatment", "therapeutic", "drug", "compound", "clinical_trial")
+_BLOCKED_KEY_PARTS = (
+    "treatment",
+    "therapeutic",
+    "drug",
+    "compound",
+    "clinical_benefit",
+    "clinical_trial",
+    "dose",
+    "efficacy",
+    "intervention",
+    "medication",
+    "pharmacotherapy",
+    "regimen",
+    "approval",
+    "surrogate_endpoint",
+    "medical_action",
+)
+_TREATMENT_TEXT = re.compile(
+    r"\b(?:treat(?:ment|ed|ing)?|therap(?:y|ies|eutic(?:s|ally)?)|drugs?|"
+    r"medicat(?:ion|ions)|pharmacolog(?:y|ic|ical|ically)|clinical\s+trials?|"
+    r"trials?|interventions?|repurpos(?:e|ed|ing)|antisense\s+oligonucleotides?|"
+    r"asos?|efficacy|clinical\s+benefit|approv(?:e|ed|al)|discontinued|placebo|"
+    r"randomi[sz]ed|dosing|phase\s*(?:i{1,3}|iv|[1-4]))\b",
+    re.IGNORECASE,
+)
 _MONDO = re.compile(r"^MONDO:\d+$", re.IGNORECASE)
 
 
@@ -77,6 +89,10 @@ def _sha256(payload: bytes) -> str:
 
 def _stable_id(prefix: str, value: Any) -> str:
     return f"{prefix}-{_sha256(_canonical_bytes(value))[:24]}"
+
+
+def _raw_cache_path(path: Path) -> str:
+    return (Path("sources") / "raw" / path.name).as_posix()
 
 
 def _write_once(path: Path, payload: bytes) -> None:
@@ -344,7 +360,8 @@ def _monarch(
         },
         "record_count": len(edges),
         "raw_files": [
-            {"path": str(path), "sha256": _sha256(path.read_bytes())} for path in raw_files
+            {"path": _raw_cache_path(path), "sha256": _sha256(path.read_bytes())}
+            for path in raw_files
         ],
     }
     return entity, list(documents.values()), list(nodes.values()), edges, receipt
@@ -355,15 +372,80 @@ def _blocked_key(key: Any) -> bool:
     return any(part in normalized for part in _BLOCKED_KEY_PARTS)
 
 
-def _pathology_only(value: Any) -> Any:
+def _treatment_names(value: Any) -> set[str]:
+    names: set[str] = set()
+    records = value if isinstance(value, list) else [value]
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        for key in ("name", "generic_name", "intervention_name"):
+            name = record.get(key)
+            if isinstance(name, str) and len(name.strip()) >= 4:
+                names.add(name.strip())
+        treatment_term = record.get("treatment_term")
+        if not isinstance(treatment_term, dict):
+            continue
+        agents = treatment_term.get("therapeutic_agent", [])
+        agents = agents if isinstance(agents, list) else [agents]
+        for agent in agents:
+            if isinstance(agent, str):
+                name = agent
+            elif isinstance(agent, dict):
+                term = agent.get("term")
+                name = agent.get("preferred_term") or (
+                    term.get("label") if isinstance(term, dict) else None
+                )
+            else:
+                continue
+            if isinstance(name, str) and len(name.strip()) >= 4:
+                names.add(name.strip())
+    return names
+
+
+def _treatment_terms(value: Any) -> set[str]:
+    terms: set[str] = set()
     if isinstance(value, dict):
-        return {
-            key: _pathology_only(item)
-            for key, item in value.items()
-            if not _blocked_key(key)
-        }
+        for key, item in value.items():
+            if _blocked_key(key):
+                terms.update(_treatment_names(item))
+            terms.update(_treatment_terms(item))
+    elif isinstance(value, list):
+        for item in value:
+            terms.update(_treatment_terms(item))
+    return terms
+
+
+def _treatment_text(value: str, treatment_terms: set[str]) -> bool:
+    folded = value.casefold()
+    return bool(_TREATMENT_TEXT.search(value)) or any(
+        term.casefold() in folded for term in treatment_terms
+    )
+
+
+def _sanitize_text(value: str, treatment_terms: set[str]) -> str:
+    parts = re.split(r"(?<=[.!?])\s+|[\r\n]+", value)
+    return " ".join(
+        part.strip()
+        for part in parts
+        if part.strip() and not _treatment_text(part, treatment_terms)
+    )
+
+
+def _pathology_only(value: Any, treatment_terms: set[str]) -> Any:
+    if isinstance(value, dict):
+        output: dict[str, Any] = {}
+        for key, item in value.items():
+            if _blocked_key(key):
+                continue
+            sanitized = _pathology_only(item, treatment_terms)
+            if sanitized not in (None, "", [], {}):
+                output[str(key)] = sanitized
+        return output
     if isinstance(value, list):
-        return [_pathology_only(item) for item in value]
+        output = [_pathology_only(item, treatment_terms) for item in value]
+        return [item for item in output if item not in (None, "", [], {})]
+    if isinstance(value, str):
+        return _sanitize_text(value, treatment_terms)
     return value
 
 
@@ -375,6 +457,7 @@ def _evidence_items(value: Any) -> list[dict[str, Any]]:
             found.append(
                 {
                     "reference": reference.strip(),
+                    "reference_title": value.get("reference_title"),
                     "snippet": value.get("snippet"),
                     "supports": value.get("supports"),
                     "explanation": value.get("explanation"),
@@ -389,9 +472,200 @@ def _evidence_items(value: Any) -> list[dict[str, Any]]:
     return found
 
 
+def _section_items(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [item if isinstance(item, dict) else {"value": item} for item in value]
+    if isinstance(value, dict):
+        return [value]
+    return [{"value": value}]
+
+
+def _preferred_label(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("preferred_term", "label", "name"):
+            label = _preferred_label(value.get(key))
+            if label:
+                return label
+        return _preferred_label(value.get("term"))
+    return ""
+
+
+def _node_label(section: str, item: dict[str, Any], index: int) -> str:
+    for key in (
+        "hypothesis_label",
+        "name",
+        "label",
+        "gene",
+        "variant",
+        "phenotype_term",
+        "finding_term",
+        "infectious_agent_term",
+    ):
+        label = _preferred_label(item.get(key))
+        if label:
+            return label
+    return f"{section.replace('_', ' ').title()} {index + 1}"
+
+
+def _evidence_documents(
+    documents: dict[str, dict[str, Any]], value: Any
+) -> list[str]:
+    source_ids: list[str] = []
+    for evidence_item in _evidence_items(value):
+        reference = str(evidence_item["reference"])
+        document_id = reference if ":" in reference else _stable_id("DISMECH-REF", reference)
+        source_ids.append(document_id)
+        _add_document(
+            documents,
+            {
+                "document_id": document_id,
+                "title": str(evidence_item.get("reference_title") or reference),
+                "source": "DisMech evidence",
+                "citation": reference,
+                "snippets": [evidence_item["snippet"]]
+                if evidence_item.get("snippet")
+                else [],
+                "supports": [evidence_item["supports"]]
+                if evidence_item.get("supports")
+                else [],
+            },
+        )
+    return sorted(set(source_ids))
+
+
+def _treatment_text_paths(
+    value: Any, treatment_terms: set[str], path: str = "$"
+) -> list[str]:
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            found.extend(_treatment_text_paths(item, treatment_terms, f"{path}.{key}"))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            found.extend(_treatment_text_paths(item, treatment_terms, f"{path}[{index}]"))
+    elif isinstance(value, str) and _treatment_text(value, treatment_terms):
+        found.append(path)
+    return found
+
+
+def _normalize_dismech_sections(
+    sanitized: dict[str, Any], mondo_id: str, file_document_id: str
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[str],
+]:
+    documents: dict[str, dict[str, Any]] = {}
+    nodes: dict[str, dict[str, Any]] = {}
+    contexts: list[dict[str, Any]] = []
+    name_index: dict[str, set[str]] = {}
+    node_payloads: list[tuple[str, str, dict[str, Any]]] = []
+    gaps: list[str] = []
+
+    for section, node_type in DISMECH_NODE_TYPES.items():
+        if section not in sanitized:
+            continue
+        for index, item in enumerate(_section_items(sanitized[section])):
+            label = _node_label(section, item, index)
+            node_id = _stable_id(
+                "DISMECH-NODE",
+                {"mondo_id": mondo_id, "section": section, "label": label},
+            )
+            source_ids = _evidence_documents(documents, item) or [file_document_id]
+            _add_node(
+                nodes,
+                {
+                    "node_id": node_id,
+                    "label": label,
+                    "node_type": node_type,
+                    "description": str(item.get("description") or ""),
+                    "source_ids": source_ids,
+                    "source_payloads": [item],
+                    "source_section": section,
+                },
+            )
+            node_payloads.append((node_id, label, item))
+            name_index.setdefault(label.casefold(), set()).add(node_id)
+
+    for section, value in sanitized.items():
+        if section in DISMECH_NODE_TYPES:
+            continue
+        source_ids = _evidence_documents(documents, value) or [file_document_id]
+        contexts.append(
+            {
+                "context_id": _stable_id(
+                    "DISMECH-CONTEXT", {"mondo_id": mondo_id, "section": section}
+                ),
+                "section": section,
+                "value": value,
+                "source_ids": source_ids,
+            }
+        )
+
+    edges: list[dict[str, Any]] = []
+    for node_id, label, payload in node_payloads:
+        for edge_field, relation in (
+            ("downstream", "causes_or_contributes_to"),
+            ("sequelae", "leads_to"),
+        ):
+            values = payload.get(edge_field, [])
+            if not isinstance(values, list):
+                continue
+            for index, value in enumerate(values):
+                edge = value if isinstance(value, dict) else {"target": value}
+                target = str(edge.get("target") or "").strip()
+                targets = sorted(name_index.get(target.casefold(), set()))
+                if len(targets) != 1:
+                    gaps.append(
+                        f"DisMech edge target could not be resolved uniquely: {label} -> {target}"
+                    )
+                    continue
+                source_ids = _evidence_documents(documents, edge) or list(
+                    nodes[node_id]["source_ids"]
+                )
+                edges.append(
+                    {
+                        "edge_id": _stable_id(
+                            "DISMECH-EDGE",
+                            {
+                                "subject": node_id,
+                                "relation": relation,
+                                "target": targets[0],
+                                "index": index,
+                            },
+                        ),
+                        "subject_id": node_id,
+                        "relation": relation,
+                        "object_id": targets[0],
+                        "evidence_summary": str(edge.get("description") or relation),
+                        "source_ids": source_ids,
+                        "confidence": str(edge.get("causal_link_type") or "curated"),
+                    }
+                )
+
+    return (
+        list(documents.values()),
+        list(nodes.values()),
+        edges,
+        contexts,
+        gaps,
+    )
+
+
 def _dismech(
     cache: Path, mondo_id: str
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None, list[str]]:
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    dict[str, Any] | None,
+    list[str],
+]:
     gaps: list[str] = []
     commit = _fetch_json(
         f"{DISMECH_REPO_API}/commits/main", cache / "dismech_commit.json"
@@ -405,13 +679,13 @@ def _dismech(
     match = next((row for row in reader if row.get("mondo_id") == mondo_id), None)
     if match is None:
         gaps.append(f"DisMech has no MONDO-mapped disorder entry for {mondo_id}")
-        return [], [], [], None, gaps
+        return [], [], [], [], None, gaps
 
     page = str(match.get("dismech_url", ""))
     slug = Path(urlparse(page).path).stem
     if not slug:
         gaps.append(f"DisMech mapping for {mondo_id} has no usable disorder path")
-        return [], [], [], None, gaps
+        return [], [], [], [], None, gaps
     yaml_url = f"{DISMECH_RAW}/{commit_sha}/kb/disorders/{quote(slug)}.yaml"
     yaml_payload = _fetch(yaml_url, cache / f"dismech_{slug}.yaml")
     try:
@@ -424,9 +698,8 @@ def _dismech(
         raise SourceError(f"DisMech YAML could not be parsed for {mondo_id}: {exc}") from exc
     if not isinstance(raw, dict):
         raise SourceError(f"DisMech disorder record is not an object for {mondo_id}")
-    sanitized = _pathology_only(
-        {key: raw[key] for key in DISMECH_ALLOWED_SECTIONS if key in raw}
-    )
+    treatment_terms = _treatment_terms(raw)
+    sanitized = _pathology_only(raw, treatment_terms)
 
     documents: dict[str, dict[str, Any]] = {}
     file_document_id = _stable_id("DISMECH-FILE", {"commit": commit_sha, "slug": slug})
@@ -438,97 +711,26 @@ def _dismech(
             "source": "DisMech",
             "citation": f"monarch-initiative/dismech@{commit_sha}:{slug}",
             "url": page,
-            "raw_path": str(cache / f"dismech_{slug}.yaml"),
+            "raw_path": _raw_cache_path(cache / f"dismech_{slug}.yaml"),
         },
     )
-
-    nodes: list[dict[str, Any]] = []
-    name_index: dict[str, list[str]] = {}
-    node_payloads: dict[str, dict[str, Any]] = {}
-    for section, node_type in DISMECH_NODE_TYPES.items():
-        values = sanitized.get(section, [])
-        if not isinstance(values, list):
-            continue
-        for index, item in enumerate(values):
-            if not isinstance(item, dict):
-                continue
-            label = str(item.get("name") or item.get("label") or f"{section} {index + 1}")
-            node_id = _stable_id(
-                "DISMECH-NODE", {"mondo_id": mondo_id, "section": section, "label": label}
-            )
-            evidence = _evidence_items(item)
-            source_ids: list[str] = []
-            for evidence_item in evidence:
-                reference = str(evidence_item["reference"])
-                document_id = reference if ":" in reference else _stable_id("DISMECH-REF", reference)
-                source_ids.append(document_id)
-                _add_document(
-                    documents,
-                    {
-                        "document_id": document_id,
-                        "title": reference,
-                        "source": "DisMech evidence",
-                        "citation": reference,
-                        "snippets": [evidence_item["snippet"]]
-                        if evidence_item.get("snippet")
-                        else [],
-                        "supports": [evidence_item["supports"]]
-                        if evidence_item.get("supports")
-                        else [],
-                    },
-                )
-            if not source_ids:
-                source_ids = [file_document_id]
-            payload = dict(item)
-            node_payloads[node_id] = payload
-            nodes.append(
-                {
-                    "node_id": node_id,
-                    "label": label,
-                    "node_type": node_type,
-                    "description": str(item.get("description") or ""),
-                    "source_ids": sorted(set(source_ids)),
-                    "source_payloads": [payload],
-                    "source_section": section,
-                }
-            )
-            name_index.setdefault(label.casefold(), []).append(node_id)
-
-    edges: list[dict[str, Any]] = []
-    for node in nodes:
-        payload = node_payloads[node["node_id"]]
-        for edge_field, relation in (("downstream", "causes_or_contributes_to"), ("sequelae", "leads_to")):
-            values = payload.get(edge_field, [])
-            if not isinstance(values, list):
-                continue
-            for index, value in enumerate(values):
-                edge = value if isinstance(value, dict) else {"target": value}
-                target = str(edge.get("target") or "").strip()
-                targets = name_index.get(target.casefold(), [])
-                if len(targets) != 1:
-                    gaps.append(
-                        f"DisMech edge target could not be resolved uniquely: {node['label']} -> {target}"
-                    )
-                    continue
-                edge_evidence = _evidence_items(edge)
-                source_ids = [
-                    str(item["reference"]) if ":" in str(item["reference"]) else _stable_id("DISMECH-REF", item["reference"])
-                    for item in edge_evidence
-                ] or list(node["source_ids"])
-                edges.append(
-                    {
-                        "edge_id": _stable_id(
-                            "DISMECH-EDGE",
-                            {"subject": node["node_id"], "relation": relation, "target": targets[0], "index": index},
-                        ),
-                        "subject_id": node["node_id"],
-                        "relation": relation,
-                        "object_id": targets[0],
-                        "evidence_summary": str(edge.get("description") or relation),
-                        "source_ids": sorted(set(source_ids)),
-                        "confidence": str(edge.get("causal_link_type") or "curated"),
-                    }
-                )
+    section_documents, nodes, edges, contexts, section_gaps = _normalize_dismech_sections(
+        sanitized, mondo_id, file_document_id
+    )
+    for row in section_documents:
+        _add_document(documents, row)
+    gaps.extend(section_gaps)
+    leaked = _treatment_text_paths(
+        {
+            "documents": list(documents.values()),
+            "source_nodes": nodes,
+            "source_edges": edges,
+            "disease_context": contexts,
+        },
+        treatment_terms,
+    )
+    if leaked:
+        raise SourceError(f"Treatment content survived DisMech normalization: {leaked[:10]}")
 
     raw_files = [cache / "dismech_mondo_emc.tsv", cache / f"dismech_{slug}.yaml"]
     receipt = {
@@ -538,12 +740,16 @@ def _dismech(
         "record_count": len(nodes),
         "url": page,
         "raw_files": [
-            {"path": str(path), "sha256": _sha256(path.read_bytes())} for path in raw_files
+            {"path": _raw_cache_path(path), "sha256": _sha256(path.read_bytes())}
+            for path in raw_files
         ],
-        "pathology_sections": list(DISMECH_ALLOWED_SECTIONS),
-        "excluded_sections": ["treatments"],
+        "pathology_sections": sorted(sanitized),
+        "node_sections": sorted(section for section in DISMECH_NODE_TYPES if section in sanitized),
+        "context_sections": sorted(section for section in sanitized if section not in DISMECH_NODE_TYPES),
+        "excluded_sections": sorted(str(key) for key in raw if _blocked_key(key)),
+        "context_count": len(contexts),
     }
-    return list(documents.values()), nodes, edges, receipt, gaps
+    return list(documents.values()), nodes, edges, contexts, receipt, gaps
 
 
 def fetch_pathology_sources(
@@ -557,9 +763,14 @@ def fetch_pathology_sources(
         cache, disease, mondo_hint
     )
     mondo_id = str(entity["id"])
-    dismech_docs, dismech_nodes, dismech_edges, dismech_receipt, gaps = _dismech(
-        cache, mondo_id
-    )
+    (
+        dismech_docs,
+        dismech_nodes,
+        dismech_edges,
+        dismech_context,
+        dismech_receipt,
+        gaps,
+    ) = _dismech(cache, mondo_id)
 
     documents: dict[str, dict[str, Any]] = {}
     for row in [*monarch_docs, *dismech_docs]:
@@ -578,6 +789,9 @@ def fetch_pathology_sources(
             [*monarch_edges, *dismech_edges], key=lambda row: str(row["edge_id"])
         ),
         "source_receipts": receipts,
+        "disease_context": sorted(
+            dismech_context, key=lambda row: str(row["context_id"])
+        ),
     }
     return {
         "stage": "pathology_sources",
@@ -591,7 +805,7 @@ def fetch_pathology_sources(
         "records": records,
         "gaps": gaps,
         "notes": [
-            "Treatment, therapeutic, drug, compound, and clinical-trial fields were excluded before packet construction."
+            "Treatment-oriented sections and fields were excluded, and remaining DisMech text was treatment-redacted before packet construction."
         ],
     }
 
