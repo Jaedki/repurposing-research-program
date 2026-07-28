@@ -59,11 +59,16 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "Merge true duplicate records into the retained concept so all evidence survives. "
             "Retain original labels as aliases and assign every non-anchor source node exactly "
             "once. Use supplied disease_context to interpret nodes, but do not create concepts "
-            "from administrative metadata alone. Mark a concept research when it is distinct "
-            "causal or modifiable biology, or "
-            "a specific phenotype that supplies a discriminating rescue readout; mark supporting "
-            "anatomy, inheritance, progression, model-system, or broad descriptive material "
-            "context_only and attach it to relevant research concepts; exclude only malformed or "
+            "from administrative metadata alone. After resolving identity, assign disposition "
+            "independently. A valid, unique claim is research only when supplied evidence "
+            "establishes distinct causal or modifiable pathology, or a major phenotype defining a "
+            "distinct intervention objective. Subordinate symptoms, clinical signs, severity "
+            "descriptors, and measurement endpoints are context_only even when measurable; attach "
+            "them to the relevant research concept. A bare entity or observational readout is also "
+            "supporting context unless its abnormal state satisfies this research test. Otherwise "
+            "retain relevant supporting claims "
+            "context_only and attach them to relevant research concepts; uncertainty never "
+            "upgrades a claim to research. Exclude only malformed or "
             "irrelevant records, generic ontology noise, and self-referential disease concepts. "
             "When uncertain, keep concepts separate. Do not introduce or discuss drugs or treatments."
         ),
@@ -82,11 +87,14 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
     "candidate_seed_research": {
         "role": "mechanism-directed candidate seed researcher",
         "task": (
-            "For this frozen researched pathology concept, define a biological change that could "
-            "move its pathological state toward normal, then generate a focused set of diverse "
+            "For this frozen researched pathology concept and its linked context, define a "
+            "biological change that could move its pathological state toward normal, then generate "
+            "a focused set of diverse "
             "existing-drug seeds whose established mode of action could cause those changes. Do not pad the "
-            "list. A drug need not have any prior literature association with the disease; cite "
-            "pathology evidence and mode-of-action evidence separately."
+            "list. Consider both disease-modifying changes to the assigned concept and symptomatic "
+            "or compensatory benefit for linked context nodes where mechanistically plausible. A "
+            "drug need not have any prior literature association with the disease; cite pathology "
+            "evidence and mode-of-action evidence separately."
         ),
         "collections": ["documents", "candidates", "exclusions"],
     },

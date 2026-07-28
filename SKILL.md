@@ -69,4 +69,4 @@ Use `status` at any time. Resume means calling `next`; accepted results are immu
 
 Read [architecture.md](references/architecture.md) for ownership, [packet-contract.md](references/packet-contract.md) for worker results, and [source-adapters.md](references/source-adapters.md) before changing source ingestion.
 
-At handoff report the status, retained source count, pathology profile and assertion counts, raw and deduplicated candidate counts, material gaps, and the experimental-use policy.
+At handoff report `source_edges` as source edges and researched `assertions` as assertions; never use either term for the other. Before pathology-node research, the assertion count is zero. Also report the status, retained source count, pathology profile count, raw and deduplicated candidate counts, material gaps, and the experimental-use policy.

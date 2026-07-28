@@ -27,7 +27,7 @@ Every top-level DisMech section is accounted for. Sections that can express dist
 
 All remaining pathology-safe sections are retained once in `disease_context` rather than expanded into low-value nodes. This includes disease description, classifications, mappings, inheritance, progression, stages, subtypes, prevalence, epidemiology, datasets, models, diagnostic context, discussions, and other source metadata. Curation receives the complete context; repeated research packets receive only compact disease-defining context.
 
-Treatment, clinical-trial, intervention, regimen, surrogate-endpoint, and related sections or nested fields are excluded. Named interventions from excluded sections are used only as an internal redaction lexicon and are never emitted. Remaining free text is split into sentences and any sentence containing treatment language or a named intervention is removed before source records or packets are written. Raw YAML remains cached unchanged for provenance.
+Treatment, clinical-trial, intervention, regimen, surrogate-endpoint, and related sections or nested fields are excluded. Explicit intervention names and their bounded acronyms are used only as an internal redaction lexicon and are never emitted. Remaining free text is split into sentences and any sentence containing treatment language or a named intervention is removed before source records or packets are written. Raw YAML remains cached unchanged for provenance.
 
 If no MONDO-mapped DisMech entry exists, the adapter records an explicit gap and continues with Monarch rather than treating source coverage as programme failure.
 

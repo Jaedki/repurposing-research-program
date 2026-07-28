@@ -66,6 +66,7 @@ _TREATMENT_TEXT = re.compile(
     r"\b(?:treat(?:ment|ed|ing)?|therap(?:y|ies|eutic(?:s|ally)?)|drugs?|"
     r"medicat(?:ion|ions)|pharmacolog(?:y|ic|ical|ically)|clinical\s+trials?|"
     r"trials?|interventions?|repurpos(?:e|ed|ing)|antisense\s+oligonucleotides?|"
+    r"transplant(?:s|ed|ing|ations?)?|"
     r"asos?|efficacy|clinical\s+benefit|approv(?:e|ed|al)|discontinued|placebo|"
     r"randomi[sz]ed|dosing|phase\s*(?:i{1,3}|iv|[1-4]))\b",
     re.IGNORECASE,
@@ -407,7 +408,17 @@ def _treatment_terms(value: Any) -> set[str]:
     if isinstance(value, dict):
         for key, item in value.items():
             if _blocked_key(key):
-                terms.update(_treatment_names(item))
+                names = _treatment_names(item)
+                terms.update(names)
+                for name in names:
+                    words = re.findall(r"[A-Za-z]+", name)
+                    acronym = "".join(
+                        word[0]
+                        for word in words
+                        if word.casefold() not in {"a", "an", "and", "for", "of", "or", "the", "to", "with"}
+                    ).upper()
+                    if 3 <= len(acronym) <= 10:
+                        terms.add(acronym)
             terms.update(_treatment_terms(item))
     elif isinstance(value, list):
         for item in value:
@@ -416,9 +427,9 @@ def _treatment_terms(value: Any) -> set[str]:
 
 
 def _treatment_text(value: str, treatment_terms: set[str]) -> bool:
-    folded = value.casefold()
     return bool(_TREATMENT_TEXT.search(value)) or any(
-        term.casefold() in folded for term in treatment_terms
+        re.search(rf"(?<!\w){re.escape(term)}(?!\w)", value, re.IGNORECASE)
+        for term in treatment_terms
     )
 
 

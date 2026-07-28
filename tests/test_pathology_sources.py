@@ -120,6 +120,24 @@ class DisMechNormalizationTest(unittest.TestCase):
         )
         self.assertEqual(sanitized["genetic"][0]["name"], "SOD1 Mutations")
 
+    def test_explicit_intervention_name_supplies_a_bounded_acronym_alias(self):
+        raw = {
+            "description": (
+                "Axonal injury progresses. Early HSCT altered outcomes. "
+                "Outcomes following transplantation improved."
+            ),
+            "treatments": [{"name": "Hematopoietic stem cell transplantation"}],
+        }
+
+        terms = sources._treatment_terms(raw)
+        sanitized = sources._pathology_only(raw, terms)
+
+        self.assertEqual(
+            terms, {"Hematopoietic stem cell transplantation", "HSCT"}
+        )
+        self.assertEqual(sanitized["description"], "Axonal injury progresses.")
+        self.assertFalse(sources._treatment_text("Inert aggregates persist.", {"ERT"}))
+
 
 class ALSRegressionTest(unittest.TestCase):
     run_root = (

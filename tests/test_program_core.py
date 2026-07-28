@@ -293,6 +293,14 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("do not establish equivalence", guidance)
         self.assertIn("same-label gene-level", guidance)
         self.assertIn("Merge true duplicate records", guidance)
+        self.assertIn("assign disposition independently", guidance)
+        self.assertIn("major phenotype defining a distinct intervention objective", guidance)
+        self.assertIn("context_only even when measurable", guidance)
+        self.assertIn("bare entity or observational readout", guidance)
+        self.assertIn("uncertainty never upgrades", guidance)
+        seed_guidance = core.STAGE_GUIDANCE["candidate_seed_research"]["task"]
+        self.assertIn("symptomatic or compensatory benefit", seed_guidance)
+        self.assertIn("linked context nodes", seed_guidance)
 
     def test_curation_requires_an_exact_partition(self):
         records = {
