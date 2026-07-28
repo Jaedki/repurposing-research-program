@@ -7,11 +7,12 @@
 | `pathology_sources` | Python | Treatment-blind Monarch and DisMech nodes, shared disease context, receipts, versions, and raw hashes are retained |
 | `pathology_curation` | One agent | Every non-anchor source node is assigned exactly once to a run-local concept marked `research`, `context_only`, or `exclude`; context is attached to retained research concepts and uncertain equivalence remains separate |
 | `evidence_graph` | Python after item work | Every curated research concept has one accepted deep-research profile; Python projects retained concepts and source edges through the partition and freezes the graph snapshot |
-| `candidate_seed_generation` | Python after item work | Every researched pathology concept has one accepted seed result; Python merges canonical candidate IDs |
+| `candidate_seed_generation` | Python after item work | Every researched pathology concept has one accepted seed result; Python assigns immutable seed IDs and submits every supported identifier to UniChem |
+| `candidate_identity` | Python plus one bounded agent review when needed | Exact UniChem UCI groups merge automatically; every connectivity match, identifier conflict, unsupported candidate, and no-result seed is partitioned exactly once by the identity reviewer |
 | `candidate_review` | Python after item work | Every nonempty concept review batch has one accepted result covering each assigned canonical candidate exactly once |
 | `audit_and_rank` | One independent agent, then Python | Every reviewed candidate has one audit record; Python applies the final order |
 
-Within the three item barriers, `next` selects the first missing item from a stable sorted manifest. Candidate review reuses curated concept IDs as batch IDs. After deduplication, Python assigns each candidate once to a linked origin concept, breaking ties by concept ID. This is a deterministic cursor, not a general DAG, queue, scheduler, or agent-controlled handoff.
+Within the three item barriers, `next` selects the first missing item from a stable sorted manifest. Candidate identity is global and receives only the deterministic UniChem residue plus a compact index of exact resolved candidates. Candidate review reuses curated concept IDs as batch IDs. After identity resolution, Python assigns each candidate once to a linked origin concept, breaking ties by concept ID. This is a deterministic cursor, not a general DAG, queue, scheduler, or agent-controlled handoff.
 
 ## Separation of evidence
 
@@ -26,7 +27,7 @@ The chain is sufficient without a paper directly joining the drug to the disease
 
 ## Ownership
 
-Python owns order, source receipts, hashing, item cursors, immutable acceptance, curation coverage checks, cross-reference checks, treatment exclusion during pathology work, secret rejection, graph freezing, candidate aggregation, ranking order, and exports. The curation agent owns semantic equivalence and research-value judgment; research agents own research content. Sources own evidence. No worker may select the next task or declare the programme complete.
+Python owns order, source receipts, hashing, item cursors, immutable acceptance, curation coverage checks, cross-reference checks, treatment exclusion during pathology work, secret rejection, graph freezing, exact UniChem merging, candidate aggregation, ranking order, and exports. The candidate identity reviewer owns only the interpretation of UniChem-flagged or unresolved seeds. The curation agent owns pathology semantic equivalence and research-value judgment; research agents own research content. Sources own evidence. No worker may select the next task or declare the programme complete.
 
 A run is derived from `case.json`, canonical `results/*.json`, item results under `results/items/`, cached source receipts, and the final output manifest. The manifest hashes every accepted result file.
 

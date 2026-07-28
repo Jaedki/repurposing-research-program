@@ -38,3 +38,16 @@ If no MONDO-mapped DisMech entry exists, the adapter records an explicit gap and
 - Exhaust declared pagination or record a bounded gap.
 - Source traversal never means scientific completion.
 - Add source types by normalizing into the existing pathology source records; do not add workflow branches.
+
+## UniChem candidate identity
+
+Candidate identity resolution is separate from treatment-blind pathology ingestion. After every
+seed packet is accepted, the controller queries the EMBL-EBI UniChem `compounds` endpoint for
+every supported source identifier and caches each response immutably under
+`<run>/sources/raw/unichem/`. Exact UCI equality is the only automatic candidate merge.
+
+The controller also checks connectivity for every exact UCI. Connectivity-only relationships,
+partial or conflicting mappings, unsupported identifiers, and explicit no-result responses enter
+the complete identity-review queue. Operational API failure stops controller advancement and is
+never recorded as a scientific no result. Requests are deduplicated and sequential; transient
+rate-limit, server, network, and timeout failures receive two bounded retries.

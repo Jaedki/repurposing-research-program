@@ -38,7 +38,10 @@ Install the pinned runtime dependencies once with `python -m pip install -r requ
    - one deep pathology-research packet per curated research concept;
    - a frozen, content-addressed living evidence graph;
    - one mechanism-directed candidate-seed packet per researched pathology concept;
-   - one evidence-review packet per pathology concept after canonical candidate deduplication;
+   - deterministic UniChem lookup for every raw candidate seed, followed by one identity-review
+     packet covering every exact conflict, connectivity-only match, unsupported identifier, and
+     no-result seed;
+   - one evidence-review packet per pathology concept after candidate identity resolution;
    - independent audit and deterministic ranking.
 
 5. When status is `ready_to_build`, run:
@@ -65,6 +68,9 @@ Use `status` at any time. Resume means calling `next`; accepted results are immu
 - Never persist API keys, access tokens, authorization headers, or secrets.
 - Placebo, vehicle, and sham are comparators, not candidates.
 - Unresolved identity stays visible and may be reviewed; it must not silently erase the programme.
+- Exact UniChem UCI matches merge automatically. Connectivity-only matches, conflicting
+  identifiers, unsupported candidates, and no results are interpretive identity work and never
+  imply either equivalence or uniqueness.
 - `complete` requires at least one audited eligible candidate and verified hashes for all accepted results and outputs.
 
 Read [architecture.md](references/architecture.md) for ownership, [packet-contract.md](references/packet-contract.md) for worker results, and [source-adapters.md](references/source-adapters.md) before changing source ingestion.

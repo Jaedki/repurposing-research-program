@@ -3,7 +3,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+from urllib.error import HTTPError
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -58,16 +59,65 @@ def source_result(*_args):
     }
 
 
+def unichem_result(endpoint, body):
+    compound = str(body["compound"])
+    uci = "1" if compound.endswith("1") else "2"
+    source_id = int(body.get("sourceID", 1))
+    if endpoint == "compounds":
+        return {
+            "response": "Success",
+            "compounds": [{
+                "uci": int(uci),
+                "standardInchiKey": f"CONNECTIVITY{uci.zfill(2)}-STEREO-{uci}",
+                "sources": [{
+                    "id": source_id,
+                    "shortName": "chembl",
+                    "compoundId": compound,
+                }],
+            }],
+            "notFound": [],
+        }
+    return {
+        "response": "Success",
+        "searchedCompound": {"uci": int(uci)},
+        "sources": [{"id": source_id, "compoundId": compound}],
+    }
+
+
+class UniChemTransportTest(unittest.TestCase):
+    def test_retries_transient_server_error(self):
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "response": "Success",
+            "compounds": [],
+        }).encode()
+        error = HTTPError("https://example.org", 500, "server error", {}, None)
+        with (
+            patch.object(core, "urlopen", side_effect=[error, response]) as request,
+            patch.object(core.time, "sleep") as pause,
+        ):
+            result = core._post_unichem(
+                "compounds", {"compound": "4021", "type": "sourceID", "sourceID": 22}
+            )
+
+        self.assertEqual(result["response"], "Success")
+        self.assertEqual(request.call_count, 2)
+        pause.assert_called_once_with(1)
+
+
 class WorkflowTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.patch = patch.object(core, "fetch_pathology_sources", source_result)
         self.patch.start()
+        self.unichem_patch = patch.object(core, "_post_unichem", unichem_result)
+        self.unichem_patch.start()
         core.initialize(self.root, "Disease", mondo="MONDO:1")
 
     def tearDown(self):
         self.patch.stop()
+        self.unichem_patch.stop()
         self.temp.cleanup()
 
     def submit(self, action, records):
@@ -176,7 +226,7 @@ class WorkflowTest(unittest.TestCase):
                     "identity": {
                         "status": "resolved",
                         "preferred_name": "Drug",
-                        "identifiers": {"chembl": "CHEMBL:1"},
+                        "identifiers": {"chembl": "CHEMBL1"},
                     },
                     "desired_change": "normalize the process",
                     "mechanism_hypothesis": "inhibits the process",
@@ -190,7 +240,7 @@ class WorkflowTest(unittest.TestCase):
                     "identity": {
                         "status": "resolved",
                         "preferred_name": "Second drug",
-                        "identifiers": {"chembl": "CHEMBL:2"},
+                        "identifiers": {"chembl": "CHEMBL2"},
                     },
                     "desired_change": "normalize the process differently",
                     "mechanism_hypothesis": "modulates the process",
@@ -211,6 +261,7 @@ class WorkflowTest(unittest.TestCase):
         )
         action = core.next_action(self.root)
         self.assertEqual(action["next_task"], "candidate_review_research")
+        self.assertTrue((self.root / "results" / "candidate_identity.json").exists())
         self.assertEqual(action["next_item_id"], packet["item_id"])
         review_packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
         self.assertIn("authoritative disease context", review_packet["task"])
@@ -224,7 +275,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(review_packet["context"]["primary_concept_id"], packet["item_id"])
         self.assertEqual(
             [row["candidate_id"] for row in review_packet["context"]["candidates"]],
-            ["CHEMBL:1", "CHEMBL:2"],
+            ["UNICHEM:1", "UNICHEM:2"],
         )
         self.assertEqual(
             [row["document_id"] for row in review_packet["context"]["source_index"]],
@@ -244,8 +295,8 @@ class WorkflowTest(unittest.TestCase):
                     {"document_id": "PMID:3", "title": "Drug review", "source": "test"}
                 ],
                 "reviews": [
-                    self.review("CHEMBL:1", "PMID:3"),
-                    self.review("CHEMBL:2", "PMID:3"),
+                    self.review("UNICHEM:1", "PMID:3"),
+                    self.review("UNICHEM:2", "PMID:3"),
                 ],
             },
         )
@@ -254,6 +305,31 @@ class WorkflowTest(unittest.TestCase):
         audit_packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
         self.assertEqual(len(audit_packet["context"]["candidates"]), 2)
         self.assertEqual(len(audit_packet["context"]["reviews"]), 2)
+        self.submit(
+            action,
+            {
+                "rankings": [
+                    {
+                        "candidate_id": candidate_id,
+                        "eligible": True,
+                        "evidence_strength": 2,
+                        "rescue_fit": 2,
+                        "uncertainty": "medium",
+                        "priority_tier": 2,
+                        "rationale": "supported hypothesis",
+                        "source_ids": ["PMID:3"],
+                    }
+                    for candidate_id in ("UNICHEM:1", "UNICHEM:2")
+                ],
+                "audit_notes": [],
+            },
+        )
+        self.assertEqual(core.status(self.root)["state"], "ready_to_build")
+        manifest = core.build_outputs(self.root)
+        self.assertEqual(manifest["raw_candidate_count"], 2)
+        self.assertEqual(manifest["deduplicated_candidate_count"], 2)
+        summary = (self.root / "outputs" / "summary.md").read_text(encoding="utf-8")
+        self.assertIn("raw candidate seeds: 2; deduplicated candidates: 2", summary)
 
     def test_curation_guidance_and_input_order_preserve_semantic_granularity(self):
         source = source_result()
@@ -522,104 +598,157 @@ class WorkflowTest(unittest.TestCase):
                 "profiles",
             )
 
-    def test_candidate_identity_metadata_normalizes_without_losing_integrity(self):
-        first = self.candidate(
-            "PUBCHEM:11125",
-            "lithium carbonate",
-            {
-                "status": "resolved",
-                "preferred_name": "lithium carbonate",
-                "identifiers": {"PubChem CID": "11125", "ChEMBL": "CHEMBL1200826"},
-            },
-            "CONCEPT-A",
-            "NODE:A",
-        )
-        second = self.candidate(
-            "PUBCHEM:11125",
-            "Lithium carbonate",
-            {
-                "status": "resolved",
-                "preferred_name": "Lithium carbonate",
-                "identifiers": {"pubchem_cid": "11125", "inchikey": "KEY"},
-            },
-            "CONCEPT-B",
-            "NODE:B",
-        )
+    def test_unichem_merges_exact_ids_and_queues_every_ambiguous_seed(self):
+        rows = [
+            self.seed("PUBCHEM:11125", "SEED-A", identifiers={"pubchem_cid": "11125"}),
+            self.seed("DRUGBANK:DBX", "SEED-B", identifiers={"drugbank": "DBX"}),
+            self.seed("PUBCHEM:10", "SEED-10", identifiers={"pubchem_cid": "10"}),
+            self.seed("PUBCHEM:20", "SEED-20", identifiers={"pubchem_cid": "20"}),
+            self.seed("CODE:ALPHA", "SEED-NONE"),
+            self.seed("PUBCHEM:30", "SEED-NO-RESULT", identifiers={"pubchem_cid": "30"}),
+        ]
 
-        merged = core._merge_candidates([first, second])
+        def response(endpoint, body):
+            compound = str(body["compound"])
+            exact_sources = [
+                {"id": 22, "compoundId": "11125"},
+                {"id": 2, "compoundId": "DBX"},
+            ]
+            related_sources = [
+                {"id": 22, "compoundId": "10"},
+                {"id": 22, "compoundId": "20"},
+            ]
+            if endpoint == "connectivity":
+                return {
+                    "response": "Success",
+                    "sources": related_sources if compound in {"10", "20"} else exact_sources,
+                }
+            if compound == "30":
+                return {"response": "Success", "compounds": [], "notFound": ["30"]}
+            uci = 42 if compound in {"11125", "DBX"} else int(compound)
+            source_id = 2 if compound == "DBX" else 22
+            return {
+                "response": "Success",
+                "compounds": [{
+                    "uci": uci,
+                    "standardInchiKey": f"CONNECTIVITY-{uci}",
+                    "sources": [{"id": source_id, "compoundId": compound}],
+                }],
+                "notFound": [],
+            }
 
-        self.assertEqual(len(merged), 1)
+        with patch.object(core, "_post_unichem", response):
+            enriched, receipts = core._resolve_seed_identities(self.root, rows)
+        records = {"candidates": enriched}
+        groups = core._exact_identity_groups(records)
+        self.assertEqual(groups["UNICHEM:42"], ["SEED-A", "SEED-B"])
+        self.assertEqual(groups["UNICHEM:10"], ["SEED-10"])
+        self.assertEqual(groups["UNICHEM:20"], ["SEED-20"])
+        self.assertEqual(len(receipts), 8)
         self.assertEqual(
-            merged[0]["identity"]["identifiers"],
             {
-                "chembl": "CHEMBL1200826",
-                "inchikey": "KEY",
-                "pubchem_cid": "11125",
+                row["seed_id"]: row["identity_resolution"]["status"]
+                for row in core._identity_queue(records)
+            },
+            {
+                "SEED-10": "connectivity_match",
+                "SEED-20": "connectivity_match",
+                "SEED-NONE": "not_queryable",
+                "SEED-NO-RESULT": "no_result",
             },
         )
-        self.assertEqual(merged[0]["origin_concept_ids"], ["CONCEPT-A", "CONCEPT-B"])
-        self.assertEqual(merged[0]["graph_node_ids"], ["NODE:A", "NODE:B"])
 
-        wrong = self.candidate(
-            "PUBCHEM:11125",
-            "lithium carbonate",
-            {
+    def test_identity_review_partitions_all_flagged_seeds_before_merge(self):
+        resolution = {
+            "status": "connectivity_match",
+            "uci": "121892",
+            "standard_inchikey": "KEY",
+        }
+        seeds = [
+            self.seed(
+                candidate_id, seed_id, name="retigabine/ezogabine",
+                resolution=resolution, concept_id=concept,
+            )
+            for seed_id, candidate_id, concept in (
+                ("SEED-A", "INN:RETIGABINE", "NODE:A"),
+                ("SEED-B", "PUBCHEM:121892", "NODE:B"),
+            )
+        ]
+        prior = {
+            "candidate_seed_generation": {
+                "records": {
+                    "candidates": seeds,
+                }
+            }
+        }
+        records = {
+            "documents": [{
+                "document_id": "https://example.org/identity",
+                "title": "Authoritative identity",
+                "source": "test",
+            }],
+            "identity_groups": [{
+                "member_seed_ids": ["SEED-A", "SEED-B"],
+                "canonical_candidate_id": "UNICHEM:121892",
                 "status": "resolved",
-                "preferred_name": "lithium carbonate",
-                "identifiers": {"pubchem_cid": "999"},
-            },
-            "CONCEPT-C",
-            "NODE:C",
-        )
-        with self.assertRaisesRegex(core.ProgramError, "conflicts with candidate_id"):
-            core._merge_candidates([first, wrong])
+                "preferred_name": "retigabine",
+                "identifiers": {"pubchem_cid": "121892"},
+                "reason": "Authoritative synonym identity",
+                "source_ids": ["https://example.org/identity"],
+            }],
+        }
 
-        wrong_name = self.candidate(
-            "PUBCHEM:11125",
-            "aspirin",
-            {
+        core._validate_candidate_identity(records, prior)
+        prior["candidate_identity"] = {"records": records}
+        candidates = core._canonical_candidates(prior)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["candidate_id"], "UNICHEM:121892")
+        self.assertEqual(candidates[0]["member_seed_ids"], ["SEED-A", "SEED-B"])
+        records["identity_groups"][0]["member_seed_ids"] = ["SEED-A"]
+        with self.assertRaisesRegex(core.ProgramError, "cannot split an exact UniChem"):
+            core._validate_candidate_identity(records, prior)
+
+    def test_identity_review_can_attach_no_result_to_exact_candidate(self):
+        exact = self.seed(
+            "PUBCHEM:121892", "SEED-EXACT", name="ezogabine",
+            identifiers={"pubchem_cid": "121892"},
+            resolution={
+                "status": "exact",
+                "uci": "121892",
+                "standard_inchikey": "KEY",
+            },
+        )
+        alias = self.seed(
+            "INN:RETIGABINE", "SEED-ALIAS", name="retigabine",
+            resolution={"status": "not_queryable", "queries": []}, concept_id="NODE:B",
+        )
+        prior = {
+            "candidate_seed_generation": {"records": {
+                "candidates": [exact, alias],
+            }}
+        }
+        records = {
+            "documents": [{
+                "document_id": "https://example.org/synonym",
+                "title": "Synonym identity",
+                "source": "test",
+            }],
+            "identity_groups": [{
+                "member_seed_ids": ["SEED-ALIAS"],
+                "canonical_candidate_id": "UNICHEM:121892",
                 "status": "resolved",
-                "preferred_name": "aspirin",
-                "identifiers": {"pubchem_cid": "11125"},
-            },
-            "CONCEPT-C",
-            "NODE:C",
-        )
-        with self.assertRaisesRegex(core.ProgramError, "Conflicting candidate names"):
-            core._merge_candidates([first, wrong_name])
+                "preferred_name": "retigabine",
+                "identifiers": {"inn": "retigabine"},
+                "reason": "Authoritative synonym",
+                "source_ids": ["https://example.org/synonym"],
+            }],
+        }
 
-    def test_authoritative_candidate_id_allows_verified_synonym_names(self):
-        first = self.candidate(
-            "PUBCHEM:9848818",
-            "tauroursodeoxycholic acid",
-            {
-                "status": "resolved",
-                "preferred_name": "tauroursodeoxycholic acid",
-                "identifiers": {"pubchem_cid": "9848818"},
-            },
-            "CONCEPT-A",
-            "NODE:A",
-        )
-        second = self.candidate(
-            "PUBCHEM:9848818",
-            "taurursodiol",
-            {
-                "status": "resolved",
-                "preferred_name": "taurursodiol",
-                "identifiers": {
-                    "PubChem CID": "9848818",
-                    "synonym": "tauroursodeoxycholic acid (TUDCA)",
-                },
-            },
-            "CONCEPT-B",
-            "NODE:B",
-        )
-
-        merged = core._merge_candidates([first, second])
-
-        self.assertEqual(len(merged), 1)
-        self.assertEqual(merged[0]["candidate_id"], "PUBCHEM:9848818")
-        self.assertEqual(merged[0]["identity"]["identifiers"]["pubchem_cid"], "9848818")
+        core._validate_candidate_identity(records, prior)
+        prior["candidate_identity"] = {"records": records}
+        candidates = core._canonical_candidates(prior)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["member_seed_ids"], ["SEED-ALIAS", "SEED-EXACT"])
 
     def test_review_batches_assign_each_candidate_once_to_a_linked_origin(self):
         concepts = [
@@ -654,14 +783,13 @@ class WorkflowTest(unittest.TestCase):
         ]
         results = {
             "pathology_curation": {"records": {"concepts": concepts}},
-            "candidate_seed_generation": {"records": {"candidates": candidates}},
         }
-
-        first = core._review_batches(results)
-        results["candidate_seed_generation"]["records"]["candidates"] = list(
-            reversed(candidates)
-        )
-        second = core._review_batches(results)
+        with patch.object(core, "_canonical_candidates", return_value=candidates):
+            first = core._review_batches(results)
+        with patch.object(
+            core, "_canonical_candidates", return_value=list(reversed(candidates))
+        ):
+            second = core._review_batches(results)
 
         self.assertEqual(first, second)
         self.assertEqual(
@@ -766,6 +894,27 @@ class WorkflowTest(unittest.TestCase):
             "mechanism_source_ids": [f"MOA:{node_id}"],
             "origin_concept_ids": [concept_id],
         }
+
+    @classmethod
+    def seed(
+        cls, candidate_id, seed_id, *, name="candidate", identifiers=None,
+        resolution=None, concept_id="NODE:A",
+    ):
+        row = cls.candidate(
+            candidate_id,
+            name,
+            {
+                "status": "resolved" if identifiers else "unresolved",
+                "preferred_name": name,
+                "identifiers": identifiers or {},
+            },
+            concept_id,
+            concept_id,
+        )
+        row["seed_id"] = seed_id
+        if resolution is not None:
+            row["identity_resolution"] = resolution
+        return row
 
     @staticmethod
     def review(candidate_id, source_id="PMID:1"):

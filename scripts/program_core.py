@@ -9,14 +9,17 @@ import io
 import json
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from pathology_sources import SourceError, fetch_pathology_sources
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 OBJECTIVE = (
     "Identify existing drugs whose established mode of action could plausibly alter a "
     "specific evidence-backed element of the supplied disease pathology. A prior "
@@ -38,6 +41,7 @@ STAGES = (
     "pathology_curation",
     "evidence_graph",
     "candidate_seed_generation",
+    "candidate_identity",
     "candidate_review",
     "audit_and_rank",
 )
@@ -98,6 +102,19 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
         ),
         "collections": ["documents", "candidates", "exclusions"],
     },
+    "candidate_identity": {
+        "role": "candidate identity reviewer",
+        "task": (
+            "Resolve only the supplied UniChem-flagged candidate identities before evidence "
+            "review. Every queued seed must appear exactly once. Use authoritative identity "
+            "sources to decide whether queued seeds are the same intervention, attach to an "
+            "existing exact-UniChem candidate, remain separate, or stay unresolved/conflicting. "
+            "Do not alter mechanism or pathology evidence or split seeds sharing an exact UCI. "
+            "Exact UniChem groups not present in the queue are controller-owned and must not be "
+            "reconsidered."
+        ),
+        "collections": ["documents", "identity_groups"],
+    },
     "candidate_review_research": {
         "role": "pathology-concept candidate evidence reviewer",
         "task": (
@@ -148,6 +165,10 @@ ROW_FIELDS = {
         "graph_node_ids", "pathology_source_ids", "mechanism_source_ids",
     ],
     "exclusions": ["name", "reason"],
+    "identity_groups": [
+        "member_seed_ids", "canonical_candidate_id", "status", "preferred_name",
+        "identifiers", "reason", "source_ids",
+    ],
     "reviews": [
         "candidate_id", "rescue_rationale", "evidence_strength", "rescue_fit",
         "uncertainty", "counterevidence", "limitations", "source_ids",
@@ -188,11 +209,27 @@ FIELD_RULES = {
         "no treatment content",
     ],
     "candidate_seed_research": [
-        "identity has status, preferred_name, and identifiers; resolved identity needs an "
-        "identifier",
+        "identity has status, preferred_name, and identifiers; include every authoritative "
+        "identifier found because Python submits all supported identifiers to UniChem",
+        "use native database values under exact UniChem keys: chembl, drugbank, gtopdb, chebi, "
+        "unii, pubchem_cid, drugcentral, inchi, or inchikey; retain other identifiers under "
+        "their own keys for identity review",
+        "each identifier must denote the proposed candidate itself, not one ingredient of a "
+        "combination, mixture, formulation, or biologic product",
         "graph_node_ids contains the supplied researched concept and is non-empty; "
         "pathology_source_ids support the disease mechanism",
         "mechanism_source_ids support the drug mode of action; disease-drug citations are optional",
+    ],
+    "candidate_identity": [
+        "partition every queued seed_id exactly once across identity_groups",
+        "all queued seeds sharing one exact UniChem UCI remain together in one identity_group",
+        "canonical_candidate_id is null for a new residual identity or an exact supplied "
+        "UNICHEM:<uci> candidate_id when authoritative evidence establishes attachment",
+        "status is resolved, unresolved, or conflicting; uncertainty must remain explicit",
+        "member_seed_ids, identifiers, and source_ids are JSON collections",
+        "each identity group cites at least one newly retained authoritative identity source",
+        "same name alone is not identity evidence; preserve material salt, stereochemical, "
+        "mixture, biologic, product, and combination distinctions",
     ],
     "candidate_review_research": [
         "return exactly one review for every candidate in the supplied batch and no others",
@@ -231,6 +268,16 @@ _RESEARCH_CONTEXT_SECTIONS = {
     "progression",
     "stages",
     "synonyms",
+}
+_UNICHEM_API = "https://www.ebi.ac.uk/unichem/api/v1"
+_UNICHEM_SOURCE_IDS = {
+    "chembl": 1,
+    "drugbank": 2,
+    "gtopdb": 4,
+    "chebi": 7,
+    "unii": 14,
+    "pubchem_cid": 22,
+    "drugcentral": 34,
 }
 
 
@@ -572,6 +619,10 @@ def _program_status(
                 run_root, next_task, _item_ids(next_stage, results)
             )
             state = "needs_agent" if next_item_id is not None else "needs_controller"
+        elif next_stage == "candidate_identity":
+            next_task = "candidate_identity"
+            queue = _identity_queue(results["candidate_seed_generation"]["records"])
+            state = "needs_agent" if queue else "needs_controller"
         else:
             state, next_task = "needs_agent", next_stage
     return {
@@ -983,12 +1034,18 @@ def _packet_context(
             ),
         }
     seeds = results["candidate_seed_generation"]["records"]
+    if task == "candidate_identity":
+        queued = _identity_queue(seeds)
+        return {
+            "identity_queue": queued,
+            "resolved_candidates": _canonical_candidates(results, reviewed=False),
+        }
     if task == "candidate_review_research":
         batch = _find(_review_batches(results), "concept_id", str(item_id))
         candidate_ids = set(map(str, batch["candidate_ids"]))
         candidates = [
             row
-            for row in _rows(seeds, "candidates")
+            for row in _canonical_candidates(results)
             if str(row["candidate_id"]) in candidate_ids
         ]
         node_ids = {
@@ -1017,7 +1074,7 @@ def _packet_context(
             "source_index": _source_index(documents, mechanism_source_ids),
         }
     return {
-        "candidates": _rows(seeds, "candidates"),
+        "candidates": _canonical_candidates(results),
         "reviews": _rows(results["candidate_review"]["records"], "reviews"),
         "source_index": _source_index(documents),
     }
@@ -1185,7 +1242,7 @@ def _review_batches(
 ) -> list[dict[str, Any]]:
     concept_ids = {str(row["concept_id"]) for row in _research_concepts(results)}
     grouped: dict[str, list[str]] = {concept_id: [] for concept_id in concept_ids}
-    candidates = _rows(results["candidate_seed_generation"]["records"], "candidates")
+    candidates = _canonical_candidates(results)
     candidate_ids = _ids(candidates, "candidate_id", "candidates")
     for candidate in candidates:
         candidate_id = str(candidate["candidate_id"])
@@ -1212,140 +1269,287 @@ def _review_batches(
     return batches
 
 
-_IDENTIFIER_KEY_ALIASES = {
-    "chembl_id": "chembl",
-    "pubchem": "pubchem_cid",
-    "pubchem_id": "pubchem_cid",
-    "rxnorm_cui": "rxnorm",
-}
-_CANDIDATE_ID_KEYS = {
-    "CHEMBL": "chembl",
-    "PUBCHEM": "pubchem_cid",
-    "PUBCHEM-SID": "pubchem_sid",
-    "UNII": "unii",
-}
+def _candidate_queries(row: Mapping[str, Any]) -> list[dict[str, Any]]:
+    queries: set[tuple[str, int | None, str]] = set()
+    identity = row.get("identity") if isinstance(row.get("identity"), Mapping) else {}
+    identifiers = identity.get("identifiers", {})
+    if isinstance(identifiers, Mapping):
+        for key, raw_value in identifiers.items():
+            values = raw_value if isinstance(raw_value, list) else [raw_value]
+            for value in values:
+                compound = str(value).strip()
+                if key in {"inchi", "inchikey"} and compound:
+                    queries.add((key, None, compound))
+                elif key in _UNICHEM_SOURCE_IDS:
+                    if compound:
+                        queries.add(("sourceID", _UNICHEM_SOURCE_IDS[key], compound))
+    return [
+        {
+            "compound": compound,
+            "type": query_type,
+            **({"sourceID": source_id} if source_id is not None else {}),
+        }
+        for query_type, source_id, compound in sorted(queries, key=str)
+    ]
 
 
-def _normalize_identifier_key(value: Any) -> str:
-    key = re.sub(r"[^a-z0-9]+", "_", str(value).casefold()).strip("_")
-    return _IDENTIFIER_KEY_ALIASES.get(key, key)
+def _post_unichem(endpoint: str, body: Mapping[str, Any]) -> dict[str, Any]:
+    payload = _canonical_bytes(body)
+    request = Request(
+        f"{_UNICHEM_API}/{endpoint}",
+        data=payload,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "repurposing-research-program/4",
+        },
+        method="POST",
+    )
+    for attempt in range(3):
+        try:
+            with urlopen(request, timeout=30) as response:
+                result = json.loads(response.read().decode("utf-8-sig"))
+        except HTTPError as exc:
+            if attempt == 2 or (exc.code != 429 and not 500 <= exc.code < 600):
+                raise ProgramError(f"UniChem {endpoint} request failed: {exc}") from exc
+        except (URLError, TimeoutError) as exc:
+            if attempt == 2:
+                raise ProgramError(f"UniChem {endpoint} request failed: {exc}") from exc
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ProgramError(f"UniChem {endpoint} returned invalid JSON: {exc}") from exc
+        else:
+            if not isinstance(result, dict) or result.get("response") != "Success":
+                raise ProgramError(f"UniChem {endpoint} returned an invalid response")
+            return result
+        time.sleep(2**attempt)
+    raise AssertionError("unreachable")
 
 
-def _normalize_identity(identity: Mapping[str, Any]) -> dict[str, Any]:
-    identifiers: dict[str, str] = {}
-    for raw_key, raw_value in identity.get("identifiers", {}).items():
-        key = _normalize_identifier_key(raw_key)
-        value = str(raw_value).strip()
-        if not key or not value:
-            continue
-        current = identifiers.get(key)
-        if current is not None and current.casefold() != value.casefold():
-            raise ProgramError(f"Conflicting identity identifier values for {key}")
-        identifiers[key] = current or value
-    return {
-        "status": str(identity.get("status", "")).casefold(),
-        "preferred_name": str(identity.get("preferred_name", "")).strip(),
-        "identifiers": identifiers,
+def _unichem_request(
+    root: Path, endpoint: str, body: Mapping[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    token = _sha256(_canonical_bytes(body))[:24]
+    path = root / "sources" / "raw" / "unichem" / f"{endpoint}-{token}.json"
+    if path.exists():
+        response = _read_json(path)
+    else:
+        response = _post_unichem(endpoint, body)
+        _write_json(path, response)
+    return response, {
+        "source": "UniChem",
+        "api": _UNICHEM_API,
+        "endpoint": endpoint,
+        "query": dict(body),
+        "raw_path": path.relative_to(root).as_posix(),
+        "sha256": _sha256(path.read_bytes()),
     }
 
 
-def _identity_anchor_state(candidate_id: str, identity: Mapping[str, Any]) -> bool | None:
-    if ":" not in candidate_id:
+def _unichem_requests(
+    root: Path, endpoint: str, bodies: Iterable[Mapping[str, Any]]
+) -> dict[bytes, tuple[dict[str, Any], dict[str, Any]]]:
+    unique = {_canonical_bytes(body): dict(body) for body in bodies}
+    return {
+        key: _unichem_request(root, endpoint, body) for key, body in unique.items()
+    }
+
+
+def _query_key(query: Mapping[str, Any]) -> tuple[int, str] | None:
+    if query.get("type") != "sourceID":
         return None
-    prefix, value = candidate_id.split(":", 1)
-    key = _CANDIDATE_ID_KEYS.get(prefix.upper())
-    if key is None:
-        return None
-    identifiers = identity["identifiers"]
-    if key not in identifiers:
-        return None
-    observed = str(identifiers[key]).casefold()
-    expected = {candidate_id.casefold(), value.casefold()}
-    return observed in expected
+    return int(query["sourceID"]), str(query["compound"]).casefold()
 
 
-def _identity_names(identity: Mapping[str, Any]) -> list[str]:
-    names = [str(identity.get("preferred_name", "")).strip()]
-    synonym = str(identity.get("identifiers", {}).get("synonym", "")).strip()
-    if synonym:
-        names.append(synonym)
-    return [name.casefold() for name in names if name]
-
-
-def _names_compatible(
-    left_name: Any,
-    right_name: Any,
-    left_identity: Mapping[str, Any],
-    right_identity: Mapping[str, Any],
-) -> bool:
-    left, right = str(left_name).strip().casefold(), str(right_name).strip().casefold()
-    if left == right or left in right or right in left:
-        return True
-    left_names, right_names = _identity_names(left_identity), _identity_names(right_identity)
-    return any(a in b or b in a for a in left_names for b in right_names)
-
-
-def _merge_candidate_identity(
-    candidate_id: str,
-    current: Mapping[str, Any],
-    incoming: Mapping[str, Any],
-) -> dict[str, Any]:
-    left, right = _normalize_identity(current), _normalize_identity(incoming)
-    if left["status"] != right["status"]:
-        raise ProgramError(f"Conflicting identity status for candidate_id={candidate_id}")
-    left_anchor = _identity_anchor_state(candidate_id, left)
-    right_anchor = _identity_anchor_state(candidate_id, right)
-    if left_anchor is False or right_anchor is False:
-        raise ProgramError(f"Identity identifier conflicts with candidate_id={candidate_id}")
-    names_match = _names_compatible(
-        left["preferred_name"], right["preferred_name"], left, right
+def _resolve_seed_identities(
+    root: Path, candidates: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    queries_by_seed = {
+        str(row["seed_id"]): _candidate_queries(row) for row in candidates
+    }
+    exact = _unichem_requests(
+        root, "compounds", (query for queries in queries_by_seed.values() for query in queries)
     )
-    names_differ = left["preferred_name"].casefold() != right["preferred_name"].casefold()
-    if not names_match or (
-        names_differ and not (left_anchor is True and right_anchor is True)
-    ):
-        raise ProgramError(f"Conflicting identities share candidate_id={candidate_id}")
-    identifiers = dict(left["identifiers"])
-    for key, value in right["identifiers"].items():
-        current_value = identifiers.get(key)
-        if current_value is not None and current_value.casefold() != value.casefold():
-            if key == "synonym":
-                identifiers[key] = _merge_text(current_value, value)
-                continue
-            raise ProgramError(
-                f"Conflicting identity identifier {key} for candidate_id={candidate_id}"
-            )
-        identifiers[key] = current_value or value
-    if names_differ:
-        identifiers["synonym"] = _merge_text(
-            identifiers.get("synonym", ""), right["preferred_name"]
-        )
-    return {**left, "identifiers": dict(sorted(identifiers.items()))}
+    receipts = [value[1] for _, value in sorted(exact.items())]
+    preliminary: dict[str, dict[str, Any]] = {}
+    query_seeds: dict[tuple[int, str], set[str]] = {}
+    for seed_id, queries in queries_by_seed.items():
+        found: list[dict[str, Any]] = []
+        missed = False
+        for query in queries:
+            response = exact[_canonical_bytes(query)][0]
+            compounds = [row for row in response.get("compounds", []) if isinstance(row, dict)]
+            found.extend(compounds)
+            missed = missed or not compounds
+            key = _query_key(query)
+            if key:
+                query_seeds.setdefault(key, set()).add(seed_id)
+        ucis = {str(row.get("uci")) for row in found if row.get("uci") is not None}
+        if not queries:
+            preliminary[seed_id] = {"status": "not_queryable", "queries": []}
+        elif not ucis:
+            preliminary[seed_id] = {"status": "no_result", "queries": queries}
+        elif len(ucis) != 1 or missed:
+            preliminary[seed_id] = {
+                "status": "conflicting_or_partial_result",
+                "queries": queries,
+                "ucis": sorted(ucis),
+            }
+        else:
+            uci = next(iter(ucis))
+            compound = next(row for row in found if str(row.get("uci")) == uci)
+            preliminary[seed_id] = {
+                "status": "exact",
+                "queries": queries,
+                "uci": uci,
+                "standard_inchikey": compound.get("standardInchiKey"),
+            }
+
+    exact_seeds = {
+        seed_id: row for seed_id, row in preliminary.items() if row["status"] == "exact"
+    }
+    connectivity_bodies = [
+        {"compound": uci, "type": "uci", "searchComponents": True}
+        for uci in sorted({row["uci"] for row in exact_seeds.values()})
+    ]
+    connectivity = _unichem_requests(root, "connectivity", connectivity_bodies)
+    receipts.extend(value[1] for _, value in sorted(connectivity.items()))
+    related: dict[str, set[str]] = {seed_id: set() for seed_id in exact_seeds}
+    for body in connectivity_bodies:
+        uci = str(body["compound"])
+        response = connectivity[_canonical_bytes(body)][0]
+        own = {seed_id for seed_id, row in exact_seeds.items() if row["uci"] == uci}
+        for source in response.get("sources", []):
+            key = (int(source.get("id", -1)), str(source.get("compoundId", "")).casefold())
+            for other in query_seeds.get(key, set()) - own:
+                if other in exact_seeds and exact_seeds[other]["uci"] != uci:
+                    for seed_id in own:
+                        related[seed_id].add(other)
+                        related[other].add(seed_id)
+    by_connectivity: dict[str, set[str]] = {}
+    for seed_id, row in exact_seeds.items():
+        inchikey = str(row.get("standard_inchikey") or "")
+        if len(inchikey) >= 14:
+            by_connectivity.setdefault(inchikey[:14], set()).add(seed_id)
+    for seed_ids in by_connectivity.values():
+        ucis = {exact_seeds[seed_id]["uci"] for seed_id in seed_ids}
+        if len(ucis) > 1:
+            for seed_id in seed_ids:
+                related[seed_id].update(seed_ids - {seed_id})
+
+    for seed_id, seed_related in related.items():
+        if seed_related:
+            preliminary[seed_id]["status"] = "connectivity_match"
+            preliminary[seed_id]["related_seed_ids"] = sorted(seed_related)
+    enriched = [
+        {**row, "identity_resolution": preliminary[str(row["seed_id"])]}
+        for row in candidates
+    ]
+    return enriched, sorted(receipts, key=lambda row: row["raw_path"])
 
 
-def _merge_candidates(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    merged: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        candidate_id = str(row["candidate_id"])
-        current = merged.get(candidate_id)
-        if current is None:
-            merged[candidate_id] = {**row, "identity": _normalize_identity(row["identity"])}
+def _identity_queue(records: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in _rows(records, "candidates")
+        if row.get("identity_resolution", {}).get("status") != "exact"
+    ]
+
+
+def _exact_identity_groups(records: Mapping[str, Any]) -> dict[str, list[str]]:
+    groups: dict[str, list[str]] = {}
+    for seed in _rows(records, "candidates"):
+        resolution = seed.get("identity_resolution", {})
+        if resolution.get("uci") is None:
             continue
-        incoming_identity = _normalize_identity(row["identity"])
-        if not _names_compatible(
-            current["name"], row["name"], current["identity"], incoming_identity
-        ):
-            raise ProgramError(f"Conflicting candidate names share candidate_id={candidate_id}")
-        current["identity"] = _merge_candidate_identity(
-            candidate_id, current["identity"], incoming_identity
+        candidate_id = f"UNICHEM:{resolution['uci']}"
+        groups.setdefault(candidate_id, []).append(str(seed["seed_id"]))
+    return {candidate_id: sorted(groups[candidate_id]) for candidate_id in sorted(groups)}
+
+
+def _merge_candidate_rows(
+    rows: list[dict[str, Any]], candidate_id: str, identity: Mapping[str, Any]
+) -> dict[str, Any]:
+    rows = sorted(
+        {str(row["seed_id"]): row for row in rows}.values(),
+        key=lambda row: str(row["seed_id"]),
+    )
+    return {
+        "candidate_id": candidate_id,
+        "name": str(identity["preferred_name"]),
+        "identity": dict(identity),
+        "desired_change": _merge_text(*(row["desired_change"] for row in rows)),
+        "mechanism_hypothesis": _merge_text(*(row["mechanism_hypothesis"] for row in rows)),
+        "graph_node_ids": sorted({str(value) for row in rows for value in row["graph_node_ids"]}),
+        "pathology_source_ids": sorted({
+            str(value) for row in rows for value in row["pathology_source_ids"]
+        }),
+        "mechanism_source_ids": sorted({
+            str(value) for row in rows for value in row["mechanism_source_ids"]
+        }),
+        "origin_concept_ids": sorted({
+            str(value) for row in rows for value in row["origin_concept_ids"]
+        }),
+        "member_seed_ids": [str(row["seed_id"]) for row in rows],
+        "asserted_candidate_ids": sorted({str(row["candidate_id"]) for row in rows}),
+    }
+
+
+def _canonical_candidates(
+    results: Mapping[str, Mapping[str, Any]],
+    *,
+    reviewed: bool = True,
+) -> list[dict[str, Any]]:
+    seed_records = results["candidate_seed_generation"]["records"]
+    seeds = {str(row["seed_id"]): row for row in _rows(seed_records, "candidates")}
+    queued = {str(row["seed_id"]) for row in _identity_queue(seed_records)}
+    exact_groups = _exact_identity_groups(seed_records)
+    candidates: dict[str, dict[str, Any]] = {}
+    for candidate_id, member_ids in exact_groups.items():
+        member_ids = set(member_ids)
+        if member_ids & queued:
+            continue
+        rows = [seeds[seed_id] for seed_id in sorted(member_ids)]
+        preferred_name = min(
+            (str(row["identity"]["preferred_name"]) for row in rows),
+            key=lambda value: (value.casefold(), value),
         )
-        for field in (
-            "graph_node_ids", "pathology_source_ids", "mechanism_source_ids", "origin_concept_ids"
-        ):
-            current[field] = sorted({*map(str, current.get(field, [])), *map(str, row.get(field, []))})
-        for field in ("desired_change", "mechanism_hypothesis"):
-            current[field] = _merge_text(current[field], row[field])
-    return [merged[key] for key in sorted(merged)]
+        identity = {
+            "status": "resolved",
+            "preferred_name": preferred_name,
+            "identifiers": {"unichem_uci": candidate_id.split(":", 1)[1]},
+        }
+        candidates[candidate_id] = _merge_candidate_rows(rows, candidate_id, identity)
+    if not reviewed:
+        return [candidates[key] for key in sorted(candidates)]
+
+    identity_result = results.get("candidate_identity", {"records": {"identity_groups": []}})
+    for group in _rows(identity_result["records"], "identity_groups"):
+        rows = [seeds[str(seed_id)] for seed_id in group["member_seed_ids"]]
+        target = group.get("canonical_candidate_id")
+        if target:
+            exact = exact_groups[str(target)]
+            rows.extend(seeds[seed_id] for seed_id in exact)
+            preferred_name = min(
+                (str(row["identity"]["preferred_name"]) for row in rows),
+                key=lambda value: (value.casefold(), value),
+            )
+            identity = {
+                "status": "resolved",
+                "preferred_name": preferred_name,
+                "identifiers": {"unichem_uci": str(target).split(":", 1)[1]},
+                "source_ids": sorted(set(map(str, group["source_ids"]))),
+            }
+            candidate_id = str(target)
+        else:
+            candidate_id = _stable_id("CANDIDATE", sorted(map(str, group["member_seed_ids"])))
+            identity = {
+                "status": group["status"],
+                "preferred_name": group["preferred_name"],
+                "identifiers": group["identifiers"],
+                "source_ids": sorted(set(map(str, group["source_ids"]))),
+            }
+        candidates[candidate_id] = _merge_candidate_rows(rows, candidate_id, identity)
+    return [candidates[key] for key in sorted(candidates)]
 
 
 def _build_seed_result(
@@ -1355,11 +1559,21 @@ def _build_seed_result(
     accepted = _item_results(root, "candidate_seed_research", item_ids)
     if len(accepted) != len(item_ids):
         raise ProgramError("Cannot aggregate seeds before every researched concept is accepted")
-    raw_candidates = [
-        {**row, "origin_concept_ids": [item_id]}
-        for item_id in item_ids
-        for row in _rows(accepted[item_id]["records"], "candidates")
-    ]
+    raw_candidates = []
+    for item_id in item_ids:
+        for row in _rows(accepted[item_id]["records"], "candidates"):
+            seed_id = _stable_id(
+                "SEED", {"origin_concept_id": item_id, "candidate_id": row["candidate_id"]}
+            )
+            raw_candidates.append({
+                **row,
+                "seed_id": seed_id,
+                "origin_concept_ids": [item_id],
+            })
+    candidates, receipts = _resolve_seed_identities(root, raw_candidates)
+    queued_count = sum(
+        row["identity_resolution"]["status"] != "exact" for row in candidates
+    )
     records = {
         "documents": _merge_documents(
             [
@@ -1367,7 +1581,8 @@ def _build_seed_result(
                 *(row for item_id in item_ids for row in _rows(accepted[item_id]["records"], "documents")),
             ]
         ),
-        "candidates": _merge_candidates(raw_candidates),
+        "candidates": candidates,
+        "identity_receipts": receipts,
         "exclusions": [
             {**row, "origin_concept_id": item_id}
             for item_id in item_ids
@@ -1383,7 +1598,24 @@ def _build_seed_result(
         "gaps": _item_gaps(
             root, results, "candidate_seed_generation", "candidate_seed_research"
         ),
-        "notes": [f"Aggregated {len(raw_candidates)} raw seeds into {len(records['candidates'])} candidates."],
+        "notes": [
+            f"Submitted {len(raw_candidates)} raw seeds to UniChem; "
+            f"resolved {len(_exact_identity_groups(records))} exact identity group(s) and queued "
+            f"{queued_count} seed(s) for identity review."
+        ],
+    }
+
+
+def _empty_identity_result(results: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    if _identity_queue(results["candidate_seed_generation"]["records"]):
+        raise ProgramError("Candidate identity review is required before controller advancement")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "stage": "candidate_identity",
+        "status": "complete",
+        "records": {"documents": [], "identity_groups": []},
+        "gaps": [],
+        "notes": ["Every candidate was resolved by exact UniChem identity."],
     }
 
 
@@ -1433,6 +1665,8 @@ def _advance_controller(
         result = _build_graph_result(root, results)
     elif stage == "candidate_seed_generation":
         result = _build_seed_result(root, results)
+    elif stage == "candidate_identity":
+        result = _empty_identity_result(results)
     elif stage == "candidate_review":
         result = _build_review_result(root, results)
     else:
@@ -1661,9 +1895,6 @@ def _validate_seed_item(
             raise ProgramError(
                 f"{label}.identity requires an authoritative identifier when resolved"
             )
-        normalized_identity = _normalize_identity(identity)
-        if _identity_anchor_state(str(row["candidate_id"]), normalized_identity) is False:
-            raise ProgramError(f"{label}.identity conflicts with candidate_id")
         graph_refs = _references(row, "graph_node_ids", node_ids, label)
         if not graph_refs <= concept_node_ids:
             raise ProgramError(f"{label}.graph_node_ids contains nodes outside the item concept")
@@ -1671,6 +1902,70 @@ def _validate_seed_item(
         mechanism_refs = _references(row, "mechanism_source_ids", mechanism_source_ids, label)
         if not mechanism_refs & new_mechanism_source_ids:
             raise ProgramError(f"{label}.mechanism_source_ids needs a retained drug-MOA source")
+
+
+def _validate_candidate_identity(
+    records: Mapping[str, Any], results: Mapping[str, Mapping[str, Any]]
+) -> None:
+    documents = _validate_documents(records, canonical_ids=True)
+    groups = _contract_rows(records, "identity_groups")
+    seed_records = results["candidate_seed_generation"]["records"]
+    queue_ids = {str(row["seed_id"]) for row in _identity_queue(seed_records)}
+    covered: list[str] = []
+    targets: list[str] = []
+    exact_blocks = {
+        candidate_id: set(member_ids)
+        for candidate_id, member_ids in _exact_identity_groups(seed_records).items()
+    }
+    document_ids = {str(row["document_id"]) for row in documents}
+    for index, group in enumerate(groups):
+        label = f"identity_groups[{index}]"
+        member_ids = group.get("member_seed_ids")
+        if not isinstance(member_ids, list) or not member_ids:
+            raise ProgramError(f"{label}.member_seed_ids must be a non-empty list")
+        members = [str(value) for value in member_ids]
+        if len(members) != len(set(members)) or not set(members) <= queue_ids:
+            raise ProgramError(f"{label}.member_seed_ids must be unique queued seed IDs")
+        member_set = set(members)
+        member_exact_ids = {
+            candidate_id
+            for candidate_id, block in exact_blocks.items()
+            if member_set.intersection(block)
+        }
+        if any(member_set & block and not block <= member_set for block in exact_blocks.values()):
+            raise ProgramError(f"{label} cannot split an exact UniChem identity group")
+        covered.extend(members)
+        if group.get("status") not in {"resolved", "unresolved", "conflicting"}:
+            raise ProgramError(f"{label}.status must be resolved, unresolved, or conflicting")
+        _required(group, ("preferred_name", "reason"), label)
+        if not isinstance(group.get("identifiers"), dict):
+            raise ProgramError(f"{label}.identifiers must be an object")
+        target = group.get("canonical_candidate_id")
+        if target is not None:
+            target = str(target)
+            valid = (
+                target in exact_blocks
+                and group["status"] == "resolved"
+                and member_exact_ids <= {target}
+            )
+            if valid and exact_blocks[target] & queue_ids:
+                valid = exact_blocks[target] <= member_set
+            if not valid:
+                raise ProgramError(
+                    f"{label}.canonical_candidate_id must be an exact supplied UniChem "
+                    "candidate, contain no different UCI, and the group must be resolved"
+                )
+            targets.append(target)
+        elif group["status"] == "resolved" and len(member_exact_ids) == 1:
+            raise ProgramError(
+                f"{label}.canonical_candidate_id is required when a resolved group contains "
+                "one exact UniChem identity"
+            )
+        _references(group, "source_ids", document_ids, label)
+    if sorted(covered) != sorted(queue_ids) or len(covered) != len(set(covered)):
+        raise ProgramError("identity_groups must partition every queued seed exactly once")
+    if len(targets) != len(set(targets)):
+        raise ProgramError("Each exact UniChem candidate may be attached at most once")
 
 
 def _score(value: Any, label: str) -> int:
@@ -1786,6 +2081,9 @@ def _validate_result(
         "candidate_seed_research": lambda: _validate_seed_item(
             result["records"], str(item_id), prior
         ),
+        "candidate_identity": lambda: _validate_candidate_identity(
+            result["records"], prior
+        ),
         "candidate_review_research": lambda: _validate_review_item(
             result["records"], str(item_id), prior
         ),
@@ -1854,8 +2152,7 @@ def _project_ranked_row(
 def _ranked_rows(
     results: Mapping[str, Mapping[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
-    seeds = results["candidate_seed_generation"]["records"]
-    candidates = {row["candidate_id"]: row for row in _rows(seeds, "candidates")}
+    candidates = {row["candidate_id"]: row for row in _canonical_candidates(results)}
     review_by_id = {
         row["candidate_id"]: row
         for row in _rows(results["candidate_review"]["records"], "reviews")
@@ -1964,6 +2261,9 @@ def _write_output_files(
         _provenance_rows(rows, candidates, assertions),
     )
     gap_count = sum(len(results[stage].get("gaps", [])) for stage in STAGES)
+    raw_candidate_count = len(
+        _rows(results["candidate_seed_generation"]["records"], "candidates")
+    )
     summary = (
         "# Repurposing programme summary\n\n"
         f"Disease: {case['disease']}\n\n"
@@ -1971,7 +2271,8 @@ def _write_output_files(
         f"Pathology graph snapshot: {results['evidence_graph']['snapshot_id']}\n\n"
         f"Status: complete with {len(rows)} ranked candidate(s).\n\n"
         f"Sources: {len(documents)}; pathology nodes: {len(graph['profiles'])}; "
-        f"assertions: {len(graph['assertions'])}; candidate seeds: {len(candidates)}; "
+        f"assertions: {len(graph['assertions'])}; raw candidate seeds: "
+        f"{raw_candidate_count}; deduplicated candidates: {len(candidates)}; "
         f"reported gaps: {gap_count}.\n\n"
         "Candidate eligibility did not require a prior disease-drug literature association.\n\n"
         f"{EXPERIMENTAL_USE_POLICY}\n"
@@ -2003,6 +2304,10 @@ def build_outputs(root: str | Path) -> dict[str, Any]:
         "case_sha256": _sha256((run_root / "case.json").read_bytes()),
         "status": "complete",
         "candidate_count": len(rows),
+        "raw_candidate_count": len(
+            _rows(results["candidate_seed_generation"]["records"], "candidates")
+        ),
+        "deduplicated_candidate_count": len(candidates),
         "stage_results": {
             stage: _sha256(_result_path(run_root, stage).read_bytes()) for stage in STAGES
         },
