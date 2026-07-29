@@ -6,13 +6,13 @@
 | --- | --- | --- |
 | `pathology_sources` | Python | Treatment-blind Monarch and DisMech nodes, shared disease context, receipts, versions, and raw hashes are retained |
 | `pathology_curation` | One agent | Every non-anchor source node is assigned exactly once to a run-local concept marked `research`, `context_only`, or `exclude`; context is attached to retained research concepts and uncertain equivalence remains separate |
-| `evidence_graph` | Python after item work | Every curated research concept has one accepted deep-research profile; Python projects retained concepts and source edges through the partition and freezes the graph snapshot |
+| `evidence_graph` | Python after item work | Every curated research concept has one accepted deep-research profile and desired biological state; Python projects retained concepts and source edges through the partition and freezes the graph snapshot |
 | `candidate_seed_generation` | Python after item work | Every researched pathology concept has one accepted seed result; Python assigns immutable seed IDs and submits every supported identifier to UniChem |
 | `candidate_identity` | Python plus one bounded agent review when needed | Exact UniChem UCI groups merge automatically; every connectivity match, identifier conflict, unsupported candidate, and no-result seed is partitioned exactly once by the identity reviewer |
-| `candidate_review` | Python after item work | Every nonempty concept review batch has one accepted result covering each assigned canonical candidate exactly once |
-| `audit_and_rank` | One independent agent, then Python | Every reviewed candidate has one audit record; Python applies the final order |
+| `candidate_review` | Python after item work | Every nonempty concept review batch has one accepted evidence dossier covering each assigned canonical candidate exactly once |
+| `candidate_audit` | One independent agent, then Python | Every reviewed candidate is partitioned exactly once into a scored assessment or a bounded, cited exclusion; at least one assessment remains and Python computes raw totals and the final order |
 
-Within the three item barriers, `next` selects the first missing item from a stable sorted manifest. Candidate identity is global and receives only the deterministic UniChem residue plus a compact index of exact resolved candidates. Candidate review reuses curated concept IDs as batch IDs. After identity resolution, Python assigns each candidate once to a linked origin concept, breaking ties by concept ID. This is a deterministic cursor, not a general DAG, queue, scheduler, or agent-controlled handoff.
+Within the three item barriers, `next` selects the first missing item from a stable sorted manifest. Seed packets carry a compact index of every retained non-anchor graph concept; the read-only `graph-context` command returns one deterministic node projection from the frozen snapshot without changing controller state. Candidate identity is global and receives only the deterministic UniChem residue plus a compact index of exact resolved candidates. Candidate review reuses curated concept IDs as batch IDs. After identity resolution, Python assigns each candidate once to a linked origin concept, breaking ties by concept ID. This is a deterministic cursor, not a general DAG, queue, scheduler, or agent-controlled handoff.
 
 ## Separation of evidence
 
@@ -27,14 +27,22 @@ The chain is sufficient without a paper directly joining the drug to the disease
 
 ## Ownership
 
-Python owns order, source receipts, hashing, item cursors, immutable acceptance, curation coverage checks, cross-reference checks, treatment exclusion during pathology work, secret rejection, graph freezing, exact UniChem merging, candidate aggregation, ranking order, and exports. The candidate identity reviewer owns only the interpretation of UniChem-flagged or unresolved seeds. The curation agent owns pathology semantic equivalence and research-value judgment; research agents own research content. Sources own evidence. No worker may select the next task or declare the programme complete.
+Python owns order, source receipts, hashing, item cursors, immutable acceptance, curation coverage checks, cross-reference checks, treatment exclusion during pathology work, secret rejection, graph freezing and context projection, exact UniChem merging, candidate aggregation, raw score calculation, ranking order, and exports. The candidate identity reviewer owns only the interpretation of UniChem-flagged or unresolved seeds. Candidate evidence reviewers own source-backed dossiers but do not score or decide eligibility. The independent auditor owns the closed-corpus assessment, bounded exclusions, component judgments, net assessment, and final aliases and reservations. The curation agent owns pathology semantic equivalence and research-value judgment; research agents own research content. Sources own evidence. No worker may select the next task or declare the programme complete.
 
 A run is derived from `case.json`, canonical `results/*.json`, item results under `results/items/`, cached source receipts, and the final output manifest. The manifest hashes every accepted result file.
+
+## Evidence propagation
+
+Accepted worker results remain unchanged for provenance. At each deterministic aggregation boundary, Python recursively collects `source_ids`, `pathology_source_ids`, and `mechanism_source_ids` from all non-document records, including nested observations, and propagates only returned documents whose IDs were cited by that result. Unused documents remain in the accepted worker result but do not enter downstream context.
+
+Aggregated stages own only their evidence: the graph retains cited pathology documents, seed generation retains cited seed documents, identity contributes cited identity documents, and candidate review retains cited review documents. They do not copy prior stage libraries. `_all_documents()` constructs the deduplicated union when audit or output generation genuinely needs cross-stage evidence. The audit consumes this closed union and cannot add documents. A result may cite an upstream document without returning it again, so propagation requires returned document IDs to be a subset of the result's citations, not equality.
+
+Final evidence cards contain the canonical candidate ID, the raw score out of 100, all five cited component judgments, only aliases retained by the auditor, one cited net assessment, and only cited why-not findings retained by the auditor. Review fields cannot flow directly into final cards. Python omits empty optional sections and does not infer card content.
 
 ## Status
 
 - `needs_controller`: `next` can perform a deterministic source, merge, freeze, or aggregation action.
 - `needs_agent`: `next` emits exactly one agent packet.
 - `stopped`: a scientifically necessary collection is empty, with an explicit reason.
-- `ready_to_build`: all barriers passed and at least one candidate survived audit.
+- `ready_to_build`: all barriers passed and at least one candidate received a scored audit assessment.
 - `complete`: outputs exist and match the manifest hashes.

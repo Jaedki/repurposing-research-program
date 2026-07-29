@@ -206,18 +206,47 @@ class WorkflowTest(unittest.TestCase):
             research_packet["context"]["disease_context"][0]["section"],
             "description",
         )
-        self.submit(action, self.profile(first_item, node_type))
+        pathology_records = self.profile(first_item, node_type)
+        pathology_records["documents"].append(
+            {"document_id": "PMID:90", "title": "Unused pathology search hit", "source": "test"}
+        )
+        self.submit(action, pathology_records)
+        accepted_pathology = json.loads(
+            core._item_result_path(self.root, "pathology_node_research", first_item).read_text()
+        )
+        self.assertEqual(
+            [row["document_id"] for row in accepted_pathology["records"]["documents"]],
+            ["PMID:1", "PMID:90"],
+        )
 
         action = core.next_action(self.root)
         self.assertEqual(action["next_task"], "candidate_seed_research")
         self.assertTrue((self.root / "results" / "evidence_graph.json").exists())
+        graph_result = json.loads(
+            (self.root / "results" / "evidence_graph.json").read_text()
+        )
+        self.assertEqual(
+            [row["document_id"] for row in graph_result["records"]["documents"]],
+            ["PMID:1", "SRC:1"],
+        )
         self.assertEqual(action["next_item_id"], "NODE:1")
         packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
-        self.assertEqual(packet["context"]["concept"]["node_id"], "NODE:1")
-        self.assertEqual(packet["context"]["profile"]["node_id"], "NODE:1")
+        self.assertEqual(packet["context"]["focal_context"]["node"]["node_id"], "NODE:1")
+        self.assertEqual(packet["context"]["focal_context"]["profile"]["node_id"], "NODE:1")
+        self.assertEqual(
+            [row["node_id"] for row in packet["context"]["graph_index"]], ["NODE:1"]
+        )
+        self.assertEqual(packet["context"]["graph_snapshot_id"], core.graph_context(
+            self.root, "NODE:1"
+        )["graph_snapshot_id"])
+        self.assertEqual(packet["context"]["context_lookup"]["argv"][-1], "<node_id>")
+        with self.assertRaisesRegex(core.ProgramError, "disease anchor"):
+            core.graph_context(self.root, "MONDO:1")
         seed_records = {
             "documents": [
-                {"document_id": "PMID:2", "title": "Drug MOA", "source": "test"}
+                {"document_id": "PMID:1", "title": "Re-emitted pathology evidence", "source": "test"},
+                {"document_id": "PMID:2", "title": "Drug MOA", "source": "test"},
+                {"document_id": "PMID:80", "title": "Unused seed search hit", "source": "test"},
             ],
             "candidates": [
                 {
@@ -228,11 +257,10 @@ class WorkflowTest(unittest.TestCase):
                         "preferred_name": "Drug",
                         "identifiers": {"chembl": "CHEMBL1"},
                     },
-                    "desired_change": "normalize the process",
                     "mechanism_hypothesis": "inhibits the process",
                     "graph_node_ids": ["NODE:1"],
                     "pathology_source_ids": ["SRC:1"],
-                    "mechanism_source_ids": ["PMID:2"],
+                    "mechanism_source_ids": ["PMID:1", "PMID:2"],
                 },
                 {
                     "candidate_id": "CHEMBL:2",
@@ -242,7 +270,6 @@ class WorkflowTest(unittest.TestCase):
                         "preferred_name": "Second drug",
                         "identifiers": {"chembl": "CHEMBL2"},
                     },
-                    "desired_change": "normalize the process differently",
                     "mechanism_hypothesis": "modulates the process",
                     "graph_node_ids": ["NODE:1"],
                     "pathology_source_ids": ["SRC:1"],
@@ -253,25 +280,30 @@ class WorkflowTest(unittest.TestCase):
         }
         invalid_records = json.loads(json.dumps(seed_records))
         invalid_records["candidates"][0]["graph_node_ids"] = ["MONDO:1"]
-        with self.assertRaisesRegex(core.ProgramError, "outside the item concept"):
+        with self.assertRaisesRegex(core.ProgramError, "unknown IDs"):
+            self.submit(action, invalid_records)
+        invalid_records = json.loads(json.dumps(seed_records))
+        invalid_records["candidates"][0]["unexpected_field"] = "not in the contract"
+        with self.assertRaisesRegex(core.ProgramError, "unexpected fields"):
             self.submit(action, invalid_records)
         self.submit(
             action,
             seed_records,
         )
         action = core.next_action(self.root)
-        self.assertEqual(action["next_task"], "candidate_review_research")
+        self.assertEqual(action["next_task"], "candidate_evidence_review")
         self.assertTrue((self.root / "results" / "candidate_identity.json").exists())
         self.assertEqual(action["next_item_id"], packet["item_id"])
         review_packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
         self.assertIn("authoritative disease context", review_packet["task"])
-        self.assertIn("decision-changing prior art", review_packet["task"])
+        self.assertIn("exact-disease prior art", review_packet["task"])
         self.assertTrue(
             any(
                 "document retained" in rule
                 for rule in review_packet["result_contract"]["field_rules"]
             )
         )
+        self.assertNotIn("score_rubric", review_packet["result_contract"])
         self.assertEqual(review_packet["context"]["primary_concept_id"], packet["item_id"])
         self.assertEqual(
             [row["candidate_id"] for row in review_packet["context"]["candidates"]],
@@ -279,10 +311,14 @@ class WorkflowTest(unittest.TestCase):
         )
         self.assertEqual(
             [row["document_id"] for row in review_packet["context"]["source_index"]],
-            ["PMID:2"],
+            ["PMID:1", "PMID:2"],
         )
         seeds = json.loads(
             (self.root / "results" / "candidate_seed_generation.json").read_text()
+        )
+        self.assertEqual(
+            [row["document_id"] for row in seeds["records"]["documents"]],
+            ["PMID:2"],
         )
         self.assertEqual(
             seeds["records"]["candidates"][0]["origin_concept_ids"],
@@ -292,44 +328,141 @@ class WorkflowTest(unittest.TestCase):
             action,
             {
                 "documents": [
-                    {"document_id": "PMID:3", "title": "Drug review", "source": "test"}
+                    {"document_id": "PMID:2", "title": "Re-emitted seed evidence", "source": "test"},
+                    {"document_id": "PMID:3", "title": "Drug review", "source": "test"},
+                    {"document_id": "PMID:70", "title": "Unused review search hit", "source": "test"},
                 ],
                 "reviews": [
-                    self.review("UNICHEM:1", "PMID:3"),
-                    self.review("UNICHEM:2", "PMID:3"),
+                    {
+                        **self.review("UNICHEM:1", "PMID:3"),
+                        "aliases": [
+                            {"name": "Drug hydrochloride", "source_ids": ["PMID:3"]},
+                            {"name": "Drug", "source_ids": ["PMID:2"]},
+                        ],
+                        "why_not": [{
+                            "finding": "Relevant exposure remains uncertain",
+                            "source_ids": ["PMID:3"],
+                        }],
+                    },
+                    {
+                        **self.review("UNICHEM:2", "PMID:3"),
+                        "prior_art": {
+                            "status": "human_intervention",
+                            "summary": "An exact-disease human intervention was registered.",
+                            "findings": [{
+                                "finding": "The candidate entered an exact-disease human study.",
+                                "source_ids": ["PMID:3"],
+                            }],
+                        },
+                    },
                 ],
             },
         )
         action = core.next_action(self.root)
-        self.assertEqual(action["next_task"], "audit_and_rank")
+        self.assertEqual(action["next_task"], "candidate_audit")
         audit_packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
         self.assertEqual(len(audit_packet["context"]["candidates"]), 2)
         self.assertEqual(len(audit_packet["context"]["reviews"]), 2)
+        self.assertEqual(
+            [row["document_id"] for row in audit_packet["context"]["source_index"]],
+            ["PMID:1", "PMID:2", "PMID:3", "SRC:1"],
+        )
+        rubric = audit_packet["result_contract"]["score_rubric"]
+        self.assertIn("without weighting", rubric["method"])
+        self.assertIn("not a probability", rubric["method"])
+        self.assertEqual(set(rubric["components"]), set(core.SCORE_COMPONENTS))
+        self.assertEqual(
+            set(rubric["components"]["mechanistic_bridge_plausibility"]["anchors"]),
+            {"5", "10", "15", "20"},
+        )
+        self.assertIn(
+            "long or speculative",
+            rubric["components"]["mechanistic_bridge_plausibility"]["anchors"]["5"],
+        )
+        exclusion_policy = audit_packet["result_contract"]["exclusion_policy"]
+        self.assertEqual(set(exclusion_policy), set(core.AUDIT_EXCLUSION_REASONS))
+        self.assertIn("missing data", exclusion_policy["impossible_translational_feasibility"])
+        self.assertIn("unresolved identity alone", exclusion_policy["invalid_candidate"])
+        review_result = json.loads(
+            (self.root / "results" / "candidate_review.json").read_text()
+        )
+        self.assertEqual(
+            [row["document_id"] for row in review_result["records"]["documents"]],
+            ["PMID:3"],
+        )
         self.submit(
             action,
             {
-                "rankings": [
+                "assessments": [
                     {
-                        "candidate_id": candidate_id,
-                        "eligible": True,
-                        "evidence_strength": 2,
-                        "rescue_fit": 2,
-                        "uncertainty": "medium",
-                        "priority_tier": 2,
-                        "rationale": "supported hypothesis",
-                        "source_ids": ["PMID:3"],
-                    }
-                    for candidate_id in ("UNICHEM:1", "UNICHEM:2")
+                        **self.assessment(
+                            "UNICHEM:1",
+                            "PMID:3",
+                            {
+                                "drug_action_confidence": 15,
+                                "disease_mechanism_relevance": 20,
+                                "mechanistic_bridge_plausibility": 5,
+                                "translational_feasibility": 15,
+                                "evidence_robustness": 15,
+                            },
+                        ),
+                        "aliases": [
+                            {"name": "Drug hydrochloride", "source_ids": ["PMID:3"]},
+                            {"name": "Drug", "source_ids": ["PMID:2"]},
+                        ],
+                        "why_not": [{
+                            "finding": "Relevant exposure remains uncertain",
+                            "source_ids": ["PMID:3"],
+                        }],
+                        "net_assessment": {
+                            "text": "Supported action and pathology fit outweigh a speculative bridge.",
+                            "source_ids": ["PMID:3"],
+                        },
+                    },
                 ],
-                "audit_notes": [],
+                "excluded_candidates": [{
+                    "candidate_id": "UNICHEM:2",
+                    "reason_code": "human_intervention",
+                    "finding": "An exact-disease human intervention disqualifies repurposing.",
+                    "source_ids": ["PMID:3"],
+                }],
             },
         )
         self.assertEqual(core.status(self.root)["state"], "ready_to_build")
         manifest = core.build_outputs(self.root)
         self.assertEqual(manifest["raw_candidate_count"], 2)
         self.assertEqual(manifest["deduplicated_candidate_count"], 2)
+        self.assertEqual(manifest["excluded_candidate_count"], 1)
         summary = (self.root / "outputs" / "summary.md").read_text(encoding="utf-8")
         self.assertIn("raw candidate seeds: 2; deduplicated candidates: 2", summary)
+        cards = (self.root / "outputs" / "candidate_cards.md").read_text(encoding="utf-8")
+        self.assertIn("## UNICHEM:1", cards)
+        self.assertIn(
+            "Aliases:\n- Drug (References: PMID:2)\n"
+            "- Drug hydrochloride (References: PMID:3)",
+            cards,
+        )
+        self.assertEqual(cards.count("Aliases:"), 1)
+        self.assertIn("Score: 70/100", cards)
+        self.assertIn("Mechanistic-bridge plausibility: 5/20", cards)
+        self.assertIn(
+            "### Why\n\nSupported action and pathology fit outweigh a speculative bridge."
+            "\n\nReferences: PMID:3",
+            cards,
+        )
+        self.assertIn(
+            "### Why not\n\n- Relevant exposure remains uncertain\n"
+            "  References: PMID:3",
+            cards,
+        )
+        self.assertEqual(cards.count("### Why not"), 1)
+        self.assertNotIn("Priority tier:", cards)
+        self.assertNotIn("Mechanism hypothesis:", cards)
+        self.assertNotIn("Review:", cards)
+        self.assertNotIn("Audit:", cards)
+        exclusions = (self.root / "outputs" / "candidate_exclusions.jsonl").read_text()
+        self.assertIn('"candidate_id":"UNICHEM:2"', exclusions)
+        self.assertIn('"reason_code":"human_intervention"', exclusions)
 
     def test_curation_guidance_and_input_order_preserve_semantic_granularity(self):
         source = source_result()
@@ -357,7 +490,7 @@ class WorkflowTest(unittest.TestCase):
         )
 
         context = core._packet_context(
-            "pathology_curation", None, {"pathology_sources": source}
+            self.root, "pathology_curation", None, {"pathology_sources": source}
         )
         guidance = core.STAGE_GUIDANCE["pathology_curation"]["task"]
 
@@ -374,9 +507,23 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("context_only even when measurable", guidance)
         self.assertIn("bare entity or observational readout", guidance)
         self.assertIn("uncertainty never upgrades", guidance)
+        pathology_guidance = core.STAGE_GUIDANCE["pathology_node_research"]["task"]
+        self.assertIn("Keep discovery pathology-led", pathology_guidance)
+        self.assertIn("directional evidence", pathology_guidance)
         seed_guidance = core.STAGE_GUIDANCE["candidate_seed_research"]["task"]
         self.assertIn("symptomatic or compensatory benefit", seed_guidance)
         self.assertIn("linked context nodes", seed_guidance)
+        self.assertIn("do not use disease-specific drug literature", seed_guidance)
+        self.assertIn(
+            "evidence dossier", core.STAGE_GUIDANCE["candidate_evidence_review"]["task"]
+        )
+        self.assertIn(
+            "exact-disease prior art",
+            core.STAGE_GUIDANCE["candidate_evidence_review"]["task"],
+        )
+        self.assertIn(
+            "unresolved identity", " ".join(core.FIELD_RULES["candidate_audit"])
+        )
 
     def test_curation_requires_an_exact_partition(self):
         records = {
@@ -477,13 +624,16 @@ class WorkflowTest(unittest.TestCase):
 
     def test_only_research_concepts_create_work_items(self):
         source = source_result()
+        source["records"]["documents"].append(
+            {"document_id": "SRC:2", "title": "Context evidence", "source": "test"}
+        )
         source["records"]["source_nodes"].extend(
             [
                 {
                     "node_id": "NODE:2",
                     "label": "Anatomical context",
                     "node_type": "anatomy",
-                    "source_ids": ["SRC:1"],
+                    "source_ids": ["SRC:2"],
                 },
                 {
                     "node_id": "NODE:3",
@@ -528,6 +678,50 @@ class WorkflowTest(unittest.TestCase):
                 for row in edges
             )
         )
+        graph = {
+            "source_nodes": nodes,
+            "source_edges": edges,
+            "profiles": [self.profile("NODE:1", "mechanism")["profiles"][0]],
+            "assertions": [],
+        }
+        self.assertEqual(
+            [row["node_id"] for row in core._graph_index(graph)], ["NODE:1", "NODE:2"]
+        )
+        context = core._graph_node_context(graph, "NODE:2")
+        self.assertIsNone(context["profile"])
+        self.assertEqual([row["node_id"] for row in context["related_nodes"]], ["NODE:1"])
+        self.assertEqual(core._graph_support_ids(graph)["NODE:2"], {"SRC:2"})
+
+        graph["documents"] = [
+            *source["records"]["documents"],
+            *self.profile("NODE:1", "mechanism")["documents"],
+        ]
+        results["evidence_graph"] = {"records": graph}
+        seed_records = {
+            "documents": [
+                {"document_id": "PMID:2", "title": "Drug action", "source": "test"}
+            ],
+            "candidates": [
+                {
+                    "candidate_id": "CHEMBL:1",
+                    "name": "Drug",
+                    "identity": {
+                        "status": "resolved",
+                        "preferred_name": "Drug",
+                        "identifiers": {"chembl": "CHEMBL1"},
+                    },
+                    "mechanism_hypothesis": "Mechanism using both contexts",
+                    "graph_node_ids": ["NODE:1", "NODE:2"],
+                    "pathology_source_ids": ["SRC:1"],
+                    "mechanism_source_ids": ["PMID:2"],
+                }
+            ],
+            "exclusions": [],
+        }
+        with self.assertRaisesRegex(core.ProgramError, "do not support graph nodes"):
+            core._validate_seed_item(seed_records, "NODE:1", results)
+        seed_records["candidates"][0]["pathology_source_ids"].append("SRC:2")
+        core._validate_seed_item(seed_records, "NODE:1", results)
 
     def test_pathology_research_requires_retained_evidence(self):
         self.curate_single_process()
@@ -547,6 +741,18 @@ class WorkflowTest(unittest.TestCase):
         records["documents"][0]["document_id"] = "DOC-AUTHOR-2026-TOPIC"
         records["profiles"][0]["source_ids"][-1] = "DOC-AUTHOR-2026-TOPIC"
         with self.assertRaisesRegex(core.ProgramError, "canonical PMID"):
+            self.submit(action, records)
+
+        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
+        records["profiles"][0]["desired_biological_state"] = ""
+        with self.assertRaisesRegex(core.ProgramError, "desired_biological_state"):
+            self.submit(action, records)
+
+        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
+        records["profiles"][0]["established_pathology_observations"] = [
+            {"observation": "unsupported", "source_ids": ["PMID:999"]}
+        ]
+        with self.assertRaisesRegex(core.ProgramError, "unknown IDs"):
             self.submit(action, records)
 
     def test_canonical_document_identifier_families(self):
@@ -586,6 +792,54 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(documents[0]["citation"], "PMID:22312314")
         self.assertEqual(documents[0]["snippets"], ["research snippet", "source snippet"])
         self.assertEqual(documents[0]["supports"], ["PARTIAL", "SUPPORT"])
+
+    def test_document_propagation_recurses_and_ignores_document_metadata(self):
+        records = {
+            "documents": [
+                {"document_id": "PMID:10", "title": "Nested evidence", "source": "test"},
+                {"document_id": "PMID:11", "title": "Limitation evidence", "source": "test"},
+                {
+                    "document_id": "PMID:12",
+                    "title": "Unused search hit",
+                    "source": "test",
+                    "source_ids": ["PMID:12"],
+                },
+            ],
+            "profiles": [{
+                "source_ids": ["UPSTREAM:1"],
+                "established_pathology_observations": [{
+                    "observation": "Observed directional change",
+                    "source_ids": ["PMID:10"],
+                }],
+            }],
+            "interpretation": {
+                "limitations": [{"finding": "Bounded evidence", "source_ids": ["PMID:11"]}]
+            },
+        }
+
+        self.assertEqual(
+            core._cited_ids(records),
+            {"UPSTREAM:1", "PMID:10", "PMID:11"},
+        )
+        self.assertEqual(
+            [row["document_id"] for row in core._cited_documents(records)],
+            ["PMID:10", "PMID:11"],
+        )
+        identity_results = {
+            "candidate_identity": {"records": {
+                "documents": [
+                    {"document_id": "PMID:13", "title": "Identity evidence", "source": "test"},
+                    {"document_id": "PMID:14", "title": "Unused identity hit", "source": "test"},
+                ],
+                "identity_groups": [{
+                    "source_ids": ["PMID:13", "UPSTREAM:2"],
+                }],
+            }}
+        }
+        self.assertEqual(
+            [row["document_id"] for row in core._all_documents(identity_results)],
+            ["PMID:13"],
+        )
 
     def test_non_document_identity_conflicts_remain_strict(self):
         with self.assertRaisesRegex(core.ProgramError, "Conflicting profiles records"):
@@ -810,14 +1064,32 @@ class WorkflowTest(unittest.TestCase):
         batch = [{"concept_id": "NODE:A", "candidate_ids": ["DRUG-A", "DRUG-B"]}]
         with patch.object(core, "_review_batches", return_value=batch):
             core._validate_review_item(records, "NODE:A", {})
+            records["reviews"][0]["aliases"] = [{"name": "Drug salt", "source_ids": []}]
+            with self.assertRaisesRegex(core.ProgramError, "must be a non-empty list"):
+                core._validate_review_item(records, "NODE:A", {})
+            records["reviews"][0]["aliases"] = []
+            records["reviews"][0]["why_not"] = [{
+                "finding": "Unsupported concern",
+                "source_ids": ["PMID:404"],
+            }]
+            with self.assertRaisesRegex(core.ProgramError, "unknown IDs"):
+                core._validate_review_item(records, "NODE:A", {})
+            records["reviews"][0]["why_not"] = []
+            records["reviews"][0]["counterevidence"] = []
+            with self.assertRaisesRegex(core.ProgramError, "unexpected fields"):
+                core._validate_review_item(records, "NODE:A", {})
+            del records["reviews"][0]["counterevidence"]
             records["documents"] = []
             with self.assertRaisesRegex(core.ProgramError, "retained by this review"):
                 core._validate_review_item(
                     records,
                     "NODE:A",
-                    {"prior": {"records": {"documents": [
-                        {"document_id": "PMID:1", "title": "Prior evidence", "source": "test"}
-                    ]}}},
+                    {"prior": {"records": {
+                        "documents": [
+                            {"document_id": "PMID:1", "title": "Prior evidence", "source": "test"}
+                        ],
+                        "profiles": [{"source_ids": ["PMID:1"]}],
+                    }}},
                 )
             records["documents"] = [
                 {"document_id": "PMID:1", "title": "Drug evidence", "source": "test"}
@@ -825,6 +1097,135 @@ class WorkflowTest(unittest.TestCase):
             records["reviews"] = [self.review("DRUG-A")]
             with self.assertRaisesRegex(core.ProgramError, "exactly the supplied batch"):
                 core._validate_review_item(records, "NODE:A", {})
+
+    def test_audit_validation_partitions_candidates_and_preserves_longshots(self):
+        second_review = self.review("DRUG-B")
+        second_review["prior_art"] = {
+            "status": "human_intervention",
+            "summary": "An exact-disease human study was identified.",
+            "findings": [{
+                "finding": "The candidate was tested in an exact-disease human study.",
+                "source_ids": ["PMID:1"],
+            }],
+        }
+        results = {
+            "candidate_review": {"records": {
+                "documents": [
+                    {"document_id": "PMID:1", "title": "Retained evidence", "source": "test"}
+                ],
+                "reviews": [self.review("DRUG-A"), second_review],
+            }}
+        }
+        longshot = self.assessment(
+            "DRUG-A",
+            values={component: 5 for component in core.SCORE_COMPONENTS},
+        )
+        records = {
+            "assessments": [longshot],
+            "excluded_candidates": [{
+                "candidate_id": "DRUG-B",
+                "reason_code": "human_intervention",
+                "finding": "Exact-disease human intervention is disqualifying.",
+                "source_ids": ["PMID:1"],
+            }],
+        }
+
+        core._validate_candidate_audit(records, results)
+        self.assertEqual(core._final_score(longshot), 25)
+
+        all_excluded = {
+            "assessments": [],
+            "excluded_candidates": [
+                {
+                    "candidate_id": "DRUG-A",
+                    "reason_code": "unsupported_action",
+                    "finding": "The retained corpus does not support the proposed drug action.",
+                    "source_ids": ["PMID:1"],
+                },
+                records["excluded_candidates"][0],
+            ],
+        }
+        core._validate_candidate_audit(all_excluded, results)
+        self.assertEqual(
+            core._stop_reason({"candidate_audit": {"records": all_excluded}}),
+            "the audit excluded every reviewed candidate",
+        )
+
+        invalid = json.loads(json.dumps(records))
+        invalid["assessments"][0]["component_scores"]["drug_action_confidence"]["value"] = 12
+        with self.assertRaisesRegex(core.ProgramError, "must be one of"):
+            core._validate_candidate_audit(invalid, results)
+
+        invalid = json.loads(json.dumps(records))
+        invalid["excluded_candidates"] = []
+        with self.assertRaisesRegex(core.ProgramError, "partition every reviewed candidate"):
+            core._validate_candidate_audit(invalid, results)
+
+        invalid = json.loads(json.dumps(records))
+        invalid["assessments"].append(self.assessment("DRUG-B"))
+        invalid["excluded_candidates"] = []
+        with self.assertRaisesRegex(core.ProgramError, "disqualifying prior-art status"):
+            core._validate_candidate_audit(invalid, results)
+
+    def test_raw_scores_sort_deterministically_and_ties_share_rank(self):
+        candidates = [
+            {
+                "candidate_id": candidate_id,
+                "name": candidate_id,
+                "identity": {"status": "resolved"},
+                "graph_node_ids": ["NODE:1"],
+                "pathology_source_ids": ["PMID:1"],
+                "mechanism_source_ids": ["PMID:1"],
+            }
+            for candidate_id in ("DRUG-A", "DRUG-B", "DRUG-C")
+        ]
+        high = {component: 20 for component in core.SCORE_COMPONENTS}
+        medium = {component: 10 for component in core.SCORE_COMPONENTS}
+        results = {
+            "candidate_audit": {"records": {
+                "assessments": [
+                    self.assessment("DRUG-B", values=high),
+                    self.assessment("DRUG-C", values=medium),
+                    self.assessment("DRUG-A", values=high),
+                ],
+                "excluded_candidates": [],
+            }}
+        }
+        with patch.object(core, "_canonical_candidates", return_value=candidates):
+            rows, _ = core._ranked_rows(results)
+
+        self.assertEqual(
+            [(row["candidate_id"], row["rank"], row["final_score"]) for row in rows],
+            [("DRUG-A", 1, 100), ("DRUG-B", 1, 100), ("DRUG-C", 2, 50)],
+        )
+
+    def test_card_renderer_uses_actual_id_and_omits_empty_optional_sections(self):
+        components = {
+            component: {
+                "value": 10,
+                "reason": "Bounded support.",
+                "source_ids": ["PMID:1"],
+            }
+            for component in core.SCORE_COMPONENTS
+        }
+        payload = core._cards_bytes([{
+            "drug_id": "CANDIDATE-UNRESOLVED",
+            "aliases": [],
+            "score": 50,
+            "components": components,
+            "why": {"text": "Evidence supports nomination.", "source_ids": ["PMID:1"]},
+            "why_not": [],
+        }]).decode("utf-8")
+
+        self.assertIn("## CANDIDATE-UNRESOLVED", payload)
+        self.assertIn("Score: 50/100", payload)
+        self.assertIn("Drug-action confidence: 10/20", payload)
+        self.assertIn(
+            "### Why\n\nEvidence supports nomination.\n\nReferences: PMID:1",
+            payload,
+        )
+        self.assertNotIn("Aliases:", payload)
+        self.assertNotIn("### Why not", payload)
 
     def test_assertion_evidence_merges_but_identity_collision_fails(self):
         assertion = {
@@ -865,6 +1266,8 @@ class WorkflowTest(unittest.TestCase):
                     "summary": "deep profile",
                     "normal_state": "normal",
                     "pathological_state": "abnormal",
+                    "desired_biological_state": "restore the normal process",
+                    "established_pathology_observations": [],
                     "causal_role": "causal",
                     "mechanisms": ["mechanism"],
                     "cell_types": ["relevant cell"],
@@ -887,7 +1290,6 @@ class WorkflowTest(unittest.TestCase):
             "candidate_id": candidate_id,
             "name": name,
             "identity": identity,
-            "desired_change": f"change {node_id}",
             "mechanism_hypothesis": f"mechanism {node_id}",
             "graph_node_ids": [node_id],
             "pathology_source_ids": [f"PATH:{node_id}"],
@@ -920,13 +1322,53 @@ class WorkflowTest(unittest.TestCase):
     def review(candidate_id, source_id="PMID:1"):
         return {
             "candidate_id": candidate_id,
-            "rescue_rationale": "plausible rescue",
-            "evidence_strength": 2,
-            "rescue_fit": 2,
-            "uncertainty": "medium",
-            "counterevidence": [],
+            "hypothesis": "The candidate could move the process toward the desired state.",
+            "supporting_findings": [{
+                "finding": "The candidate has the required pharmacological action.",
+                "source_ids": [source_id],
+            }],
+            "mechanistic_bridge": "The established action is inferred to normalize the process.",
+            "assumptions": ["The pharmacological context transfers to the affected tissue."],
+            "aliases": [],
+            "why_not": [],
+            "prior_art": {
+                "status": "none_found",
+                "summary": "No exact-disease human intervention was found in the bounded search.",
+                "findings": [],
+            },
             "limitations": [],
-            "source_ids": [source_id],
+        }
+
+    @staticmethod
+    def assessment(candidate_id, source_id="PMID:1", values=None):
+        values = values or {
+            "drug_action_confidence": 15,
+            "disease_mechanism_relevance": 15,
+            "mechanistic_bridge_plausibility": 15,
+            "translational_feasibility": 15,
+            "evidence_robustness": 15,
+        }
+        return {
+            "candidate_id": candidate_id,
+            "source_integrity": {
+                "status": "supported",
+                "finding": "The decisive premises are supported by the retained corpus.",
+                "source_ids": [source_id],
+            },
+            "component_scores": {
+                component: {
+                    "value": values[component],
+                    "reason": f"The retained evidence supports the {component} rating.",
+                    "source_ids": [source_id],
+                }
+                for component in core.SCORE_COMPONENTS
+            },
+            "net_assessment": {
+                "text": "The mechanistic support outweighs the retained uncertainty.",
+                "source_ids": [source_id],
+            },
+            "aliases": [],
+            "why_not": [],
         }
 
 

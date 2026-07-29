@@ -23,7 +23,7 @@ Install the pinned runtime dependencies once with `python -m pip install -r requ
 
 2. Call `next`. Python performs any ready deterministic controller work, then writes exactly one content packet and returns its path and worker prompt.
 
-3. Start one new research agent per packet with only this `SKILL.md`, the returned worker prompt, and the current packet—never prior packet content or a previous worker thread. It researches to evidence saturation with primary or authoritative sources, retains those sources in `records.documents`, and writes one JSON result matching `result_contract`. Submit it unchanged:
+3. Start one new agent per packet with only this `SKILL.md`, the returned worker prompt, the current packet, and any read-only graph context explicitly retrieved through that packet—never prior packet content or a previous worker thread. Research workers investigate to evidence saturation with primary or authoritative sources and return in `records.documents` only the canonical documents directly cited by submitted claims, counterclaims, identity decisions, or limitations. The final auditor instead uses only the retained corpus supplied in its packet and returns no new documents. Every agent writes one JSON result matching `result_contract`; submit it unchanged:
 
    ```powershell
    python scripts/orchestrate_program.py submit <run-folder> <result.json>
@@ -37,12 +37,14 @@ Install the pinned runtime dependencies once with `python -m pip install -r requ
    - one constrained curation packet that partitions every non-anchor source node into run-local research, context-only, or excluded concepts;
    - one deep pathology-research packet per curated research concept;
    - a frozen, content-addressed living evidence graph;
-   - one mechanism-directed candidate-seed packet per researched pathology concept;
+   - one mechanism-directed candidate-seed packet per researched pathology concept, with a compact frozen-graph index and read-only context lookup;
    - deterministic UniChem lookup for every raw candidate seed, followed by one identity-review
      packet covering every exact conflict, connectivity-only match, unsupported identifier, and
      no-result seed;
-   - one evidence-review packet per pathology concept after candidate identity resolution;
-   - independent audit and deterministic ranking.
+   - one evidence-dossier packet per pathology concept after candidate identity resolution;
+   - one closed-corpus independent audit that partitions every reviewed candidate into a scored
+     assessment or a bounded, cited exclusion;
+   - deterministic raw-score calculation and ranking by Python.
 
 5. When status is `ready_to_build`, run:
 
@@ -56,22 +58,26 @@ Use `status` at any time. Resume means calling `next`; accepted results are immu
 
 - Pathology construction is treatment-blind. Pathology packets must not contain drug, compound, treatment, therapeutic, or candidate fields.
 - Candidate generation starts only after curation and every required pathology-concept result are accepted and Python freezes the graph snapshot.
-- Candidate eligibility follows `pathology element -> desired biological change -> established drug mode of action`. Direct disease-drug literature is optional.
+- Candidate eligibility follows `pathology element -> desired biological state -> established drug mode of action`.
 - Monarch associations are pathology-category allowlisted. DisMech treatment-oriented sections and fields are excluded and remaining free text is treatment-redacted before packet construction.
 - Workers create research content only. Python controls source receipts, task order, item cursors, packet lineage, validation, persistence, candidate aggregation, ranking order, and outputs.
 
 ## Evidence safeguards
 
 - Preserve source IDs, exact identity, contradictions, negative results, unresolved identity, exclusions, and explicit gaps.
+- Search results and snippets are transient. When using [Asta](https://allenai.org/asta/resources/mcp), search narrowly, inspect snippets, select and verify the underlying paper, cite its canonical ID, and return only that paper; do not propagate search output.
 - Every graph assertion cites retained pathology sources.
-- Candidate reviews use the frozen graph as disease context, retrieve primary or authoritative drug facts, and map verified pharmacology to that context. Disease-specific drug literature is secondary and reported only when decision-changing.
+- Candidate evidence reviews use the frozen graph as disease context, retrieve primary or authoritative drug facts, and build cited dossiers without scoring, ranking, or excluding candidates.
+- The independent audit reads and weighs the retained evidence rather than restating a review. It may not search, add evidence, or send a candidate for re-review.
+- Long or uncertain hypotheses remain rankable with explicit reservations. Audit exclusion is limited to established exact-disease use, exact-disease human intervention, unsupported or opposite proposed action, demonstrated impossibility of relevant action or exposure, or an entity established not to be a repurposable drug or administered intervention. The audit packet supplies exact definitions; uncertainty or missing data never establishes an exclusion.
+- Each assessed candidate receives five cited component scores of 5, 10, 15, or 20: drug-action confidence, disease-mechanism relevance, mechanistic-bridge plausibility, translational feasibility, and evidence robustness. The audit packet supplies category-specific anchors for every level. Python sums them without weighting to a transparent score out of 100 and applies deterministic dense ranking.
 - Never persist API keys, access tokens, authorization headers, or secrets.
 - Placebo, vehicle, and sham are comparators, not candidates.
 - Unresolved identity stays visible and may be reviewed; it must not silently erase the programme.
 - Exact UniChem UCI matches merge automatically. Connectivity-only matches, conflicting
   identifiers, unsupported candidates, and no results are interpretive identity work and never
   imply either equivalence or uniqueness.
-- `complete` requires at least one audited eligible candidate and verified hashes for all accepted results and outputs.
+- `complete` requires at least one audited, scored candidate and verified hashes for all accepted results and outputs.
 
 Read [architecture.md](references/architecture.md) for ownership, [packet-contract.md](references/packet-contract.md) for worker results, and [source-adapters.md](references/source-adapters.md) before changing source ingestion.
 

@@ -7,7 +7,15 @@ import argparse
 import json
 import sys
 
-from program_core import ProgramError, build_outputs, initialize, next_action, status, submit
+from program_core import (
+    ProgramError,
+    build_outputs,
+    graph_context,
+    initialize,
+    next_action,
+    status,
+    submit,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -24,6 +32,11 @@ def _parser() -> argparse.ArgumentParser:
     submit_command = commands.add_parser("submit", help="validate and accept one agent result")
     submit_command.add_argument("run_folder")
     submit_command.add_argument("result_path")
+    graph_command = commands.add_parser(
+        "graph-context", help="return one bounded context from a frozen evidence graph"
+    )
+    graph_command.add_argument("run_folder")
+    graph_command.add_argument("node_id")
     return parser
 
 
@@ -41,6 +54,8 @@ def main(argv: list[str] | None = None) -> int:
                 result = status(args.run_folder)
             case "build":
                 result = build_outputs(args.run_folder)
+            case "graph-context":
+                result = graph_context(args.run_folder, args.node_id)
             case _:
                 raise AssertionError(args.command)
     except (ProgramError, OSError) as exc:

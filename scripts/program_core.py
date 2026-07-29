@@ -19,7 +19,7 @@ from urllib.request import Request, urlopen
 from pathology_sources import SourceError, fetch_pathology_sources
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 7
 OBJECTIVE = (
     "Identify existing drugs whose established mode of action could plausibly alter a "
     "specific evidence-backed element of the supplied disease pathology. A prior "
@@ -43,8 +43,113 @@ STAGES = (
     "candidate_seed_generation",
     "candidate_identity",
     "candidate_review",
-    "audit_and_rank",
+    "candidate_audit",
 )
+GRAPH_INDEX_FIELDS = ("node_id", "label", "node_type", "disposition", "aliases")
+_CITATION_FIELDS = frozenset({"source_ids", "pathology_source_ids", "mechanism_source_ids"})
+SCORE_RUBRIC = {
+    "method": (
+        "Score each distinct component from its anchors, then sum the five values without "
+        "weighting. The total is a prioritisation score out of 100, not a probability of efficacy."
+    ),
+    "zero_policy": (
+        "Zero is not a scored level. Use a bounded exclusion only when the evidence establishes "
+        "an exclusion condition; otherwise retain the candidate at 5 with the reservation stated."
+    ),
+    "components": {
+        "drug_action_confidence": {
+            "label": "Drug-action confidence",
+            "question": "How securely is the proposed action established for this exact drug?",
+            "anchors": {
+                5: "Weak or indirect support for the action, but it is not unsupported or opposite.",
+                10: "Credible action with limited, model-specific, or concentration-relevance evidence.",
+                15: "Direct, good-quality pharmacology with one material target, direction, or dose uncertainty.",
+                20: "Direct, convergent evidence establishes the exact target, direction, and relevant action.",
+            },
+        },
+        "disease_mechanism_relevance": {
+            "label": "Disease-mechanism relevance",
+            "question": "Independent of the drug, how securely does the focal mechanism belong to disease pathology?",
+            "anchors": {
+                5: "An indirect but coherent disease link supports testing the mechanism.",
+                10: "Disease association is credible but causal role or desired direction is limited.",
+                15: "Strong disease evidence supports the mechanism and direction with one material uncertainty.",
+                20: "Convergent disease evidence establishes a causal role and the desired biological direction.",
+            },
+        },
+        "mechanistic_bridge_plausibility": {
+            "label": "Mechanistic-bridge plausibility",
+            "question": "How well does the drug action connect directionally to the desired disease state?",
+            "anchors": {
+                5: "A long or speculative bridge remains coherent and testable despite major stated assumptions.",
+                10: "A multi-step bridge has partial support and several material assumptions.",
+                15: "A short, directionally coherent bridge has direct support and one material assumption.",
+                20: "Direct evidence links the drug action to the desired state with no material unsupported step.",
+            },
+        },
+        "translational_feasibility": {
+            "label": "Translational feasibility",
+            "question": "Can relevant action plausibly be achieved in the needed tissue, dose, route, and timing?",
+            "anchors": {
+                5: "Delivery or exposure is highly uncertain or difficult, but not demonstrated impossible.",
+                10: "Major exposure, dosing, tissue, route, or timing limitations may be surmountable.",
+                15: "Relevant exposure and use are plausible with one material translational uncertainty.",
+                20: "Established human use supports relevant exposure, formulation, route, and timing.",
+            },
+        },
+        "evidence_robustness": {
+            "label": "Evidence robustness",
+            "question": "How independent, reproducible, direct, and internally consistent is the overall evidence base?",
+            "anchors": {
+                5: "Sparse or single-source evidence is sufficient only to keep the hypothesis testable.",
+                10: "Limited or model-dominated evidence has meaningful gaps or conflicts.",
+                15: "Multiple credible or orthogonal sources converge with minor limitations.",
+                20: "Independent, high-quality, directly relevant evidence converges without material conflict.",
+            },
+        },
+    },
+}
+SCORE_COMPONENTS = tuple(SCORE_RUBRIC["components"])
+SCORE_LABELS = {
+    component: definition["label"]
+    for component, definition in SCORE_RUBRIC["components"].items()
+}
+SCORE_VALUES = frozenset({5, 10, 15, 20})
+PRIOR_ART_STATUSES = frozenset({
+    "none_found",
+    "preclinical_only",
+    "human_intervention",
+    "established_use",
+    "unclear",
+})
+AUDIT_EXCLUSION_POLICY = {
+    "exact_disease_use": (
+        "The retained corpus establishes that the exact candidate is already an established "
+        "therapeutic use for the exact disease."
+    ),
+    "human_intervention": (
+        "The retained corpus establishes a registered or published human interventional study "
+        "of the exact candidate in the exact disease; observational or preclinical work does not qualify."
+    ),
+    "unsupported_action": (
+        "The retained corpus contains no credible direct support that the exact candidate has the "
+        "proposed drug action; missing downstream disease evidence alone does not qualify."
+    ),
+    "opposite_action": (
+        "The established drug action is directionally opposite to the desired biological state and "
+        "the retained corpus supplies no coherent compensatory rationale."
+    ),
+    "impossible_translational_feasibility": (
+        "The retained corpus demonstrates that relevant action or exposure cannot be achieved; "
+        "difficulty, missing data, or uncertainty does not qualify."
+    ),
+    "invalid_candidate": (
+        "The retained corpus establishes that the entity is not an existing drug or administered "
+        "intervention suitable for repurposing, such as a placebo, vehicle, or sham; unresolved "
+        "identity alone does not qualify."
+    ),
+}
+AUDIT_EXCLUSION_REASONS = frozenset(AUDIT_EXCLUSION_POLICY)
 
 STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
     "pathology_curation": {
@@ -52,7 +157,7 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
         "task": (
             "Convert the supplied source-derived pathology nodes into coherent run-local concepts "
             "before research; do not minimize concept count. Merge only when one disease-specific "
-            "biological profile and one discriminating rescue readout accurately describe every "
+            "biological profile and one desired biological state accurately describe every "
             "member at the same causal level. Shared genes, ontology IDs, pathways, anatomy, or "
             "causal relationships do not establish equivalence; keep bare entities, disease "
             "drivers, mechanisms, and phenotypes separate unless they express the same claim. "
@@ -83,27 +188,39 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
         "task": (
             "Research this one curated pathology concept in exceptional disease-specific "
             "depth. Explain its normal state, pathological change, causal role, mechanisms, "
-            "biological context, uncertainty, contradictions, and gaps. Do not research or "
-            "propose drugs, treatments, or therapeutic strategies."
+            "biological context, uncertainty, contradictions, and gaps. Define one concise, "
+            "evidence-grounded desired biological state that would reverse the focal pathology "
+            "or compensate for an irreversible driver. Label synthesis as inference and cite the "
+            "directional evidence it follows from. Retain only established pathology "
+            "observations of movement toward that state; an empty list is valid. Keep discovery "
+            "pathology-led: do not search for candidates, therapies, repurposing, or disease-drug "
+            "associations. When an intervention appears in a source, retain only directly supported "
+            "causal biology and pathology; do not use its therapeutic interpretation, efficacy, "
+            "candidate status, or trial history to construct profiles or assertions."
         ),
         "collections": ["documents", "profiles", "assertions"],
     },
     "candidate_seed_research": {
         "role": "mechanism-directed candidate seed researcher",
         "task": (
-            "For this frozen researched pathology concept and its linked context, define a "
-            "biological change that could move its pathological state toward normal, then generate "
-            "a focused set of diverse "
-            "existing-drug seeds whose established mode of action could cause those changes. Do not pad the "
+            "For this frozen researched pathology concept and its linked context, generate a "
+            "focused set of diverse existing-drug seeds whose established mode of action could "
+            "produce its desired biological state. Do not pad the "
             "list. Consider both disease-modifying changes to the assigned concept and symptomatic "
-            "or compensatory benefit for linked context nodes where mechanistically plausible. A "
-            "drug need not have any prior literature association with the disease; cite pathology "
-            "evidence and mode-of-action evidence separately."
+            "or compensatory benefit for linked context nodes where mechanistically plausible. "
+            "Retain a less-plausible seed only when it offers a discriminating, mechanism-relevant "
+            "readout, and state what that readout would resolve. "
+            "Use the compact graph index to identify context and retrieve only concepts materially "
+            "relevant to the focal rescue; do not traverse the graph for completeness. "
+            "Search from the supplied target or process to established drug action; do not use "
+            "disease-specific drug literature or queries combining the disease with drug, "
+            "treatment, therapy, trial, or repurposing terms. Cite pathology and mode-of-action "
+            "evidence separately."
         ),
         "collections": ["documents", "candidates", "exclusions"],
     },
     "candidate_identity": {
-        "role": "candidate identity reviewer",
+        "role": "candidate identity adjudicator",
         "task": (
             "Resolve only the supplied UniChem-flagged candidate identities before evidence "
             "review. Every queued seed must appear exactly once. Use authoritative identity "
@@ -115,26 +232,42 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
         ),
         "collections": ["documents", "identity_groups"],
     },
-    "candidate_review_research": {
+    "candidate_evidence_review": {
         "role": "pathology-concept candidate evidence reviewer",
         "task": (
             "Treat the supplied frozen pathology profiles as authoritative disease context. For "
-            "every candidate, retrieve primary or authoritative sources that verify identity, "
+            "every candidate, first retrieve primary or authoritative sources that verify identity, "
             "target and action, pharmacology, relevant exposure, and measurable readouts, then map "
-            "those facts to the supplied pathology. Disease-specific drug literature is secondary: "
-            "check it only for decision-changing prior art. Record rescue rationale, counterevidence, "
-            "limitations, evidence strength, rescue fit, and uncertainty."
+            "those facts to the supplied pathology. Build an evidence dossier rather than a score "
+            "or eligibility decision: state the hypothesis, cited supporting findings, a concise "
+            "mechanistic bridge, its explicit assumptions, cited why-not findings, and limitations. "
+            "A long or unconventional bridge remains a valid hypothesis when its assumptions are "
+            "clear. Only after constructing the mechanism, check exact-disease prior art and classify "
+            "it as none found, preclinical only, human intervention, established use, or unclear. "
+            "Preserve decision-changing negative evidence. Report safety only when it opposes the "
+            "desired phenotype, prevents relevant exposure, confounds the readout, or changes "
+            "prioritisation. Record only drug names or salt forms explicitly used in cited evidence."
         ),
         "collections": ["documents", "reviews"],
     },
-    "audit_and_rank": {
-        "role": "independent auditor and ranker",
+    "candidate_audit": {
+        "role": "independent candidate auditor",
         "task": (
-            "Audit citation and graph support, correct decision-changing errors, and give every "
-            "reviewed candidate an eligible or excluded ranking record. Keep evidence, fit, "
-            "and uncertainty separate."
+            "Use only the supplied retained corpus; do not search for or add evidence. Independently "
+            "read and weigh each dossier rather than restating it. Partition every candidate exactly "
+            "once into a scored assessment or a cited exclusion. Exclude only established exact-"
+            "disease use, exact-disease human intervention, unsupported proposed drug action, action "
+            "clearly opposite to the desired state without compensation, demonstrated impossibility "
+            "of relevant action or exposure, or an invalid candidate class. Unresolved identity, "
+            "weak evidence, long causal distance, uncertain exposure, preclinical-only evidence, and "
+            "material assumptions remain scored with explicit why-not findings. For every assessment, "
+            "audit source integrity; assign one cited 5, 10, 15, or 20 score for each of drug-action "
+            "confidence, disease-mechanism relevance, mechanistic-bridge plausibility, translational "
+            "feasibility, and evidence robustness; and give a cited net assessment that weighs the "
+            "strongest support against the strongest reservation. Python computes the raw total and "
+            "ranking. Return only audited aliases and why-not findings that may enter final output."
         ),
-        "collections": ["rankings", "audit_notes"],
+        "collections": ["assessments", "excluded_candidates"],
     },
 }
 
@@ -152,7 +285,8 @@ ROW_FIELDS = {
     ],
     "profiles": [
         "node_id", "node_type", "summary", "normal_state", "pathological_state",
-        "causal_role", "mechanisms", "cell_types", "anatomical_context",
+        "desired_biological_state", "established_pathology_observations", "causal_role",
+        "mechanisms", "cell_types", "anatomical_context",
         "temporal_context", "upstream_causes", "downstream_consequences",
         "contradictions", "gaps", "uncertainty", "source_ids",
     ],
@@ -161,7 +295,7 @@ ROW_FIELDS = {
         "evidence_summary", "source_ids",
     ],
     "candidates": [
-        "candidate_id", "name", "identity", "desired_change", "mechanism_hypothesis",
+        "candidate_id", "name", "identity", "mechanism_hypothesis",
         "graph_node_ids", "pathology_source_ids", "mechanism_source_ids",
     ],
     "exclusions": ["name", "reason"],
@@ -170,14 +304,14 @@ ROW_FIELDS = {
         "identifiers", "reason", "source_ids",
     ],
     "reviews": [
-        "candidate_id", "rescue_rationale", "evidence_strength", "rescue_fit",
-        "uncertainty", "counterevidence", "limitations", "source_ids",
+        "candidate_id", "hypothesis", "supporting_findings", "mechanistic_bridge",
+        "assumptions", "why_not", "prior_art", "aliases", "limitations",
     ],
-    "rankings": [
-        "candidate_id", "eligible", "evidence_strength", "rescue_fit",
-        "uncertainty", "priority_tier", "rationale", "source_ids",
+    "assessments": [
+        "candidate_id", "source_integrity", "component_scores", "net_assessment",
+        "aliases", "why_not",
     ],
-    "audit_notes": ["subject_id", "finding"],
+    "excluded_candidates": ["candidate_id", "reason_code", "finding", "source_ids"],
 }
 
 PATHOLOGY_PROFILE_LIST_FIELDS = (
@@ -191,7 +325,7 @@ FIELD_RULES = {
         "concept_id is one member_node_id; choose an authoritative member ID only after same-level "
         "equivalence is established and the ID denotes the curated concept",
         "shared identifiers, genes, pathways, anatomy, or causal adjacency are not equivalence; "
-        "one biological profile and rescue readout must fit every merged member",
+        "one biological profile and desired biological state must fit every merged member",
         "same-label gene-level source claims may merge across sources; mutation-, variant-, "
         "repeat-, model-, and mechanism-specific claims remain separate",
         "merge true duplicate records into a retained concept; do not exclude their evidence",
@@ -205,6 +339,10 @@ FIELD_RULES = {
         "return exactly one profile whose node_id and node_type match the supplied curated concept",
         "retain at least one independently researched document",
         f"profile fields {', '.join(PATHOLOGY_PROFILE_LIST_FIELDS)} are JSON lists",
+        "desired_biological_state is one concise biological state, not a treatment, assay, "
+        "control, candidate, or generic clinical improvement",
+        "established_pathology_observations is a list of observation and source_ids objects; "
+        "use an empty list rather than inventing an assay, threshold, or biomarker",
         "assertions link only supplied source-derived node IDs; all claims cite retained sources; "
         "no treatment content",
     ],
@@ -216,9 +354,12 @@ FIELD_RULES = {
         "their own keys for identity review",
         "each identifier must denote the proposed candidate itself, not one ingredient of a "
         "combination, mixture, formulation, or biologic product",
-        "graph_node_ids contains the supplied researched concept and is non-empty; "
-        "pathology_source_ids support the disease mechanism",
-        "mechanism_source_ids support the drug mode of action; disease-drug citations are optional",
+        "candidates are repurposing hypotheses, not controls or comparators; do not pad the set",
+        "graph_node_ids includes the supplied researched concept and may include other indexed "
+        "non-anchor concepts used by the hypothesis; pathology_source_ids support those concepts",
+        "each graph_node_id has at least one attached source in pathology_source_ids; state the "
+        "supported relationship because graph proximity or label similarity is not evidence",
+        "mechanism_source_ids support the drug mode of action and exclude disease-specific drug evidence",
     ],
     "candidate_identity": [
         "partition every queued seed_id exactly once across identity_groups",
@@ -230,17 +371,42 @@ FIELD_RULES = {
         "each identity group cites at least one newly retained authoritative identity source",
         "same name alone is not identity evidence; preserve material salt, stereochemical, "
         "mixture, biologic, product, and combination distinctions",
+        "treat suspected aliases, salts, and conflicting identifiers as one unresolved identity "
+        "until authoritative evidence resolves them",
     ],
-    "candidate_review_research": [
+    "candidate_evidence_review": [
         "return exactly one review for every candidate in the supplied batch and no others",
-        "each review cites at least one document retained in this result",
-        "evidence_strength and rescue_fit are integers 0..4",
-        "uncertainty is low, medium, high, or unknown",
+        "each review cites at least one document retained in this result through supporting_findings, "
+        "why_not, prior_art findings, or aliases",
+        "hypothesis and mechanistic_bridge are concise non-empty text; mechanistic_bridge is an "
+        "explicit inference and never an exclusion gate",
+        "supporting_findings is a non-empty list of finding and source_ids objects",
+        "assumptions and limitations are lists of non-empty strings",
+        "aliases is a list of name and source_ids objects for drug names or salt forms explicitly "
+        "used in cited evidence; use an empty list when none are supported",
+        "why_not is a list of finding and source_ids objects containing only counterevidence "
+        "encountered during the existing review; use an empty list when absent and do not search "
+        "merely to populate it",
+        "prior_art has exactly status, summary, and findings; status is none_found, preclinical_only, "
+        "human_intervention, established_use, or unclear; positive statuses cite at least one finding",
+        "the reviewer does not score, rank, or exclude candidates",
     ],
-    "audit_and_rank": [
-        "one ranking per candidate; scores are integers 0..4 and uncertainty uses the "
-        "review values",
-        "eligible records use priority_tier 1..3; ineligible records need exclusion_reason",
+    "candidate_audit": [
+        "assessments and excluded_candidates form a complete non-overlapping partition of every "
+        "reviewed candidate",
+        "source_integrity has exactly status, finding, and source_ids; status is supported or "
+        "partly_supported",
+        "component_scores has exactly drug_action_confidence, disease_mechanism_relevance, "
+        "mechanistic_bridge_plausibility, translational_feasibility, and evidence_robustness",
+        "each component has exactly value, reason, and source_ids; value is 5, 10, 15, or 20; "
+        "Python sums the five values without weighting",
+        "net_assessment has exactly text and source_ids and explicitly weighs decisive support "
+        "against the strongest reservation",
+        "audited aliases and why_not use cited name or finding objects and are the only review-like "
+        "fields that may enter final cards",
+        "excluded_candidates use a source-backed reason_code from the bounded exclusion policy",
+        "do not exclude a candidate merely for unresolved identity, weak evidence, long causal "
+        "distance, uncertain exposure, preclinical-only evidence, or material assumptions",
     ],
 }
 
@@ -254,7 +420,6 @@ _SECRET_KEYS = {
     "secret",
 }
 _COMPARATORS = {"placebo", "vehicle", "sham"}
-_UNCERTAINTY_ORDER = {"low": 0, "medium": 1, "high": 2, "unknown": 3}
 _PATHOLOGY_FORBIDDEN_KEYS = {"candidate", "compound", "drug", "treatment", "therapeutic"}
 _RESEARCH_CONTEXT_SECTIONS = {
     "categories",
@@ -560,11 +725,9 @@ def _stop_reason(results: Mapping[str, Mapping[str, Any]]) -> str | None:
         result = results.get(stage)
         if result is not None and not result.get("records", {}).get(collection):
             return reason
-    audit = results.get("audit_and_rank")
-    if audit is not None and not any(
-        row.get("eligible") is True for row in audit.get("records", {}).get("rankings", [])
-    ):
-        return "the audit left no eligible candidates"
+    audit = results.get("candidate_audit")
+    if audit is not None and not audit.get("records", {}).get("assessments"):
+        return "the audit excluded every reviewed candidate"
     return None
 
 
@@ -613,7 +776,7 @@ def _program_status(
             next_task = {
                 "evidence_graph": "pathology_node_research",
                 "candidate_seed_generation": "candidate_seed_research",
-                "candidate_review": "candidate_review_research",
+                "candidate_review": "candidate_evidence_review",
             }[next_stage]
             next_item_id, accepted_items = _first_missing(
                 run_root, next_task, _item_ids(next_stage, results)
@@ -730,8 +893,8 @@ def _all_documents(results: Mapping[str, Mapping[str, Any]]) -> list[dict[str, A
         (
             row
             for result in results.values()
-            for row in result.get("records", {}).get("documents", [])
-            if isinstance(row, dict)
+            if isinstance(result.get("records"), Mapping)
+            for row in _cited_documents(result["records"])
         )
     )
 
@@ -743,14 +906,44 @@ def _find(rows: Iterable[dict[str, Any]], field: str, value: str) -> dict[str, A
     return matches[0]
 
 
-def _cited_ids(rows: Iterable[Mapping[str, Any]]) -> set[str]:
-    fields = ("source_ids", "pathology_source_ids", "mechanism_source_ids")
-    return {
-        str(value)
-        for row in rows
-        for field in fields
-        for value in (row.get(field) if isinstance(row.get(field), list) else [])
-    }
+def _cited_ids(value: Any) -> set[str]:
+    """Collect citations recursively without treating document metadata as evidence."""
+    cited: set[str] = set()
+
+    def visit(current: Any) -> None:
+        if isinstance(current, Mapping):
+            for field, nested in current.items():
+                if field == "documents":
+                    continue
+                if field in _CITATION_FIELDS:
+                    if isinstance(nested, list):
+                        cited.update(str(item) for item in nested)
+                    continue
+                visit(nested)
+        elif isinstance(current, list):
+            for item in current:
+                visit(item)
+
+    visit(value)
+    return cited
+
+
+def _select_cited_documents(
+    documents: Iterable[dict[str, Any]], citations: Any
+) -> list[dict[str, Any]]:
+    cited_ids = _cited_ids(citations)
+    return [
+        dict(row)
+        for row in documents
+        if str(row.get("document_id", "")) in cited_ids
+    ]
+
+
+def _cited_documents(records: Mapping[str, Any]) -> list[dict[str, Any]]:
+    documents = records.get("documents", [])
+    if not isinstance(documents, list) or any(not isinstance(row, dict) for row in documents):
+        raise ProgramError("records.documents must be a list of objects")
+    return _select_cited_documents(documents, records)
 
 
 def _curation_concepts(
@@ -919,13 +1112,103 @@ def _canonical_source_records(
     )
 
 
+def _graph_index(records: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {key: row[key] for key in GRAPH_INDEX_FIELDS}
+        for row in sorted(
+            _rows(records, "source_nodes"), key=lambda value: str(value["node_id"])
+        )
+        if row.get("node_type") != "disease_anchor"
+    ]
+
+
+def _graph_support_ids(records: Mapping[str, Any]) -> dict[str, set[str]]:
+    support = {
+        str(row["node_id"]): set(map(str, row["source_ids"]))
+        for row in _rows(records, "source_nodes")
+        if row.get("node_type") != "disease_anchor"
+    }
+    for row in _rows(records, "profiles"):
+        node_id = str(row["node_id"])
+        if node_id in support:
+            support[node_id].update(map(str, row["source_ids"]))
+    for row in [*_rows(records, "source_edges"), *_rows(records, "assertions")]:
+        source_ids = set(map(str, row["source_ids"]))
+        for node_id in map(str, (row["subject_id"], row["object_id"])):
+            if node_id in support:
+                support[node_id].update(source_ids)
+    return support
+
+
+def _graph_node_context(records: Mapping[str, Any], node_id: str) -> dict[str, Any]:
+    nodes = _rows(records, "source_nodes")
+    node_by_id = {str(row["node_id"]): row for row in nodes}
+    node = _find(nodes, "node_id", node_id)
+    if node.get("node_type") == "disease_anchor":
+        raise ProgramError("The disease anchor is not a retrievable pathology concept")
+    profiles = [
+        row for row in _rows(records, "profiles") if str(row["node_id"]) == node_id
+    ]
+    if len(profiles) > 1:
+        raise ProgramError(f"Multiple pathology profiles exist for node_id={node_id}")
+    source_edges = [
+        row
+        for row in _rows(records, "source_edges")
+        if node_id in {str(row["subject_id"]), str(row["object_id"])}
+    ]
+    assertions = [
+        row
+        for row in _rows(records, "assertions")
+        if node_id in {str(row["subject_id"]), str(row["object_id"])}
+    ]
+    related_ids = {
+        str(value)
+        for edge in [*source_edges, *assertions]
+        for value in (edge["subject_id"], edge["object_id"])
+        if str(value) != node_id
+    }
+    return {
+        "node": node,
+        "profile": profiles[0] if profiles else None,
+        "source_edges": sorted(source_edges, key=lambda row: str(row["edge_id"])),
+        "assertions": sorted(assertions, key=lambda row: str(row["assertion_id"])),
+        "related_nodes": [
+            {key: node_by_id[value][key] for key in GRAPH_INDEX_FIELDS}
+            for value in sorted(related_ids)
+            if value in node_by_id
+            and node_by_id[value].get("node_type") != "disease_anchor"
+        ],
+    }
+
+
+def graph_context(root: str | Path, node_id: str) -> dict[str, Any]:
+    run_root = Path(root).expanduser().resolve()
+    case, results = _case(run_root), _load_results(run_root)
+    graph = results.get("evidence_graph")
+    if graph is None:
+        raise ProgramError("Graph context is unavailable before the evidence graph is frozen")
+    records = graph.get("records")
+    if not isinstance(records, dict) or graph.get("snapshot_id") != _stable_id("GRAPH", records):
+        raise ProgramError("Evidence graph snapshot verification failed")
+    node_id = node_id.strip()
+    if not node_id:
+        raise ProgramError("node_id is required")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "case_id": case["case_id"],
+        "graph_snapshot_id": graph["snapshot_id"],
+        "context": _graph_node_context(records, node_id),
+    }
+
+
 def _packet_context(
+    run_root: Path,
     task: str,
     item_id: str | None,
     results: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
-    documents = _all_documents(results)
     if task == "pathology_curation":
+        documents = _all_documents(results)
         source_result = results["pathology_sources"]
         source = source_result["records"]
         nodes = sorted(
@@ -954,6 +1237,7 @@ def _packet_context(
             "upstream_gaps": source_result.get("gaps", []),
         }
     if task == "pathology_node_research":
+        documents = _all_documents(results)
         source = results["pathology_sources"]["records"]
         concept = _find(_research_concepts(results), "concept_id", str(item_id))
         canonical_nodes, canonical_edges = _canonical_source_records(results)
@@ -1003,35 +1287,22 @@ def _packet_context(
             "source_receipts": _rows(source, "source_receipts"),
             "upstream_gaps": results["pathology_sources"].get("gaps", []),
         }
-    graph = results["evidence_graph"]["records"]
+    graph_result = results["evidence_graph"]
+    graph = graph_result["records"]
     if task == "candidate_seed_research":
-        concept = _find(_rows(graph, "source_nodes"), "node_id", str(item_id))
-        profile = _find(_rows(graph, "profiles"), "node_id", str(item_id))
-        edges = [
-            row
-            for row in [*_rows(graph, "source_edges"), *_rows(graph, "assertions")]
-            if str(item_id) in {str(row["subject_id"]), str(row["object_id"])}
-        ]
-        related_ids = {
-            str(value)
-            for edge in edges
-            for value in (edge["subject_id"], edge["object_id"])
-            if str(value) != str(item_id)
-        }
-        related_nodes = [
-            row
-            for row in _rows(graph, "source_nodes")
-            if str(row["node_id"]) in related_ids
-        ]
         return {
-            "graph_sha256": _sha256(_canonical_bytes(results["evidence_graph"])),
-            "concept": concept,
-            "profile": profile,
-            "related_nodes": related_nodes,
-            "related_edges": edges,
-            "source_index": _source_index(
-                documents, _cited_ids([concept, profile, *related_nodes, *edges])
-            ),
+            "graph_snapshot_id": graph_result["snapshot_id"],
+            "focal_context": _graph_node_context(graph, str(item_id)),
+            "graph_index": _graph_index(graph),
+            "context_lookup": {
+                "argv": [
+                    "python",
+                    str(Path(__file__).with_name("orchestrate_program.py").resolve()),
+                    "graph-context",
+                    str(run_root),
+                    "<node_id>",
+                ]
+            },
         }
     seeds = results["candidate_seed_generation"]["records"]
     if task == "candidate_identity":
@@ -1040,7 +1311,8 @@ def _packet_context(
             "identity_queue": queued,
             "resolved_candidates": _canonical_candidates(results, reviewed=False),
         }
-    if task == "candidate_review_research":
+    if task == "candidate_evidence_review":
+        documents = _all_documents(results)
         batch = _find(_review_batches(results), "concept_id", str(item_id))
         candidate_ids = set(map(str, batch["candidate_ids"]))
         candidates = [
@@ -1061,18 +1333,22 @@ def _packet_context(
         profiles = [
             row for row in _rows(graph, "profiles") if str(row["node_id"]) in node_ids
         ]
-        mechanism_source_ids = {
+        review_source_ids = {
             str(source_id)
             for candidate in candidates
-            for source_id in candidate["mechanism_source_ids"]
+            for source_id in (
+                *candidate["mechanism_source_ids"],
+                *candidate.get("identity", {}).get("source_ids", []),
+            )
         }
         return {
             "primary_concept_id": str(item_id),
             "candidates": candidates,
             "pathology_concepts": concepts,
             "pathology_profiles": profiles,
-            "source_index": _source_index(documents, mechanism_source_ids),
+            "source_index": _source_index(documents, review_source_ids),
         }
+    documents = _all_documents(results)
     return {
         "candidates": _canonical_candidates(results),
         "reviews": _rows(results["candidate_review"]["records"], "reviews"),
@@ -1105,7 +1381,7 @@ def _build_packet(
         "task": guidance["task"],
         "case": case,
         "upstream": upstream,
-        "context": _packet_context(task, item_id, results),
+        "context": _packet_context(run_root, task, item_id, results),
         "result_contract": {
             "stage": task,
             "item_id": item_id,
@@ -1116,6 +1392,14 @@ def _build_packet(
                 for name in guidance["collections"]
             },
             "field_rules": FIELD_RULES[task],
+            **(
+                {
+                    "score_rubric": SCORE_RUBRIC,
+                    "exclusion_policy": AUDIT_EXCLUSION_POLICY,
+                }
+                if task == "candidate_audit"
+                else {}
+            ),
             "gaps": "list of explicit limitations or unresolved questions",
             "notes": "optional list of concise notes",
         },
@@ -1123,6 +1407,17 @@ def _build_packet(
             "Use only supplied or newly retrieved named sources; never invent citations.",
             "Use PMID:<digits>, PMCID:PMC<digits>, DOI:<doi>, recognized accession:<id>, or "
             "HTTPS URL document IDs; never invent DOC aliases.",
+            *(
+                [
+                    "Search and read freely, but return only documents that directly support a "
+                    "submitted claim, counterclaim, identity decision, or limitation.",
+                    "Every returned document_id must be cited in this result through source_ids, "
+                    "pathology_source_ids, or mechanism_source_ids; cited upstream documents do "
+                    "not need to be returned again.",
+                ]
+                if "documents" in guidance["collections"]
+                else []
+            ),
             "Preserve contradictions, negative results, unresolved identity, and source gaps.",
             "Return JSON only and do not include credentials or API keys.",
         ],
@@ -1156,7 +1451,8 @@ def next_action(root: str | Path) -> dict[str, Any]:
         "packet_path": str(packet_path),
         "suggested_result_path": str(result_path),
         "worker_prompt": (
-            f"Read only the content packet at {packet_path}. Complete the {task} task and write "
+            f"Read only the content packet at {packet_path} and any controller-returned graph "
+            f"context explicitly authorized by that packet. Complete the {task} task and write "
             f"one JSON object matching result_contract to {result_path}. Use this exact header: "
             f"stage={json.dumps(task)}, item_id={json.dumps(item_id)}, "
             f"packet_id={json.dumps(packet['packet_id'])}, status=\"complete\". "
@@ -1183,6 +1479,23 @@ def _item_collection(
     ]
 
 
+def _item_cited_documents(
+    root: Path,
+    results: Mapping[str, Mapping[str, Any]],
+    stage: str,
+    task: str,
+) -> list[dict[str, Any]]:
+    item_ids = _item_ids(stage, results)
+    accepted = _item_results(root, task, item_ids)
+    if len(accepted) != len(item_ids):
+        raise ProgramError(f"Cannot aggregate {stage} before every item is accepted")
+    return [
+        row
+        for item_id in item_ids
+        for row in _cited_documents(accepted[item_id]["records"])
+    ]
+
+
 def _item_gaps(
     root: Path,
     results: Mapping[str, Mapping[str, Any]],
@@ -1199,14 +1512,6 @@ def _build_graph_result(
     source = results["pathology_sources"]["records"]
     canonical_nodes, canonical_edges = _canonical_source_records(results)
     records = {
-        "documents": _merge_documents(
-            [
-                *_rows(source, "documents"),
-                *_item_collection(
-                    root, results, "evidence_graph", "pathology_node_research", "documents"
-                ),
-            ]
-        ),
         "source_nodes": canonical_nodes,
         "source_edges": canonical_edges,
         "source_receipts": _rows(source, "source_receipts"),
@@ -1224,6 +1529,17 @@ def _build_graph_result(
             )
         ),
     }
+    records["documents"] = _select_cited_documents(
+        _merge_documents(
+            [
+                *_cited_documents(source),
+                *_item_cited_documents(
+                    root, results, "evidence_graph", "pathology_node_research"
+                ),
+            ]
+        ),
+        records,
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "stage": "evidence_graph",
@@ -1477,7 +1793,6 @@ def _merge_candidate_rows(
         "candidate_id": candidate_id,
         "name": str(identity["preferred_name"]),
         "identity": dict(identity),
-        "desired_change": _merge_text(*(row["desired_change"] for row in rows)),
         "mechanism_hypothesis": _merge_text(*(row["mechanism_hypothesis"] for row in rows)),
         "graph_node_ids": sorted({str(value) for row in rows for value in row["graph_node_ids"]}),
         "pathology_source_ids": sorted({
@@ -1574,13 +1889,10 @@ def _build_seed_result(
     queued_count = sum(
         row["identity_resolution"]["status"] != "exact" for row in candidates
     )
+    upstream_document_ids = {
+        str(row["document_id"]) for row in _all_documents(results)
+    }
     records = {
-        "documents": _merge_documents(
-            [
-                *_rows(results["evidence_graph"]["records"], "documents"),
-                *(row for item_id in item_ids for row in _rows(accepted[item_id]["records"], "documents")),
-            ]
-        ),
         "candidates": candidates,
         "identity_receipts": receipts,
         "exclusions": [
@@ -1589,6 +1901,15 @@ def _build_seed_result(
             for row in _rows(accepted[item_id]["records"], "exclusions")
         ],
     }
+    records["documents"] = _select_cited_documents(
+        _merge_documents(
+            row
+            for item_id in item_ids
+            for row in _cited_documents(accepted[item_id]["records"])
+            if str(row["document_id"]) not in upstream_document_ids
+        ),
+        records,
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "stage": "candidate_seed_generation",
@@ -1622,28 +1943,34 @@ def _empty_identity_result(results: Mapping[str, Mapping[str, Any]]) -> dict[str
 def _build_review_result(
     root: Path, results: Mapping[str, Mapping[str, Any]]
 ) -> dict[str, Any]:
+    reviews = _merge_unique(
+        _item_collection(
+            root, results, "candidate_review", "candidate_evidence_review", "reviews"
+        ),
+        "candidate_id",
+        "reviews",
+    )
+    upstream_document_ids = {
+        str(row["document_id"]) for row in _all_documents(results)
+    }
     return {
         "schema_version": SCHEMA_VERSION,
         "stage": "candidate_review",
         "status": "complete",
         "records": {
-            "documents": _merge_documents(
-                [
-                    *_all_documents(results),
-                    *_item_collection(
-                        root, results, "candidate_review", "candidate_review_research", "documents"
-                    ),
-                ]
-            ),
-            "reviews": _merge_unique(
-                _item_collection(
-                    root, results, "candidate_review", "candidate_review_research", "reviews"
+            "documents": _select_cited_documents(
+                (
+                    row
+                    for row in _item_cited_documents(
+                        root, results, "candidate_review", "candidate_evidence_review"
+                    )
+                    if str(row["document_id"]) not in upstream_document_ids
                 ),
-                "candidate_id",
-                "reviews",
+                reviews,
             ),
+            "reviews": reviews,
         },
-        "gaps": _item_gaps(root, results, "candidate_review", "candidate_review_research"),
+        "gaps": _item_gaps(root, results, "candidate_review", "candidate_evidence_review"),
         "notes": [],
     }
 
@@ -1825,7 +2152,10 @@ def _validate_pathology_item(
     profile = profiles[0]
     _required(
         profile,
-        ("summary", "normal_state", "pathological_state", "causal_role", "uncertainty"),
+        (
+            "summary", "normal_state", "pathological_state", "desired_biological_state",
+            "causal_role", "uncertainty",
+        ),
         "profiles[0]",
     )
     for field in PATHOLOGY_PROFILE_LIST_FIELDS:
@@ -1837,6 +2167,19 @@ def _validate_pathology_item(
         *(str(row["document_id"]) for row in documents),
     }
     _references(profiles[0], "source_ids", source_ids, "profiles[0]")
+    observations = profile["established_pathology_observations"]
+    if not isinstance(observations, list) or any(
+        not isinstance(row, dict) for row in observations
+    ):
+        raise ProgramError(
+            "profiles[0].established_pathology_observations must be a list of objects"
+        )
+    for index, observation in enumerate(observations):
+        label = f"profiles[0].established_pathology_observations[{index}]"
+        if set(observation) != {"observation", "source_ids"}:
+            raise ProgramError(f"{label} must contain only observation and source_ids")
+        _required(observation, ("observation",), label)
+        _references(observation, "source_ids", source_ids, label)
     for index, row in enumerate(assertions):
         label = f"assertions[{index}]"
         _required(
@@ -1860,8 +2203,9 @@ def _validate_seed_item(
     _contract_rows(records, "exclusions")
     graph = results["evidence_graph"]["records"]
     concept = _find(_research_concepts(results), "concept_id", item_id)
-    concept_node_ids = {str(concept["concept_id"])}
-    node_ids = _ids(_rows(graph, "source_nodes"), "node_id", "source_nodes")
+    concept_id = str(concept["concept_id"])
+    support_by_node = _graph_support_ids(graph)
+    allowed_node_ids = set(support_by_node)
     pathology_source_ids = _ids(_rows(graph, "documents"), "document_id", "documents")
     new_mechanism_source_ids = {str(row["document_id"]) for row in documents}
     mechanism_source_ids = {
@@ -1870,11 +2214,12 @@ def _validate_seed_item(
     }
     for index, row in enumerate(candidates):
         label = f"candidates[{index}]"
+        unexpected = sorted(set(row) - set(ROW_FIELDS["candidates"]))
+        if unexpected:
+            raise ProgramError(f"{label} has unexpected fields: {unexpected}")
         _required(
             row,
-            (
-                "candidate_id", "name", "identity", "desired_change", "mechanism_hypothesis",
-            ),
+            ("candidate_id", "name", "identity", "mechanism_hypothesis"),
             label,
         )
         if str(row["name"]).strip().casefold() in _COMPARATORS:
@@ -1895,10 +2240,19 @@ def _validate_seed_item(
             raise ProgramError(
                 f"{label}.identity requires an authoritative identifier when resolved"
             )
-        graph_refs = _references(row, "graph_node_ids", node_ids, label)
-        if not graph_refs <= concept_node_ids:
-            raise ProgramError(f"{label}.graph_node_ids contains nodes outside the item concept")
-        _references(row, "pathology_source_ids", pathology_source_ids, label)
+        graph_refs = _references(row, "graph_node_ids", allowed_node_ids, label)
+        if concept_id not in graph_refs:
+            raise ProgramError(f"{label}.graph_node_ids must include the focal item concept")
+        pathology_refs = _references(row, "pathology_source_ids", pathology_source_ids, label)
+        unsupported = sorted(
+            node_id
+            for node_id in graph_refs
+            if not pathology_refs & support_by_node[node_id]
+        )
+        if unsupported:
+            raise ProgramError(
+                f"{label}.pathology_source_ids do not support graph nodes: {unsupported}"
+            )
         mechanism_refs = _references(row, "mechanism_source_ids", mechanism_source_ids, label)
         if not mechanism_refs & new_mechanism_source_ids:
             raise ProgramError(f"{label}.mechanism_source_ids needs a retained drug-MOA source")
@@ -1968,9 +2322,9 @@ def _validate_candidate_identity(
         raise ProgramError("Each exact UniChem candidate may be attached at most once")
 
 
-def _score(value: Any, label: str) -> int:
-    if type(value) is not int or not 0 <= value <= 4:
-        raise ProgramError(f"{label} must be an integer from 0 to 4")
+def _component_score(value: Any, label: str) -> int:
+    if type(value) is not int or value not in SCORE_VALUES:
+        raise ProgramError(f"{label} must be one of {sorted(SCORE_VALUES)}")
     return value
 
 
@@ -1981,6 +2335,54 @@ def _accepted_ids(
     field: str,
 ) -> set[str]:
     return _ids(_rows(results[stage]["records"], collection), field, collection)
+
+
+def _validate_cited_entries(
+    value: Any,
+    *,
+    label: str,
+    text_field: str,
+    source_ids: set[str],
+) -> None:
+    if not isinstance(value, list):
+        raise ProgramError(f"{label} must be a list of objects")
+    seen: set[str] = set()
+    required_fields = {text_field, "source_ids"}
+    for index, entry in enumerate(value):
+        entry_label = f"{label}[{index}]"
+        if not isinstance(entry, dict):
+            raise ProgramError(f"{entry_label} must be an object")
+        missing = sorted(required_fields - set(entry))
+        if missing:
+            raise ProgramError(f"{entry_label} is missing fields: {', '.join(missing)}")
+        unexpected = sorted(set(entry) - required_fields)
+        if unexpected:
+            raise ProgramError(f"{entry_label} has unexpected fields: {unexpected}")
+        text = str(entry[text_field]).strip()
+        if not text:
+            raise ProgramError(f"{entry_label}.{text_field} must be non-empty")
+        key = text.casefold()
+        if key in seen:
+            raise ProgramError(f"{label}.{text_field} values must be unique")
+        seen.add(key)
+        _references(entry, "source_ids", source_ids, entry_label)
+
+
+def _validate_string_list(value: Any, label: str) -> None:
+    if not isinstance(value, list) or any(not str(item).strip() for item in value):
+        raise ProgramError(f"{label} must be a list of non-empty strings")
+
+
+def _validate_exact_object(value: Any, fields: set[str], label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ProgramError(f"{label} must be an object")
+    missing = sorted(fields - set(value))
+    unexpected = sorted(set(value) - fields)
+    if missing:
+        raise ProgramError(f"{label} is missing fields: {', '.join(missing)}")
+    if unexpected:
+        raise ProgramError(f"{label} has unexpected fields: {unexpected}")
+    return value
 
 
 def _validate_review_item(
@@ -2000,53 +2402,163 @@ def _validate_review_item(
     }
     for index, row in enumerate(reviews):
         label = f"reviews[{index}]"
-        _required(
-            row,
-            (
-                "candidate_id",
-                "rescue_rationale",
-                "uncertainty",
-                "counterevidence",
-                "limitations",
-            ),
-            label,
+        unexpected = sorted(set(row) - set(ROW_FIELDS["reviews"]))
+        if unexpected:
+            raise ProgramError(f"{label} has unexpected fields: {unexpected}")
+        _required(row, ("candidate_id", "hypothesis", "mechanistic_bridge"), label)
+        _validate_cited_entries(
+            row["supporting_findings"],
+            label=f"{label}.supporting_findings",
+            text_field="finding",
+            source_ids=source_ids,
         )
-        _score(row.get("evidence_strength"), f"{label}.evidence_strength")
-        _score(row.get("rescue_fit"), f"{label}.rescue_fit")
-        if row.get("uncertainty") not in _UNCERTAINTY_ORDER:
-            raise ProgramError(f"{label}.uncertainty must be low, medium, high, or unknown")
-
-        cited_ids = _references(row, "source_ids", source_ids, label)
+        if not row["supporting_findings"]:
+            raise ProgramError(f"{label}.supporting_findings must not be empty")
+        _validate_string_list(row["assumptions"], f"{label}.assumptions")
+        _validate_string_list(row["limitations"], f"{label}.limitations")
+        _validate_cited_entries(
+            row["aliases"],
+            label=f"{label}.aliases",
+            text_field="name",
+            source_ids=source_ids,
+        )
+        _validate_cited_entries(
+            row["why_not"],
+            label=f"{label}.why_not",
+            text_field="finding",
+            source_ids=source_ids,
+        )
+        prior_art = _validate_exact_object(
+            row["prior_art"], {"status", "summary", "findings"}, f"{label}.prior_art"
+        )
+        if prior_art["status"] not in PRIOR_ART_STATUSES:
+            raise ProgramError(
+                f"{label}.prior_art.status must be one of {sorted(PRIOR_ART_STATUSES)}"
+            )
+        if not str(prior_art["summary"]).strip():
+            raise ProgramError(f"{label}.prior_art.summary must be non-empty")
+        _validate_cited_entries(
+            prior_art["findings"],
+            label=f"{label}.prior_art.findings",
+            text_field="finding",
+            source_ids=source_ids,
+        )
+        if prior_art["status"] in {
+            "preclinical_only", "human_intervention", "established_use"
+        } and not prior_art["findings"]:
+            raise ProgramError(
+                f"{label}.prior_art.findings must not be empty for status {prior_art['status']}"
+            )
+        cited_ids = _cited_ids(row)
+        unknown = cited_ids - source_ids
+        if unknown:
+            raise ProgramError(f"{label} contains unknown source IDs: {sorted(unknown)}")
         if not cited_ids & retained_ids:
-            raise ProgramError(f"{label}.source_ids needs a document retained by this review")
+            raise ProgramError(f"{label} needs a cited document retained by this review")
 
 
-def _validate_rankings(
+def _validate_candidate_audit(
     records: Mapping[str, Any], results: Mapping[str, Mapping[str, Any]]
 ) -> None:
-    rankings = _contract_rows(records, "rankings", "candidate_id")
-    _contract_rows(records, "audit_notes")
+    assessments = _contract_rows(records, "assessments", "candidate_id")
+    exclusions = _contract_rows(records, "excluded_candidates", "candidate_id")
     candidate_ids = _accepted_ids(
         results, "candidate_review", "reviews", "candidate_id"
     )
-    ranked_ids = {str(row["candidate_id"]) for row in rankings}
-    if ranked_ids != candidate_ids:
-        raise ProgramError("rankings must contain exactly one record for every reviewed candidate")
+    assessment_ids = {str(row["candidate_id"]) for row in assessments}
+    exclusion_ids = {str(row["candidate_id"]) for row in exclusions}
+    if assessment_ids & exclusion_ids or assessment_ids | exclusion_ids != candidate_ids:
+        raise ProgramError(
+            "assessments and excluded_candidates must partition every reviewed candidate exactly once"
+        )
     source_ids = {str(row["document_id"]) for row in _all_documents(results)}
-    for index, row in enumerate(rankings):
-        label = f"rankings[{index}]"
-        if type(row.get("eligible")) is not bool:
-            raise ProgramError(f"{label}.eligible must be true or false")
-        _required(row, ("candidate_id", "rationale"), label)
-        _score(row.get("evidence_strength"), f"{label}.evidence_strength")
-        _score(row.get("rescue_fit"), f"{label}.rescue_fit")
-        if row.get("uncertainty") not in _UNCERTAINTY_ORDER:
-            raise ProgramError(f"{label}.uncertainty must be low, medium, high, or unknown")
-        if row["eligible"] is True and row.get("priority_tier") not in {1, 2, 3}:
-            raise ProgramError(f"{label}.priority_tier must be 1, 2, or 3 when eligible")
-        if row["eligible"] is False and not str(row.get("exclusion_reason", "")).strip():
-            raise ProgramError(f"{label}.exclusion_reason is required when ineligible")
+    reviews = {
+        str(row["candidate_id"]): row
+        for row in _rows(results["candidate_review"]["records"], "reviews")
+    }
+    for index, row in enumerate(assessments):
+        label = f"assessments[{index}]"
+        unexpected = sorted(set(row) - set(ROW_FIELDS["assessments"]))
+        if unexpected:
+            raise ProgramError(f"{label} has unexpected fields: {unexpected}")
+        prior_status = reviews[str(row["candidate_id"])]["prior_art"]["status"]
+        if prior_status in {"human_intervention", "established_use"}:
+            raise ProgramError(
+                f"{label} cannot assess a candidate with disqualifying prior-art status {prior_status}"
+            )
+        integrity = _validate_exact_object(
+            row["source_integrity"],
+            {"status", "finding", "source_ids"},
+            f"{label}.source_integrity",
+        )
+        if integrity["status"] not in {"supported", "partly_supported"}:
+            raise ProgramError(
+                f"{label}.source_integrity.status must be supported or partly_supported"
+            )
+        if not str(integrity["finding"]).strip():
+            raise ProgramError(f"{label}.source_integrity.finding must be non-empty")
+        _references(integrity, "source_ids", source_ids, f"{label}.source_integrity")
+
+        components = _validate_exact_object(
+            row["component_scores"], set(SCORE_COMPONENTS), f"{label}.component_scores"
+        )
+        for component in SCORE_COMPONENTS:
+            score = _validate_exact_object(
+                components[component],
+                {"value", "reason", "source_ids"},
+                f"{label}.component_scores.{component}",
+            )
+            _component_score(score["value"], f"{label}.component_scores.{component}.value")
+            if not str(score["reason"]).strip():
+                raise ProgramError(f"{label}.component_scores.{component}.reason must be non-empty")
+            _references(
+                score,
+                "source_ids",
+                source_ids,
+                f"{label}.component_scores.{component}",
+            )
+
+        net = _validate_exact_object(
+            row["net_assessment"], {"text", "source_ids"}, f"{label}.net_assessment"
+        )
+        if not str(net["text"]).strip():
+            raise ProgramError(f"{label}.net_assessment.text must be non-empty")
+        _references(net, "source_ids", source_ids, f"{label}.net_assessment")
+        _validate_cited_entries(
+            row["aliases"],
+            label=f"{label}.aliases",
+            text_field="name",
+            source_ids=source_ids,
+        )
+        _validate_cited_entries(
+            row["why_not"],
+            label=f"{label}.why_not",
+            text_field="finding",
+            source_ids=source_ids,
+        )
+
+    expected_prior_reasons = {
+        "established_use": "exact_disease_use",
+        "human_intervention": "human_intervention",
+    }
+    for index, row in enumerate(exclusions):
+        label = f"excluded_candidates[{index}]"
+        unexpected = sorted(set(row) - set(ROW_FIELDS["excluded_candidates"]))
+        if unexpected:
+            raise ProgramError(f"{label} has unexpected fields: {unexpected}")
+        if row["reason_code"] not in AUDIT_EXCLUSION_REASONS:
+            raise ProgramError(
+                f"{label}.reason_code must be one of {sorted(AUDIT_EXCLUSION_REASONS)}"
+            )
+        if not str(row["finding"]).strip():
+            raise ProgramError(f"{label}.finding must be non-empty")
         _references(row, "source_ids", source_ids, label)
+        prior_status = reviews[str(row["candidate_id"])]["prior_art"]["status"]
+        expected_reason = expected_prior_reasons.get(prior_status)
+        if expected_reason and row["reason_code"] != expected_reason:
+            raise ProgramError(
+                f"{label}.reason_code must be {expected_reason} for prior-art status {prior_status}"
+            )
 
 
 def _validate_result(
@@ -2068,6 +2580,13 @@ def _validate_result(
         )
     if not isinstance(result.get("records"), dict) or not isinstance(result.get("gaps"), list):
         raise ProgramError("Result requires records object and gaps list")
+    expected_collections = set(STAGE_GUIDANCE[task]["collections"])
+    actual_collections = set(result["records"])
+    if actual_collections != expected_collections:
+        raise ProgramError(
+            "Result records must contain exactly these collections: "
+            f"{sorted(expected_collections)}"
+        )
     if "notes" in result and not isinstance(result["notes"], list):
         raise ProgramError("Result notes must be a list when supplied")
     secrets = _secret_paths(result)
@@ -2084,10 +2603,10 @@ def _validate_result(
         "candidate_identity": lambda: _validate_candidate_identity(
             result["records"], prior
         ),
-        "candidate_review_research": lambda: _validate_review_item(
+        "candidate_evidence_review": lambda: _validate_review_item(
             result["records"], str(item_id), prior
         ),
-        "audit_and_rank": lambda: _validate_rankings(result["records"], prior),
+        "candidate_audit": lambda: _validate_candidate_audit(result["records"], prior),
     }
     validators[task]()
 
@@ -2125,80 +2644,171 @@ def _artifact(path: Path) -> dict[str, Any]:
     return {"filename": path.name, "bytes": len(payload), "sha256": _sha256(payload)}
 
 
+def _final_score(row: Mapping[str, Any]) -> int:
+    return sum(int(row["component_scores"][component]["value"]) for component in SCORE_COMPONENTS)
+
+
 def _project_ranked_row(
     rank: int,
     row: Mapping[str, Any],
     candidates: Mapping[str, Mapping[str, Any]],
-    reviews: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
     candidate = candidates[row["candidate_id"]]
-    review = reviews[row["candidate_id"]]
-    return {
+    projected = {
         "rank": rank,
         "candidate_id": row["candidate_id"],
         "name": candidate["name"],
         "identity_status": candidate["identity"]["status"],
-        "evidence_strength": row["evidence_strength"],
-        "rescue_fit": row["rescue_fit"],
-        "uncertainty": row["uncertainty"],
-        "priority_tier": row["priority_tier"],
-        "mechanism_hypothesis": candidate["mechanism_hypothesis"],
-        "rescue_rationale": review["rescue_rationale"],
-        "audit_rationale": row["rationale"],
-        "source_ids": ";".join(sorted(map(str, row["source_ids"]))),
+        **{
+            component: row["component_scores"][component]["value"]
+            for component in SCORE_COMPONENTS
+        },
+        "final_score": _final_score(row),
+        "net_assessment": row["net_assessment"]["text"],
+        "source_ids": ";".join(sorted(map(str, row["net_assessment"]["source_ids"]))),
     }
+    return projected
 
 
 def _ranked_rows(
     results: Mapping[str, Mapping[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
     candidates = {row["candidate_id"]: row for row in _canonical_candidates(results)}
-    review_by_id = {
-        row["candidate_id"]: row
-        for row in _rows(results["candidate_review"]["records"], "reviews")
-    }
-    eligible = [
-        row
-        for row in _rows(results["audit_and_rank"]["records"], "rankings")
-        if row["eligible"] is True
-    ]
-    eligible.sort(
-        key=lambda row: (
-            row["priority_tier"],
-            -row["evidence_strength"],
-            -row["rescue_fit"],
-            _UNCERTAINTY_ORDER[row["uncertainty"]],
-            str(candidates[row["candidate_id"]]["name"]).casefold(),
-            row["candidate_id"],
-        )
-    )
-
-    rows = [
-        _project_ranked_row(rank, row, candidates, review_by_id)
-        for rank, row in enumerate(eligible, 1)
-    ]
+    assessments = _rows(results["candidate_audit"]["records"], "assessments")
+    assessments.sort(key=lambda row: (-_final_score(row), str(row["candidate_id"])))
+    rows: list[dict[str, Any]] = []
+    rank = 0
+    prior_score: int | None = None
+    for assessment in assessments:
+        score = _final_score(assessment)
+        if score != prior_score:
+            rank += 1
+            prior_score = score
+        rows.append(_project_ranked_row(rank, assessment, candidates))
     return rows, candidates
 
 
-def _cards_bytes(rows: list[dict[str, Any]]) -> bytes:
-    cards = ["# Repurposing candidate cards", "", EXPERIMENTAL_USE_POLICY, ""]
-    for row in rows:
-        cards += [
-            f"## {row['rank']}. {row['name']}",
-            "",
-            f"Priority tier: {row['priority_tier']}; evidence: {row['evidence_strength']}/4; "
-            f"rescue fit: {row['rescue_fit']}/4; uncertainty: {row['uncertainty']}.",
-            "",
-            f"Mechanism hypothesis: {row['mechanism_hypothesis']}",
-            "",
-            f"Review: {row['rescue_rationale']}",
-            "",
-            f"Audit: {row['audit_rationale']}",
-            "",
-            f"Sources: {row['source_ids']}",
-            "",
-        ]
-    return ("\n".join(cards) + "\n").encode("utf-8")
+def _evidence_card_rows(
+    ranked_rows: list[dict[str, Any]],
+    results: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    assessments = {
+        str(row["candidate_id"]): row
+        for row in _rows(results["candidate_audit"]["records"], "assessments")
+    }
+    cards: list[dict[str, Any]] = []
+    for ranked_row in ranked_rows:
+        candidate_id = str(ranked_row["candidate_id"])
+        assessment = assessments[candidate_id]
+        aliases = sorted(
+            (
+                {
+                    "name": str(alias["name"]).strip(),
+                    "source_ids": sorted(set(map(str, alias["source_ids"]))),
+                }
+                for alias in assessment["aliases"]
+            ),
+            key=lambda alias: (
+                alias["name"].casefold(),
+                alias["name"],
+                alias["source_ids"],
+            ),
+        )
+        why_not = sorted(
+            (
+                {
+                    "finding": str(finding["finding"]).strip(),
+                    "source_ids": sorted(set(map(str, finding["source_ids"]))),
+                }
+                for finding in assessment["why_not"]
+            ),
+            key=lambda finding: (
+                finding["finding"].casefold(),
+                finding["finding"],
+                finding["source_ids"],
+            ),
+        )
+        cards.append(
+            {
+                "drug_id": candidate_id,
+                "aliases": aliases,
+                "score": _final_score(assessment),
+                "components": {
+                    component: {
+                        "value": assessment["component_scores"][component]["value"],
+                        "reason": str(
+                            assessment["component_scores"][component]["reason"]
+                        ).strip(),
+                        "source_ids": sorted(set(map(
+                            str, assessment["component_scores"][component]["source_ids"]
+                        ))),
+                    }
+                    for component in SCORE_COMPONENTS
+                },
+                "why": {
+                    "text": str(assessment["net_assessment"]["text"]).strip(),
+                    "source_ids": sorted(set(map(
+                        str, assessment["net_assessment"]["source_ids"]
+                    ))),
+                },
+                "why_not": why_not,
+            }
+        )
+    return cards
+
+
+def _single_line(value: Any) -> str:
+    return " ".join(str(value).split())
+
+
+def _reference_line(source_ids: Iterable[Any]) -> str:
+    return "References: " + ", ".join(sorted(set(map(str, source_ids))))
+
+
+def _cards_bytes(cards: list[dict[str, Any]]) -> bytes:
+    lines: list[str] = []
+    for card in cards:
+        lines.extend([f"## {_single_line(card['drug_id'])}", ""])
+        if card["aliases"]:
+            lines.append("Aliases:")
+            lines.extend(
+                f"- {_single_line(alias['name'])} "
+                f"({_reference_line(alias['source_ids'])})"
+                for alias in card["aliases"]
+            )
+            lines.append("")
+        lines.extend([f"Score: {card['score']}/100", ""])
+        for component in SCORE_COMPONENTS:
+            score = card["components"][component]
+            lines.extend(
+                [
+                    f"- {SCORE_LABELS[component]}: {score['value']}/20 — "
+                    f"{_single_line(score['reason'])}",
+                    f"  {_reference_line(score['source_ids'])}",
+                ]
+            )
+        lines.append("")
+        lines.extend(
+            [
+                "### Why",
+                "",
+                _single_line(card["why"]["text"]),
+                "",
+                _reference_line(card["why"]["source_ids"]),
+                "",
+            ]
+        )
+        if card["why_not"]:
+            lines.extend(["### Why not", ""])
+            for finding in card["why_not"]:
+                lines.extend(
+                    [
+                        f"- {_single_line(finding['finding'])}",
+                        f"  {_reference_line(finding['source_ids'])}",
+                    ]
+                )
+            lines.append("")
+    return ("\n".join(lines).rstrip() + "\n").encode("utf-8")
 
 
 def _provenance_rows(
@@ -2230,6 +2840,31 @@ def _provenance_rows(
     return output
 
 
+def _excluded_candidate_rows(
+    results: Mapping[str, Mapping[str, Any]],
+    candidates: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for exclusion in sorted(
+        _rows(results["candidate_audit"]["records"], "excluded_candidates"),
+        key=lambda row: str(row["candidate_id"]),
+    ):
+        candidate = candidates[str(exclusion["candidate_id"])]
+        rows.append(
+            {
+                "candidate_id": exclusion["candidate_id"],
+                "name": candidate["name"],
+                "reason_code": exclusion["reason_code"],
+                "finding": exclusion["finding"],
+                "source_ids": sorted(set(map(str, exclusion["source_ids"]))),
+                "graph_node_ids": sorted(set(map(str, candidate["graph_node_ids"]))),
+                "pathology_source_ids": sorted(set(map(str, candidate["pathology_source_ids"]))),
+                "mechanism_source_ids": sorted(set(map(str, candidate["mechanism_source_ids"]))),
+            }
+        )
+    return rows
+
+
 def _write_output_files(
     run_root: Path,
     case: Mapping[str, Any],
@@ -2240,7 +2875,10 @@ def _write_output_files(
     outputs = run_root / "outputs"
     graph = results["evidence_graph"]["records"]
     _write_once(outputs / "candidates.csv", _csv_bytes(rows, list(rows[0])))
-    _write_once(outputs / "candidate_cards.md", _cards_bytes(rows))
+    card_rows = _evidence_card_rows(rows, results)
+    _write_once(outputs / "candidate_cards.md", _cards_bytes(card_rows))
+    excluded_rows = _excluded_candidate_rows(results, candidates)
+    _write_jsonl(outputs / "candidate_exclusions.jsonl", excluded_rows)
     documents = sorted(_all_documents(results), key=lambda row: row["document_id"])
     _write_jsonl(outputs / "citations.jsonl", documents)
     assertions = _rows(graph, "assertions")
@@ -2269,18 +2907,23 @@ def _write_output_files(
         f"Disease: {case['disease']}\n\n"
         f"Gene: {case.get('gene') or 'not supplied'}\n\n"
         f"Pathology graph snapshot: {results['evidence_graph']['snapshot_id']}\n\n"
-        f"Status: complete with {len(rows)} ranked candidate(s).\n\n"
+        f"Status: complete with {len(rows)} ranked candidate(s) and "
+        f"{len(excluded_rows)} audited exclusion(s).\n\n"
         f"Sources: {len(documents)}; pathology nodes: {len(graph['profiles'])}; "
         f"assertions: {len(graph['assertions'])}; raw candidate seeds: "
         f"{raw_candidate_count}; deduplicated candidates: {len(candidates)}; "
         f"reported gaps: {gap_count}.\n\n"
-        "Candidate eligibility did not require a prior disease-drug literature association.\n\n"
+        "Candidate nomination did not require a prior disease-drug literature association. "
+        "Audited candidates were ranked by an unweighted sum of five 20-point components; "
+        "exact-disease established use or human trials and other bounded decisive failures were "
+        "exclusionary.\n\n"
         f"{EXPERIMENTAL_USE_POLICY}\n"
     )
     _write_once(outputs / "summary.md", summary.encode("utf-8"))
     return [
         outputs / "candidates.csv",
         outputs / "candidate_cards.md",
+        outputs / "candidate_exclusions.jsonl",
         outputs / "citations.jsonl",
         outputs / "graph.json",
         outputs / "candidate_provenance.jsonl",
@@ -2304,6 +2947,9 @@ def build_outputs(root: str | Path) -> dict[str, Any]:
         "case_sha256": _sha256((run_root / "case.json").read_bytes()),
         "status": "complete",
         "candidate_count": len(rows),
+        "excluded_candidate_count": len(
+            _rows(results["candidate_audit"]["records"], "excluded_candidates")
+        ),
         "raw_candidate_count": len(
             _rows(results["candidate_seed_generation"]["records"], "candidates")
         ),
@@ -2324,6 +2970,7 @@ __all__ = [
     "ProgramError",
     "STAGES",
     "build_outputs",
+    "graph_context",
     "initialize",
     "next_action",
     "status",
