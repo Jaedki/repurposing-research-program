@@ -85,6 +85,23 @@ def unichem_result(endpoint, body):
 
 
 class UniChemTransportTest(unittest.TestCase):
+    def test_rejects_non_success_response_with_http_200(self):
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "response": "Error",
+            "message": "The query could not be processed",
+        }).encode()
+        with patch.object(core, "urlopen", return_value=response) as request:
+            with self.assertRaisesRegex(
+                core.ProgramError, "UniChem compounds returned an invalid response"
+            ):
+                core._post_unichem(
+                    "compounds",
+                    {"compound": "4021", "type": "sourceID", "sourceID": 22},
+                )
+
+        self.assertEqual(request.call_count, 1)
+
     def test_retries_transient_server_error(self):
         response = MagicMock()
         response.__enter__.return_value.read.return_value = json.dumps({
@@ -103,6 +120,22 @@ class UniChemTransportTest(unittest.TestCase):
         self.assertEqual(result["response"], "Success")
         self.assertEqual(request.call_count, 2)
         pause.assert_called_once_with(1)
+
+
+class ArtifactPersistenceTest(unittest.TestCase):
+    def test_write_once_rejects_conflicting_accepted_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "results" / "items" / "accepted.json"
+            accepted = b'{"status":"complete"}\n'
+            replacement = b'{"status":"complete","different":true}\n'
+            core._write_once(path, accepted)
+
+            with self.assertRaisesRegex(
+                core.ProgramError, "Immutable artifact conflicts with existing file"
+            ):
+                core._write_once(path, replacement)
+
+            self.assertEqual(path.read_bytes(), accepted)
 
 
 class WorkflowTest(unittest.TestCase):
@@ -370,7 +403,9 @@ class WorkflowTest(unittest.TestCase):
         rubric = audit_packet["result_contract"]["score_rubric"]
         self.assertIn("without weighting", rubric["method"])
         self.assertIn("not a probability", rubric["method"])
+        self.assertIn("Counterevidence earns no points", rubric["method"])
         self.assertEqual(set(rubric["components"]), set(core.SCORE_COMPONENTS))
+        self.assertEqual(core.MAX_SCORE, 80)
         self.assertEqual(
             set(rubric["components"]["mechanistic_bridge_plausibility"]["anchors"]),
             {"5", "10", "15", "20"},
@@ -403,7 +438,6 @@ class WorkflowTest(unittest.TestCase):
                                 "disease_mechanism_relevance": 20,
                                 "mechanistic_bridge_plausibility": 5,
                                 "translational_feasibility": 15,
-                                "evidence_robustness": 15,
                             },
                         ),
                         "aliases": [
@@ -435,6 +469,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(manifest["excluded_candidate_count"], 1)
         summary = (self.root / "outputs" / "summary.md").read_text(encoding="utf-8")
         self.assertIn("raw candidate seeds: 2; deduplicated candidates: 2", summary)
+        self.assertIn("4 20-point components out of 80", summary)
         cards = (self.root / "outputs" / "candidate_cards.md").read_text(encoding="utf-8")
         self.assertIn("## UNICHEM:1", cards)
         self.assertIn(
@@ -443,7 +478,7 @@ class WorkflowTest(unittest.TestCase):
             cards,
         )
         self.assertEqual(cards.count("Aliases:"), 1)
-        self.assertIn("Score: 70/100", cards)
+        self.assertIn("Score: 55/80", cards)
         self.assertIn("Mechanistic-bridge plausibility: 5/20", cards)
         self.assertIn(
             "### Why\n\nSupported action and pathology fit outweigh a speculative bridge."
@@ -1131,7 +1166,7 @@ class WorkflowTest(unittest.TestCase):
         }
 
         core._validate_candidate_audit(records, results)
-        self.assertEqual(core._final_score(longshot), 25)
+        self.assertEqual(core._final_score(longshot), 20)
 
         all_excluded = {
             "assessments": [],
@@ -1167,6 +1202,39 @@ class WorkflowTest(unittest.TestCase):
         with self.assertRaisesRegex(core.ProgramError, "disqualifying prior-art status"):
             core._validate_candidate_audit(invalid, results)
 
+    def test_counterevidence_is_unscored_and_cannot_restore_robustness_points(self):
+        results = {
+            "candidate_review": {"records": {
+                "documents": [
+                    {"document_id": "PMID:1", "title": "Retained evidence", "source": "test"}
+                ],
+                "reviews": [self.review("DRUG-A")],
+            }}
+        }
+        assessment = self.assessment(
+            "DRUG-A", values={component: 5 for component in core.SCORE_COMPONENTS}
+        )
+        baseline_score = core._final_score(assessment)
+        assessment["why_not"] = [{
+            "finding": "Independent disease models found no efficacy.",
+            "source_ids": ["PMID:1"],
+        }]
+        core._validate_candidate_audit(
+            {"assessments": [assessment], "excluded_candidates": []}, results
+        )
+        self.assertEqual(core._final_score(assessment), baseline_score)
+
+        invalid = json.loads(json.dumps(assessment))
+        invalid["component_scores"]["evidence_robustness"] = {
+            "value": 20,
+            "reason": "Consistent negative findings form a strong evidence base.",
+            "source_ids": ["PMID:1"],
+        }
+        with self.assertRaisesRegex(core.ProgramError, "unexpected fields"):
+            core._validate_candidate_audit(
+                {"assessments": [invalid], "excluded_candidates": []}, results
+            )
+
     def test_raw_scores_sort_deterministically_and_ties_share_rank(self):
         candidates = [
             {
@@ -1196,7 +1264,7 @@ class WorkflowTest(unittest.TestCase):
 
         self.assertEqual(
             [(row["candidate_id"], row["rank"], row["final_score"]) for row in rows],
-            [("DRUG-A", 1, 100), ("DRUG-B", 1, 100), ("DRUG-C", 2, 50)],
+            [("DRUG-A", 1, 80), ("DRUG-B", 1, 80), ("DRUG-C", 2, 40)],
         )
 
     def test_card_renderer_uses_actual_id_and_omits_empty_optional_sections(self):
@@ -1211,14 +1279,14 @@ class WorkflowTest(unittest.TestCase):
         payload = core._cards_bytes([{
             "drug_id": "CANDIDATE-UNRESOLVED",
             "aliases": [],
-            "score": 50,
+            "score": 40,
             "components": components,
             "why": {"text": "Evidence supports nomination.", "source_ids": ["PMID:1"]},
             "why_not": [],
         }]).decode("utf-8")
 
         self.assertIn("## CANDIDATE-UNRESOLVED", payload)
-        self.assertIn("Score: 50/100", payload)
+        self.assertIn("Score: 40/80", payload)
         self.assertIn("Drug-action confidence: 10/20", payload)
         self.assertIn(
             "### Why\n\nEvidence supports nomination.\n\nReferences: PMID:1",
@@ -1346,7 +1414,6 @@ class WorkflowTest(unittest.TestCase):
             "disease_mechanism_relevance": 15,
             "mechanistic_bridge_plausibility": 15,
             "translational_feasibility": 15,
-            "evidence_robustness": 15,
         }
         return {
             "candidate_id": candidate_id,

@@ -37,7 +37,7 @@ Accepted worker results remain unchanged for provenance. At each deterministic a
 
 Aggregated stages own only their evidence: the graph retains cited pathology documents, seed generation retains cited seed documents, identity contributes cited identity documents, and candidate review retains cited review documents. They do not copy prior stage libraries. `_all_documents()` constructs the deduplicated union when audit or output generation genuinely needs cross-stage evidence. The audit consumes this closed union and cannot add documents. A result may cite an upstream document without returning it again, so propagation requires returned document IDs to be a subset of the result's citations, not equality.
 
-Final evidence cards contain the canonical candidate ID, the raw score out of 100, all five cited component judgments, only aliases retained by the auditor, one cited net assessment, and only cited why-not findings retained by the auditor. Review fields cannot flow directly into final cards. Python omits empty optional sections and does not infer card content.
+Final evidence cards contain the canonical candidate ID, the raw score out of 80, all four cited component judgments, only aliases retained by the auditor, one cited net assessment, and only cited why-not findings retained by the auditor. Within the audit, source integrity and counterevidence remain explicit but unscored: counterevidence lowers a component only when it directly challenges that component's premise and never earns positive scoring credit. Review fields cannot flow directly into final cards. Python omits empty optional sections and does not infer card content.
 
 ## Status
 

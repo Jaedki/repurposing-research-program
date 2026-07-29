@@ -19,7 +19,7 @@ from urllib.request import Request, urlopen
 from pathology_sources import SourceError, fetch_pathology_sources
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 OBJECTIVE = (
     "Identify existing drugs whose established mode of action could plausibly alter a "
     "specific evidence-backed element of the supplied disease pathology. A prior "
@@ -47,74 +47,69 @@ STAGES = (
 )
 GRAPH_INDEX_FIELDS = ("node_id", "label", "node_type", "disposition", "aliases")
 _CITATION_FIELDS = frozenset({"source_ids", "pathology_source_ids", "mechanism_source_ids"})
+SCORE_VALUES = frozenset({5, 10, 15, 20})
+SCORE_COMPONENT_RUBRIC = {
+    "drug_action_confidence": {
+        "label": "Drug-action confidence",
+        "question": "How securely is the proposed action established for this exact drug?",
+        "anchors": {
+            5: "Weak or indirect support for the action, but it is not unsupported or opposite.",
+            10: "Credible action with limited, model-specific, or concentration-relevance evidence.",
+            15: "Direct, good-quality pharmacology with one material target, direction, or dose uncertainty.",
+            20: "Direct, convergent evidence establishes the exact target, direction, and relevant action.",
+        },
+    },
+    "disease_mechanism_relevance": {
+        "label": "Disease-mechanism relevance",
+        "question": "Independent of the drug, how securely does the focal mechanism belong to disease pathology?",
+        "anchors": {
+            5: "An indirect but coherent disease link supports testing the mechanism.",
+            10: "Disease association is credible but causal role or desired direction is limited.",
+            15: "Strong disease evidence supports the mechanism and direction with one material uncertainty.",
+            20: "Convergent disease evidence establishes a causal role and the desired biological direction.",
+        },
+    },
+    "mechanistic_bridge_plausibility": {
+        "label": "Mechanistic-bridge plausibility",
+        "question": "How well does the drug action connect directionally to the desired disease state?",
+        "anchors": {
+            5: "A long or speculative bridge remains coherent and testable despite major stated assumptions.",
+            10: "A multi-step bridge has partial support and several material assumptions.",
+            15: "A short, directionally coherent bridge has direct support and one material assumption.",
+            20: "Direct evidence links the drug action to the desired state with no material unsupported step.",
+        },
+    },
+    "translational_feasibility": {
+        "label": "Translational feasibility",
+        "question": "Can relevant action plausibly be achieved in the needed tissue, dose, route, and timing?",
+        "anchors": {
+            5: "Delivery or exposure is highly uncertain or difficult, but not demonstrated impossible.",
+            10: "Major exposure, dosing, tissue, route, or timing limitations may be surmountable.",
+            15: "Relevant exposure and use are plausible with one material translational uncertainty.",
+            20: "Established human use supports relevant exposure, formulation, route, and timing.",
+        },
+    },
+}
+SCORE_COMPONENTS = tuple(SCORE_COMPONENT_RUBRIC)
+MAX_SCORE = max(SCORE_VALUES) * len(SCORE_COMPONENTS)
 SCORE_RUBRIC = {
     "method": (
-        "Score each distinct component from its anchors, then sum the five values without "
-        "weighting. The total is a prioritisation score out of 100, not a probability of efficacy."
+        f"Score each of the {len(SCORE_COMPONENTS)} distinct components from its anchors, then "
+        f"sum the values without weighting. The total is a prioritisation score out of "
+        f"{MAX_SCORE}, not a probability of efficacy. Counterevidence earns no points: lower "
+        "any component whose premise it directly challenges, and otherwise retain it as an "
+        "unscored reservation."
     ),
     "zero_policy": (
         "Zero is not a scored level. Use a bounded exclusion only when the evidence establishes "
         "an exclusion condition; otherwise retain the candidate at 5 with the reservation stated."
     ),
-    "components": {
-        "drug_action_confidence": {
-            "label": "Drug-action confidence",
-            "question": "How securely is the proposed action established for this exact drug?",
-            "anchors": {
-                5: "Weak or indirect support for the action, but it is not unsupported or opposite.",
-                10: "Credible action with limited, model-specific, or concentration-relevance evidence.",
-                15: "Direct, good-quality pharmacology with one material target, direction, or dose uncertainty.",
-                20: "Direct, convergent evidence establishes the exact target, direction, and relevant action.",
-            },
-        },
-        "disease_mechanism_relevance": {
-            "label": "Disease-mechanism relevance",
-            "question": "Independent of the drug, how securely does the focal mechanism belong to disease pathology?",
-            "anchors": {
-                5: "An indirect but coherent disease link supports testing the mechanism.",
-                10: "Disease association is credible but causal role or desired direction is limited.",
-                15: "Strong disease evidence supports the mechanism and direction with one material uncertainty.",
-                20: "Convergent disease evidence establishes a causal role and the desired biological direction.",
-            },
-        },
-        "mechanistic_bridge_plausibility": {
-            "label": "Mechanistic-bridge plausibility",
-            "question": "How well does the drug action connect directionally to the desired disease state?",
-            "anchors": {
-                5: "A long or speculative bridge remains coherent and testable despite major stated assumptions.",
-                10: "A multi-step bridge has partial support and several material assumptions.",
-                15: "A short, directionally coherent bridge has direct support and one material assumption.",
-                20: "Direct evidence links the drug action to the desired state with no material unsupported step.",
-            },
-        },
-        "translational_feasibility": {
-            "label": "Translational feasibility",
-            "question": "Can relevant action plausibly be achieved in the needed tissue, dose, route, and timing?",
-            "anchors": {
-                5: "Delivery or exposure is highly uncertain or difficult, but not demonstrated impossible.",
-                10: "Major exposure, dosing, tissue, route, or timing limitations may be surmountable.",
-                15: "Relevant exposure and use are plausible with one material translational uncertainty.",
-                20: "Established human use supports relevant exposure, formulation, route, and timing.",
-            },
-        },
-        "evidence_robustness": {
-            "label": "Evidence robustness",
-            "question": "How independent, reproducible, direct, and internally consistent is the overall evidence base?",
-            "anchors": {
-                5: "Sparse or single-source evidence is sufficient only to keep the hypothesis testable.",
-                10: "Limited or model-dominated evidence has meaningful gaps or conflicts.",
-                15: "Multiple credible or orthogonal sources converge with minor limitations.",
-                20: "Independent, high-quality, directly relevant evidence converges without material conflict.",
-            },
-        },
-    },
+    "components": SCORE_COMPONENT_RUBRIC,
 }
-SCORE_COMPONENTS = tuple(SCORE_RUBRIC["components"])
 SCORE_LABELS = {
     component: definition["label"]
     for component, definition in SCORE_RUBRIC["components"].items()
 }
-SCORE_VALUES = frozenset({5, 10, 15, 20})
 PRIOR_ART_STATUSES = frozenset({
     "none_found",
     "preclinical_only",
@@ -261,11 +256,13 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "of relevant action or exposure, or an invalid candidate class. Unresolved identity, "
             "weak evidence, long causal distance, uncertain exposure, preclinical-only evidence, and "
             "material assumptions remain scored with explicit why-not findings. For every assessment, "
-            "audit source integrity; assign one cited 5, 10, 15, or 20 score for each of drug-action "
-            "confidence, disease-mechanism relevance, mechanistic-bridge plausibility, translational "
-            "feasibility, and evidence robustness; and give a cited net assessment that weighs the "
-            "strongest support against the strongest reservation. Python computes the raw total and "
-            "ranking. Return only audited aliases and why-not findings that may enter final output."
+            "audit source integrity. Counterevidence earns no points: lower any component whose premise "
+            "it directly challenges; if it does not challenge a scored premise, retain it only as an "
+            "unscored why-not finding and in the net assessment. Assign one cited 5, 10, 15, or 20 score "
+            "for each of drug-action confidence, disease-mechanism relevance, mechanistic-bridge "
+            "plausibility, and translational feasibility; and give a cited net assessment that weighs "
+            "the strongest support against the strongest reservation. Python computes the raw total "
+            "and ranking. Return only audited aliases and why-not findings that may enter final output."
         ),
         "collections": ["assessments", "excluded_candidates"],
     },
@@ -397,9 +394,11 @@ FIELD_RULES = {
         "source_integrity has exactly status, finding, and source_ids; status is supported or "
         "partly_supported",
         "component_scores has exactly drug_action_confidence, disease_mechanism_relevance, "
-        "mechanistic_bridge_plausibility, translational_feasibility, and evidence_robustness",
+        "mechanistic_bridge_plausibility, and translational_feasibility",
         "each component has exactly value, reason, and source_ids; value is 5, 10, 15, or 20; "
-        "Python sums the five values without weighting",
+        "Python sums the four values without weighting",
+        "counterevidence never earns positive scoring credit; lower every component whose premise "
+        "it directly challenges and otherwise retain it only in why_not and net_assessment",
         "net_assessment has exactly text and source_ids and explicitly weighs decisive support "
         "against the strongest reservation",
         "audited aliases and why_not use cited name or finding objects and are the only review-like "
@@ -2777,7 +2776,7 @@ def _cards_bytes(cards: list[dict[str, Any]]) -> bytes:
                 for alias in card["aliases"]
             )
             lines.append("")
-        lines.extend([f"Score: {card['score']}/100", ""])
+        lines.extend([f"Score: {card['score']}/{MAX_SCORE}", ""])
         for component in SCORE_COMPONENTS:
             score = card["components"][component]
             lines.extend(
@@ -2914,7 +2913,8 @@ def _write_output_files(
         f"{raw_candidate_count}; deduplicated candidates: {len(candidates)}; "
         f"reported gaps: {gap_count}.\n\n"
         "Candidate nomination did not require a prior disease-drug literature association. "
-        "Audited candidates were ranked by an unweighted sum of five 20-point components; "
+        f"Audited candidates were ranked by an unweighted sum of "
+        f"{len(SCORE_COMPONENTS)} 20-point components out of {MAX_SCORE}; "
         "exact-disease established use or human trials and other bounded decisive failures were "
         "exclusionary.\n\n"
         f"{EXPERIMENTAL_USE_POLICY}\n"

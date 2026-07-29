@@ -120,6 +120,31 @@ class DisMechNormalizationTest(unittest.TestCase):
         )
         self.assertEqual(sanitized["genetic"][0]["name"], "SOD1 Mutations")
 
+    def test_unlisted_intervention_phrasing_is_removed(self):
+        pathology = "Protein aggregation injures neurons."
+        intervention_sentences = (
+            "Patients on riluzole showed improved survival.",
+            "Patients receiving edaravone showed slower functional decline.",
+            "Following tofersen administration, motor scores improved.",
+        )
+
+        for sentence in intervention_sentences:
+            with self.subTest(sentence=sentence):
+                self.assertTrue(sources._treatment_text(sentence, set()))
+                self.assertEqual(
+                    sources._sanitize_text(f"{pathology} {sentence}", set()),
+                    pathology,
+                )
+
+        causal_pathology = (
+            "Compensating for HK1 loss improves motor performance in disease models.",
+            "Restoring STMN2 rescued axonal regeneration in motor neurons.",
+            "Patients with bulbar-onset disease showed faster functional decline.",
+        )
+        for sentence in causal_pathology:
+            with self.subTest(sentence=sentence):
+                self.assertFalse(sources._treatment_text(sentence, set()))
+
     def test_explicit_intervention_name_supplies_a_bounded_acronym_alias(self):
         raw = {
             "description": (
