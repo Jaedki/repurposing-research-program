@@ -59,6 +59,17 @@ def source_result(*_args):
     }
 
 
+def source_screening_result(*_args):
+    return {
+        "stage": "pathology_source_screening",
+        "status": "complete",
+        "resolved_disease": {"mondo_id": "MONDO:1", "name": "Disease"},
+        "records": {"flagged_sentences": []},
+        "gaps": [],
+        "notes": [],
+    }
+
+
 def unichem_result(endpoint, body):
     compound = str(body["compound"])
     uci = "1" if compound.endswith("1") else "2"
@@ -120,6 +131,7 @@ class UniChemTransportTest(unittest.TestCase):
         self.assertEqual(result["response"], "Success")
         self.assertEqual(request.call_count, 2)
         pause.assert_called_once_with(1)
+        error.close()
 
 
 class ArtifactPersistenceTest(unittest.TestCase):
@@ -138,10 +150,108 @@ class ArtifactPersistenceTest(unittest.TestCase):
             self.assertEqual(path.read_bytes(), accepted)
 
 
+class SourceAdjudicationWorkflowTest(unittest.TestCase):
+    def test_batched_adjudication_is_complete_bounded_and_applied_once(self):
+        sentences = (
+            "The approved HGNC symbol is SOD1.",
+            "Patients on riluzole showed improved survival.",
+        )
+        screening = {
+            "stage": "pathology_source_screening",
+            "status": "complete",
+            "resolved_disease": {"mondo_id": "MONDO:1", "name": "Disease"},
+            "records": {
+                "flagged_sentences": [
+                    {
+                        "sentence_id": core._stable_id("DISMECH-SENTENCE", sentence),
+                        "sentence": sentence,
+                        "signals": ["treatment_language"] if index == 0 else ["treatment_event"],
+                        "paths": [f"$.pathophysiology[{index}].description"],
+                    }
+                    for index, sentence in enumerate(sentences)
+                ]
+            },
+            "gaps": [],
+            "notes": [],
+        }
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(core, "screen_pathology_sources", return_value=screening),
+            patch.object(core, "fetch_pathology_sources", side_effect=source_result) as fetch,
+        ):
+            root = Path(directory)
+            core.initialize(root, "Disease", mondo="MONDO:1")
+            action = core.next_action(root)
+
+            self.assertEqual(action["next_task"], "pathology_source_adjudication")
+            packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(
+                packet["context"]["flagged_sentences"],
+                screening["records"]["flagged_sentences"],
+            )
+            self.assertNotIn("documents", packet["result_contract"]["records"])
+            self.assertTrue(any("do not search" in rule.lower() for rule in packet["rules"]))
+
+            incomplete = {
+                "stage": action["next_task"],
+                "item_id": None,
+                "packet_id": action["packet_id"],
+                "status": "complete",
+                "records": {
+                    "sentence_decisions": [
+                        {
+                            "sentence_id": screening["records"]["flagged_sentences"][0][
+                                "sentence_id"
+                            ],
+                            "decision": "retain_pathology",
+                            "reason": "Approved describes the gene symbol, not an intervention.",
+                        }
+                    ]
+                },
+                "gaps": [],
+            }
+            submission = root / "incomplete.json"
+            submission.write_text(json.dumps(incomplete), encoding="utf-8")
+            with self.assertRaisesRegex(core.ProgramError, "partition every flagged sentence"):
+                core.submit(root, submission)
+
+            decisions = [
+                {
+                    "sentence_id": screening["records"]["flagged_sentences"][0]["sentence_id"],
+                    "decision": "retain_pathology",
+                    "reason": "Approved describes nomenclature rather than treatment.",
+                },
+                {
+                    "sentence_id": screening["records"]["flagged_sentences"][1]["sentence_id"],
+                    "decision": "exclude_treatment",
+                    "reason": "The sentence reports patient exposure and a clinical outcome.",
+                },
+            ]
+            complete = {**incomplete, "records": {"sentence_decisions": decisions}}
+            submission = root / "complete.json"
+            submission.write_text(json.dumps(complete), encoding="utf-8")
+            core.submit(root, submission)
+
+            action = core.next_action(root)
+            self.assertEqual(action["next_task"], "pathology_curation")
+            curation_packet = Path(action["packet_path"]).read_text(encoding="utf-8")
+            self.assertNotIn(sentences[0], curation_packet)
+            self.assertNotIn(sentences[1], curation_packet)
+            self.assertEqual(fetch.call_count, 1)
+            self.assertEqual(
+                fetch.call_args.args[3],
+                {row["sentence_id"]: row["decision"] for row in decisions},
+            )
+
+
 class WorkflowTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
+        self.screening_patch = patch.object(
+            core, "screen_pathology_sources", source_screening_result
+        )
+        self.screening_patch.start()
         self.patch = patch.object(core, "fetch_pathology_sources", source_result)
         self.patch.start()
         self.unichem_patch = patch.object(core, "_post_unichem", unichem_result)
@@ -149,6 +259,7 @@ class WorkflowTest(unittest.TestCase):
         core.initialize(self.root, "Disease", mondo="MONDO:1")
 
     def tearDown(self):
+        self.screening_patch.stop()
         self.patch.stop()
         self.unichem_patch.stop()
         self.temp.cleanup()
@@ -186,6 +297,20 @@ class WorkflowTest(unittest.TestCase):
                     }
                 ]
             },
+        )
+
+    def test_empty_source_screening_skips_the_adjudication_agent(self):
+        action = core.next_action(self.root)
+
+        self.assertEqual(action["next_task"], "pathology_curation")
+        adjudication = json.loads(
+            (self.root / "results" / "pathology_source_adjudication.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(adjudication["records"]["sentence_decisions"], [])
+        self.assertFalse(
+            (self.root / "packets" / "pathology_source_adjudication.json").exists()
         )
 
     def test_graph_barrier_and_mechanism_evidence_chain(self):

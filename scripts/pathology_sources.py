@@ -10,7 +10,7 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -70,6 +70,21 @@ _TREATMENT_TEXT = re.compile(
     r"asos?|efficacy|clinical\s+benefit|approv(?:e|ed|al)|discontinued|placebo|"
     r"randomi[sz]ed|dosing|phase\s*(?:i{1,3}|iv|[1-4]))\b",
     re.IGNORECASE,
+)
+_TREATMENT_EVENT = re.compile(
+    r"\b(?:patients?|participants?|subjects?)\s+"
+    r"(?:(?:was|were)\s+)?(?:on|receiv(?:e|ed|ing)|taking|took|given|prescribed)\b|"
+    r"\b(?:administ(?:er(?:ed|ing)?|ration)|prescri(?:be|bed|bing|ption)|"
+    r"infus(?:e|ed|ing|ion)|inject(?:ed|ing|ion))\b",
+    re.IGNORECASE,
+)
+SENTENCE_DECISIONS = frozenset(
+    {
+        "retain_pathology",
+        "exclude_treatment",
+        "exclude_mixed",
+        "exclude_ambiguous",
+    }
 )
 _MONDO = re.compile(r"^MONDO:\d+$", re.IGNORECASE)
 
@@ -426,37 +441,121 @@ def _treatment_terms(value: Any) -> set[str]:
     return terms
 
 
-def _treatment_text(value: str, treatment_terms: set[str]) -> bool:
-    return bool(_TREATMENT_TEXT.search(value)) or any(
+def _split_sentences(value: str) -> list[str]:
+    return [
+        part.strip()
+        for part in re.split(r"(?<=[.!?])\s+|[\r\n]+", value)
+        if part.strip()
+    ]
+
+
+def _treatment_signals(value: str, treatment_terms: set[str]) -> tuple[str, ...]:
+    signals: list[str] = []
+    if any(
         re.search(rf"(?<!\w){re.escape(term)}(?!\w)", value, re.IGNORECASE)
         for term in treatment_terms
-    )
+    ):
+        signals.append("named_intervention")
+    if _TREATMENT_EVENT.search(value):
+        signals.append("treatment_event")
+    if _TREATMENT_TEXT.search(value):
+        signals.append("treatment_language")
+    return tuple(signals)
 
 
-def _sanitize_text(value: str, treatment_terms: set[str]) -> str:
-    parts = re.split(r"(?<=[.!?])\s+|[\r\n]+", value)
-    return " ".join(
-        part.strip()
-        for part in parts
-        if part.strip() and not _treatment_text(part, treatment_terms)
-    )
+def _treatment_text(value: str, treatment_terms: set[str]) -> bool:
+    return bool(_treatment_signals(value, treatment_terms))
 
 
-def _pathology_only(value: Any, treatment_terms: set[str]) -> Any:
+def _sentence_id(value: str) -> str:
+    return _stable_id("DISMECH-SENTENCE", value)
+
+
+def _flagged_sentences(
+    value: Any,
+    treatment_terms: set[str],
+    path: str = "$",
+) -> list[dict[str, Any]]:
+    flagged: dict[str, dict[str, Any]] = {}
+
+    def visit(current: Any, current_path: str) -> None:
+        if isinstance(current, dict):
+            for key, item in current.items():
+                if not _blocked_key(key):
+                    visit(item, f"{current_path}.{key}")
+        elif isinstance(current, list):
+            for index, item in enumerate(current):
+                visit(item, f"{current_path}[{index}]")
+        elif isinstance(current, str):
+            for sentence in _split_sentences(current):
+                signals = _treatment_signals(sentence, treatment_terms)
+                if not signals:
+                    continue
+                sentence_id = _sentence_id(sentence)
+                row = flagged.setdefault(
+                    sentence_id,
+                    {
+                        "sentence_id": sentence_id,
+                        "sentence": sentence,
+                        "signals": set(),
+                        "paths": set(),
+                    },
+                )
+                row["signals"].update(signals)
+                row["paths"].add(current_path)
+
+    visit(value, path)
+    return [
+        {
+            **row,
+            "signals": sorted(row["signals"]),
+            "paths": sorted(row["paths"]),
+        }
+        for _, row in sorted(flagged.items())
+    ]
+
+
+def _sanitize_text(
+    value: str,
+    treatment_terms: set[str],
+    sentence_decisions: Mapping[str, str],
+) -> str:
+    retained: list[str] = []
+    for sentence in _split_sentences(value):
+        if not _treatment_text(sentence, treatment_terms):
+            retained.append(sentence)
+            continue
+        sentence_id = _sentence_id(sentence)
+        decision = sentence_decisions.get(sentence_id)
+        if decision not in SENTENCE_DECISIONS:
+            raise SourceError(f"Missing valid adjudication for flagged sentence {sentence_id}")
+        if decision == "retain_pathology":
+            retained.append(sentence)
+    return " ".join(retained)
+
+
+def _pathology_only(
+    value: Any,
+    treatment_terms: set[str],
+    sentence_decisions: Mapping[str, str],
+) -> Any:
     if isinstance(value, dict):
         output: dict[str, Any] = {}
         for key, item in value.items():
             if _blocked_key(key):
                 continue
-            sanitized = _pathology_only(item, treatment_terms)
+            sanitized = _pathology_only(item, treatment_terms, sentence_decisions)
             if sanitized not in (None, "", [], {}):
                 output[str(key)] = sanitized
         return output
     if isinstance(value, list):
-        output = [_pathology_only(item, treatment_terms) for item in value]
+        output = [
+            _pathology_only(item, treatment_terms, sentence_decisions)
+            for item in value
+        ]
         return [item for item in output if item not in (None, "", [], {})]
     if isinstance(value, str):
-        return _sanitize_text(value, treatment_terms)
+        return _sanitize_text(value, treatment_terms, sentence_decisions)
     return value
 
 
@@ -546,18 +645,34 @@ def _evidence_documents(
     return sorted(set(source_ids))
 
 
-def _treatment_text_paths(
-    value: Any, treatment_terms: set[str], path: str = "$"
+def _unapproved_flagged_paths(
+    value: Any,
+    treatment_terms: set[str],
+    sentence_decisions: Mapping[str, str],
+    path: str = "$",
 ) -> list[str]:
     found: list[str] = []
     if isinstance(value, dict):
         for key, item in value.items():
-            found.extend(_treatment_text_paths(item, treatment_terms, f"{path}.{key}"))
+            found.extend(
+                _unapproved_flagged_paths(
+                    item, treatment_terms, sentence_decisions, f"{path}.{key}"
+                )
+            )
     elif isinstance(value, list):
         for index, item in enumerate(value):
-            found.extend(_treatment_text_paths(item, treatment_terms, f"{path}[{index}]"))
-    elif isinstance(value, str) and _treatment_text(value, treatment_terms):
-        found.append(path)
+            found.extend(
+                _unapproved_flagged_paths(
+                    item, treatment_terms, sentence_decisions, f"{path}[{index}]"
+                )
+            )
+    elif isinstance(value, str):
+        for sentence in _split_sentences(value):
+            if (
+                _treatment_text(sentence, treatment_terms)
+                and sentence_decisions.get(_sentence_id(sentence)) != "retain_pathology"
+            ):
+                found.append(path)
     return found
 
 
@@ -667,16 +782,9 @@ def _normalize_dismech_sections(
     )
 
 
-def _dismech(
+def _load_dismech(
     cache: Path, mondo_id: str
-) -> tuple[
-    list[dict[str, Any]],
-    list[dict[str, Any]],
-    list[dict[str, Any]],
-    list[dict[str, Any]],
-    dict[str, Any] | None,
-    list[str],
-]:
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, list[str]]:
     gaps: list[str] = []
     commit = _fetch_json(
         f"{DISMECH_REPO_API}/commits/main", cache / "dismech_commit.json"
@@ -690,15 +798,16 @@ def _dismech(
     match = next((row for row in reader if row.get("mondo_id") == mondo_id), None)
     if match is None:
         gaps.append(f"DisMech has no MONDO-mapped disorder entry for {mondo_id}")
-        return [], [], [], [], None, gaps
+        return None, None, gaps
 
     page = str(match.get("dismech_url", ""))
     slug = Path(urlparse(page).path).stem
     if not slug:
         gaps.append(f"DisMech mapping for {mondo_id} has no usable disorder path")
-        return [], [], [], [], None, gaps
+        return None, None, gaps
     yaml_url = f"{DISMECH_RAW}/{commit_sha}/kb/disorders/{quote(slug)}.yaml"
-    yaml_payload = _fetch(yaml_url, cache / f"dismech_{slug}.yaml")
+    yaml_path = cache / f"dismech_{slug}.yaml"
+    yaml_payload = _fetch(yaml_url, yaml_path)
     try:
         import yaml  # type: ignore
     except ImportError as exc:
@@ -709,10 +818,55 @@ def _dismech(
         raise SourceError(f"DisMech YAML could not be parsed for {mondo_id}: {exc}") from exc
     if not isinstance(raw, dict):
         raise SourceError(f"DisMech disorder record is not an object for {mondo_id}")
+    return raw, {
+        "commit_sha": commit_sha,
+        "page": page,
+        "slug": slug,
+        "yaml_path": yaml_path,
+    }, gaps
+
+
+def _dismech(
+    cache: Path,
+    mondo_id: str,
+    sentence_decisions: Mapping[str, str],
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    dict[str, Any] | None,
+    list[str],
+]:
+    raw, metadata, gaps = _load_dismech(cache, mondo_id)
+    if raw is None or metadata is None:
+        if sentence_decisions:
+            raise SourceError("Sentence adjudication was supplied without a DisMech record")
+        return [], [], [], [], None, gaps
+
     treatment_terms = _treatment_terms(raw)
-    sanitized = _pathology_only(raw, treatment_terms)
+    flagged = _flagged_sentences(raw, treatment_terms)
+    expected_ids = {str(row["sentence_id"]) for row in flagged}
+    supplied_ids = set(map(str, sentence_decisions))
+    if supplied_ids != expected_ids:
+        raise SourceError(
+            "Sentence adjudication must cover every flagged DisMech sentence exactly; "
+            f"missing={sorted(expected_ids - supplied_ids)}, "
+            f"unknown={sorted(supplied_ids - expected_ids)}"
+        )
+    invalid = {
+        str(sentence_id): decision
+        for sentence_id, decision in sentence_decisions.items()
+        if decision not in SENTENCE_DECISIONS
+    }
+    if invalid:
+        raise SourceError(f"Sentence adjudication contains invalid decisions: {invalid}")
+    sanitized = _pathology_only(raw, treatment_terms, sentence_decisions)
 
     documents: dict[str, dict[str, Any]] = {}
+    commit_sha = str(metadata["commit_sha"])
+    slug = str(metadata["slug"])
+    page = str(metadata["page"])
     file_document_id = _stable_id("DISMECH-FILE", {"commit": commit_sha, "slug": slug})
     _add_document(
         documents,
@@ -731,7 +885,7 @@ def _dismech(
     for row in section_documents:
         _add_document(documents, row)
     gaps.extend(section_gaps)
-    leaked = _treatment_text_paths(
+    leaked = _unapproved_flagged_paths(
         {
             "documents": list(documents.values()),
             "source_nodes": nodes,
@@ -739,11 +893,28 @@ def _dismech(
             "disease_context": contexts,
         },
         treatment_terms,
+        sentence_decisions,
     )
     if leaked:
-        raise SourceError(f"Treatment content survived DisMech normalization: {leaked[:10]}")
+        raise SourceError(
+            f"Unapproved flagged content survived DisMech normalization: {leaked[:10]}"
+        )
 
-    raw_files = [cache / "dismech_mondo_emc.tsv", cache / f"dismech_{slug}.yaml"]
+    decision_counts = {
+        decision: sum(value == decision for value in sentence_decisions.values())
+        for decision in sorted(SENTENCE_DECISIONS)
+    }
+    unresolved_count = (
+        decision_counts["exclude_mixed"] + decision_counts["exclude_ambiguous"]
+    )
+    if unresolved_count:
+        gaps.append(
+            "DisMech sanitation excluded "
+            f"{unresolved_count} mixed or ambiguous flagged sentence(s); "
+            "see the accepted pathology-source adjudication result."
+        )
+
+    raw_files = [cache / "dismech_mondo_emc.tsv", Path(metadata["yaml_path"])]
     receipt = {
         "source": "dismech",
         "version": commit_sha,
@@ -755,18 +926,54 @@ def _dismech(
             for path in raw_files
         ],
         "pathology_sections": sorted(sanitized),
-        "node_sections": sorted(section for section in DISMECH_NODE_TYPES if section in sanitized),
-        "context_sections": sorted(section for section in sanitized if section not in DISMECH_NODE_TYPES),
+        "node_sections": sorted(
+            section for section in DISMECH_NODE_TYPES if section in sanitized
+        ),
+        "context_sections": sorted(
+            section for section in sanitized if section not in DISMECH_NODE_TYPES
+        ),
         "excluded_sections": sorted(str(key) for key in raw if _blocked_key(key)),
         "context_count": len(contexts),
+        "sentence_adjudication": {
+            "flagged_count": len(flagged),
+            **{f"{decision}_count": count for decision, count in decision_counts.items()},
+        },
     }
     return list(documents.values()), nodes, edges, contexts, receipt, gaps
+
+
+def screen_pathology_sources(
+    run_root: Path,
+    disease: str,
+    mondo_hint: str | None = None,
+) -> dict[str, Any]:
+    """Collect one compact, deduplicated sentence batch for bounded adjudication."""
+    cache = run_root / "sources" / "raw"
+    entity, _, _, _, _ = _monarch(cache, disease, mondo_hint)
+    mondo_id = str(entity["id"])
+    raw, _, _ = _load_dismech(cache, mondo_id)
+    flagged = _flagged_sentences(raw, _treatment_terms(raw)) if raw is not None else []
+    return {
+        "stage": "pathology_source_screening",
+        "status": "complete",
+        "resolved_disease": {
+            "mondo_id": mondo_id,
+            "name": entity.get("name") or disease,
+        },
+        "records": {"flagged_sentences": flagged},
+        "gaps": [],
+        "notes": [
+            "Only free-text sentences flagged by deterministic treatment signals enter "
+            "the bounded adjudication packet."
+        ],
+    }
 
 
 def fetch_pathology_sources(
     run_root: Path,
     disease: str,
-    mondo_hint: str | None = None,
+    mondo_hint: str | None,
+    sentence_decisions: Mapping[str, str],
 ) -> dict[str, Any]:
     """Fetch and normalize pathology-only source records for one immutable run."""
     cache = run_root / "sources" / "raw"
@@ -781,7 +988,7 @@ def fetch_pathology_sources(
         dismech_context,
         dismech_receipt,
         gaps,
-    ) = _dismech(cache, mondo_id)
+    ) = _dismech(cache, mondo_id, sentence_decisions)
 
     documents: dict[str, dict[str, Any]] = {}
     for row in [*monarch_docs, *dismech_docs]:
@@ -816,9 +1023,15 @@ def fetch_pathology_sources(
         "records": records,
         "gaps": gaps,
         "notes": [
-            "Treatment-oriented sections and fields were excluded, and remaining DisMech text was treatment-redacted before packet construction."
+            "Treatment-oriented sections and fields were excluded. Flagged free text was "
+            "retained only after bounded pathology-only adjudication."
         ],
     }
 
 
-__all__ = ["SourceError", "fetch_pathology_sources"]
+__all__ = [
+    "SENTENCE_DECISIONS",
+    "SourceError",
+    "fetch_pathology_sources",
+    "screen_pathology_sources",
+]

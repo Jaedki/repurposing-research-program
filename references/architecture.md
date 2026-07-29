@@ -4,6 +4,8 @@
 
 | Barrier | Owner | Completion condition |
 | --- | --- | --- |
+| `pathology_source_screening` | Python | Structured treatment fields are excluded and every remaining DisMech sentence matching a named-intervention, treatment-language, or treatment-event signal is deduplicated into one bounded batch |
+| `pathology_source_adjudication` | One bounded agent, or Python when the batch is empty | Every flagged sentence is classified exactly once as pathology-only, treatment, mixed, or ambiguous without searching, rewriting, or creating nodes |
 | `pathology_sources` | Python | Treatment-blind Monarch and DisMech nodes, shared disease context, receipts, versions, and raw hashes are retained |
 | `pathology_curation` | One agent | Every non-anchor source node is assigned exactly once to a run-local concept marked `research`, `context_only`, or `exclude`; context is attached to retained research concepts and uncertain equivalence remains separate |
 | `evidence_graph` | Python after item work | Every curated research concept has one accepted deep-research profile and desired biological state; Python projects retained concepts and source edges through the partition and freezes the graph snapshot |
@@ -16,7 +18,10 @@ Within the three item barriers, `next` selects the first missing item from a sta
 
 ## Separation of evidence
 
-The pathology phase may contain disease, gene, variant, molecular, biochemical, cellular, tissue, organ, anatomy, and phenotype records. It structurally rejects candidate, compound, drug, treatment, and therapeutic fields.
+The isolated source-adjudication packet may contain only the compact flagged-sentence batch and
+cannot propagate into the pathology graph. The subsequent pathology phase may contain disease,
+gene, variant, molecular, biochemical, cellular, tissue, organ, anatomy, and phenotype records.
+It structurally rejects candidate, compound, drug, treatment, and therapeutic fields.
 
 The graph becomes candidate input only after its immutable `snapshot_id` is written. Candidate evidence has two explicit parts:
 
@@ -27,7 +32,17 @@ The chain is sufficient without a paper directly joining the drug to the disease
 
 ## Ownership
 
-Python owns order, source receipts, hashing, item cursors, immutable acceptance, curation coverage checks, cross-reference checks, treatment exclusion during pathology work, secret rejection, graph freezing and context projection, exact UniChem merging, candidate aggregation, raw score calculation, ranking order, and exports. The candidate identity reviewer owns only the interpretation of UniChem-flagged or unresolved seeds. Candidate evidence reviewers own source-backed dossiers but do not score or decide eligibility. The independent auditor owns the closed-corpus assessment, bounded exclusions, component judgments, net assessment, and final aliases and reservations. The curation agent owns pathology semantic equivalence and research-value judgment; research agents own research content. Sources own evidence. No worker may select the next task or declare the programme complete.
+Python owns order, source receipts, hashing, item cursors, immutable acceptance, structured
+treatment exclusion, sentence screening, application of adjudication decisions, curation coverage
+checks, cross-reference checks, secret rejection, graph freezing and context projection, exact
+UniChem merging, candidate aggregation, raw score calculation, ranking order, and exports. The
+source adjudicator owns only the interpretation of flagged sentences and may neither search nor
+rewrite them. The candidate identity reviewer owns only the interpretation of UniChem-flagged or
+unresolved seeds. Candidate evidence reviewers own source-backed dossiers but do not score or
+decide eligibility. The independent auditor owns the closed-corpus assessment, bounded exclusions,
+component judgments, net assessment, and final aliases and reservations. The curation agent owns
+pathology semantic equivalence and research-value judgment; research agents own research content.
+Sources own evidence. No worker may select the next task or declare the programme complete.
 
 A run is derived from `case.json`, canonical `results/*.json`, item results under `results/items/`, cached source receipts, and the final output manifest. The manifest hashes every accepted result file.
 

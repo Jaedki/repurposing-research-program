@@ -1,6 +1,9 @@
 # Pathology source adapters
 
-Source ingestion runs as the first deterministic controller barrier. Responses are cached immutably under `<run>/sources/raw/`; packets receive normalized pathology records and receipts, not credentials.
+Source ingestion begins with deterministic collection and screening. Responses are cached
+immutably under `<run>/sources/raw/`. One isolated, compact adjudication packet is emitted only
+when free-text sentences are flagged; subsequent packets receive normalized pathology records and
+receipts, not credentials or excluded sentences.
 
 Normalized non-anchor nodes remain source records until the curation barrier assigns each one exactly once to a run-local research, context-only, or excluded concept. Source adapters do not perform fuzzy semantic merging or research-value pruning.
 
@@ -27,7 +30,15 @@ Every top-level DisMech section is accounted for. Sections that can express dist
 
 All remaining pathology-safe sections are retained once in `disease_context` rather than expanded into low-value nodes. This includes disease description, classifications, mappings, inheritance, progression, stages, subtypes, prevalence, epidemiology, datasets, models, diagnostic context, discussions, and other source metadata. Curation receives the complete context; repeated research packets receive only compact disease-defining context.
 
-Treatment, clinical-trial, intervention, regimen, surrogate-endpoint, and related sections or nested fields are excluded. Explicit intervention names and their bounded acronyms are used only as an internal redaction lexicon and are never emitted. Remaining free text is split into sentences and any sentence containing treatment language or a named intervention is removed before source records or packets are written. Raw YAML remains cached unchanged for provenance.
+Treatment, clinical-trial, intervention, regimen, surrogate-endpoint, and related sections or
+nested fields are excluded unconditionally. Explicit intervention names and their bounded
+acronyms remain an internal screening lexicon. Remaining free text is split into sentences and
+screened by named-intervention, treatment-language, and treatment-event signals. Flagged sentences
+are deduplicated into one bounded packet containing stable IDs, exact text, signal classes, and
+source paths. The adjudicator does not search, rewrite, cite, or create nodes; it classifies every
+sentence exactly once. Python restores only exact sentences classified `retain_pathology`.
+Treatment sentences are excluded, while mixed or ambiguous sentences fail closed and create an
+explicit gap. Raw YAML remains cached unchanged for provenance.
 
 If no MONDO-mapped DisMech entry exists, the adapter records an explicit gap and continues with Monarch rather than treating source coverage as programme failure.
 

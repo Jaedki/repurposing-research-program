@@ -18,14 +18,16 @@ The worker returns one JSON object:
 
 ## Agent task collections
 
-1. `pathology_curation`: `concepts`; one packet partitions every supplied non-anchor source node exactly once.
-2. `pathology_node_research`: `documents`, `profiles`, `assertions`.
-3. `candidate_seed_research`: `documents`, `candidates`, `exclusions`.
-4. `candidate_identity`: `documents`, `identity_groups`; one global packet partitions every UniChem-flagged or unresolved seed exactly once. It is skipped deterministically when the queue is empty.
-5. `candidate_evidence_review`: `documents`, `reviews`; one packet contains the identity-resolved candidates assigned to one pathology concept and requires exactly one evidence dossier per supplied candidate.
-6. `candidate_audit`: `assessments`, `excluded_candidates`; one global closed-corpus packet requires an exact partition of every reviewed candidate and cannot return new documents.
+1. `pathology_source_adjudication`: `sentence_decisions`; one compact packet partitions every flagged free-text sentence exactly once as `retain_pathology`, `exclude_treatment`, `exclude_mixed`, or `exclude_ambiguous`. It performs no search or rewriting and is skipped deterministically when the batch is empty.
+2. `pathology_curation`: `concepts`; one packet partitions every supplied non-anchor source node exactly once.
+3. `pathology_node_research`: `documents`, `profiles`, `assertions`.
+4. `candidate_seed_research`: `documents`, `candidates`, `exclusions`.
+5. `candidate_identity`: `documents`, `identity_groups`; one global packet partitions every UniChem-flagged or unresolved seed exactly once. It is skipped deterministically when the queue is empty.
+6. `candidate_evidence_review`: `documents`, `reviews`; one packet contains the identity-resolved candidates assigned to one pathology concept and requires exactly one evidence dossier per supplied candidate.
+7. `candidate_audit`: `assessments`, `excluded_candidates`; one global closed-corpus packet requires an exact partition of every reviewed candidate and cannot return new documents.
 
-Python creates `pathology_sources`, the frozen `evidence_graph`, UniChem-enriched `candidate_seed_generation`, and aggregated `candidate_review` results.
+Python creates `pathology_source_screening`, `pathology_sources`, the frozen `evidence_graph`,
+UniChem-enriched `candidate_seed_generation`, and aggregated `candidate_review` results.
 
 Research `document_id` values use a canonical PMID, PMCID, DOI, authoritative database accession, or HTTPS URL. Invented `DOC-AUTHOR-YEAR` aliases are rejected.
 Python keeps one document per canonical ID, enriches scalar metadata in controller order, and unions list metadata without duplicates.
@@ -35,6 +37,12 @@ Workers may search and read freely, but `records.documents` contains only underl
 Python preserves accepted results unchanged and applies this rule as a soft propagation boundary: unused returned documents are not rejected, but do not enter aggregated stages or downstream packets. The graph, seeds, identity review, and candidate review each contribute only their own cited documents. `_all_documents()` assembles the deduplicated cross-stage union for the auditor and final outputs, including cited evidence for excluded candidates and negative findings.
 
 ## Pathology records
+
+- Structured treatment sections and fields are excluded before sentence screening. The screening
+  batch contains deduplicated sentence IDs, exact sentences, bounded signal classes, and source
+  paths. The adjudicator returns decisions only; it cannot create nodes, return documents, or
+  introduce replacement text. Python restores only exact sentences classified
+  `retain_pathology`; mixed and ambiguous sentences fail closed and become explicit gaps.
 
 - Monarch and DisMech nodes are disease-specific claims with a typed biological level and retained sources.
 - Non-node DisMech material is retained in `disease_context`. It informs curation and compact shared disease context without creating independent research tasks.

@@ -33,7 +33,9 @@ Install the pinned runtime dependencies once with `python -m pip install -r requ
 
 4. Repeat `next -> new agent -> submit` in the visible controller chat. Do not replace this loop with a persistent or background supervisor. The controller progresses through:
 
-   - pathology-only Monarch and DisMech ingestion;
+   - deterministic Monarch and DisMech source screening, followed by one compact
+     pathology-source sentence adjudication packet when free text is flagged;
+   - pathology-only source normalization after Python applies the complete adjudication;
    - one constrained curation packet that partitions every non-anchor source node into run-local research, context-only, or excluded concepts;
    - one deep pathology-research packet per curated research concept;
    - a frozen, content-addressed living evidence graph;
@@ -56,10 +58,15 @@ Use `status` at any time. Resume means calling `next`; accepted results are immu
 
 ## Hard boundaries
 
-- Pathology construction is treatment-blind. Pathology packets must not contain drug, compound, treatment, therapeutic, or candidate fields.
+- Pathology construction is treatment-blind. The isolated source-adjudication packet is the
+  only packet allowed to contain flagged source sentences; it cannot create nodes or propagate
+  into pathology context. All subsequent pathology packets must not contain drug, compound,
+  treatment, therapeutic, or candidate fields or interpretations.
 - Candidate generation starts only after curation and every required pathology-concept result are accepted and Python freezes the graph snapshot.
 - Candidate eligibility follows `pathology element -> desired biological state -> established drug mode of action`.
-- Monarch associations are pathology-category allowlisted. DisMech treatment-oriented sections and fields are excluded and remaining free text is treatment-redacted before packet construction.
+- Monarch associations are pathology-category allowlisted. DisMech treatment-oriented sections
+  and fields are excluded unconditionally. Flagged free text is batched once, classified without
+  search or rewriting, and retained only when the complete sentence is adjudicated pathology-only.
 - Workers create research content only. Python controls source receipts, task order, item cursors, packet lineage, validation, persistence, candidate aggregation, ranking order, and outputs.
 
 ## Evidence safeguards

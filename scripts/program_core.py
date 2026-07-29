@@ -16,10 +16,14 @@ from typing import Any, Iterable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from pathology_sources import SourceError, fetch_pathology_sources
+from pathology_sources import (
+    SENTENCE_DECISIONS,
+    SourceError,
+    fetch_pathology_sources,
+    screen_pathology_sources,
+)
 
 
-SCHEMA_VERSION = 8
 OBJECTIVE = (
     "Identify existing drugs whose established mode of action could plausibly alter a "
     "specific evidence-backed element of the supplied disease pathology. A prior "
@@ -37,6 +41,8 @@ CANONICAL_DOCUMENT_ID = re.compile(
     re.IGNORECASE,
 )
 STAGES = (
+    "pathology_source_screening",
+    "pathology_source_adjudication",
     "pathology_sources",
     "pathology_curation",
     "evidence_graph",
@@ -147,6 +153,20 @@ AUDIT_EXCLUSION_POLICY = {
 AUDIT_EXCLUSION_REASONS = frozenset(AUDIT_EXCLUSION_POLICY)
 
 STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
+    "pathology_source_adjudication": {
+        "role": "pathology-source sentence adjudicator",
+        "task": (
+            "Classify only the supplied flagged DisMech sentences. Do not search, add facts, "
+            "rewrite text, infer a candidate, or perform pathology curation. Return "
+            "retain_pathology only when the complete sentence is exclusively causal biology, "
+            "pathology, phenotype, diagnosis, or source metadata and contains no therapeutic "
+            "interpretation, efficacy claim, clinical intervention, administered intervention, "
+            "or candidate framing. Return exclude_treatment for wholly treatment-oriented text, "
+            "exclude_mixed when treatment and useful pathology coexist, and exclude_ambiguous "
+            "when the distinction is uncertain. Mixed and ambiguous sentences fail closed."
+        ),
+        "collections": ["sentence_decisions"],
+    },
     "pathology_curation": {
         "role": "disease pathology concept curator",
         "task": (
@@ -269,6 +289,8 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
 }
 
 ROW_FIELDS = {
+    "flagged_sentences": ["sentence_id", "sentence", "signals", "paths"],
+    "sentence_decisions": ["sentence_id", "decision", "reason"],
     "documents": ["document_id", "title", "source"],
     "source_nodes": ["node_id", "label", "node_type", "source_ids"],
     "source_edges": [
@@ -317,6 +339,14 @@ PATHOLOGY_PROFILE_LIST_FIELDS = (
 )
 
 FIELD_RULES = {
+    "pathology_source_adjudication": [
+        "partition every supplied sentence_id exactly once",
+        "decision is retain_pathology, exclude_treatment, exclude_mixed, or exclude_ambiguous",
+        "retain_pathology requires the entire sentence to be pathology-safe without rewriting",
+        "exclude mixed or ambiguous sentences; uncertainty never permits restoration",
+        "reason is one concise classification rationale and does not repeat the sentence",
+        "do not search, cite sources, create nodes, or introduce new text",
+    ],
     "pathology_curation": [
         "partition every supplied non-anchor source node exactly once across concepts",
         "concept_id is one member_node_id; choose an authoritative member ID only after same-level "
@@ -606,7 +636,7 @@ def _submission_path(root: Path, task: str, item_id: str | None = None) -> Path:
 
 def _case(root: Path) -> dict[str, Any]:
     case = _read_json(root / "case.json")
-    if case.get("schema_version") != SCHEMA_VERSION or not str(case.get("disease", "")).strip():
+    if not str(case.get("disease", "")).strip():
         raise ProgramError("case.json is not a valid lean repurposing case")
     if case.get("objective") != OBJECTIVE:
         raise ProgramError("case.json does not contain the built-in repurposing objective")
@@ -650,7 +680,6 @@ def initialize(
     run_root.mkdir(parents=True, exist_ok=True)
     case_basis = {"disease": disease, "gene": gene, "mondo": mondo, "objective": OBJECTIVE}
     case = {
-        "schema_version": SCHEMA_VERSION,
         "case_id": _stable_id("CASE", case_basis),
         "disease": disease,
         "gene": gene,
@@ -769,8 +798,15 @@ def _program_status(
         next_stage = None
     else:
         next_stage = STAGES[len(results)]
-        if next_stage == "pathology_sources":
+        if next_stage in {"pathology_source_screening", "pathology_sources"}:
             state, next_task = "needs_controller", next_stage
+        elif next_stage == "pathology_source_adjudication":
+            next_task = next_stage
+            flagged = _rows(
+                results["pathology_source_screening"]["records"],
+                "flagged_sentences",
+            )
+            state = "needs_agent" if flagged else "needs_controller"
         elif next_stage in {"evidence_graph", "candidate_seed_generation", "candidate_review"}:
             next_task = {
                 "evidence_graph": "pathology_node_research",
@@ -788,7 +824,6 @@ def _program_status(
         else:
             state, next_task = "needs_agent", next_stage
     return {
-        "schema_version": SCHEMA_VERSION,
         "case_id": case["case_id"],
         "state": state,
         "next_stage": next_stage,
@@ -1193,7 +1228,6 @@ def graph_context(root: str | Path, node_id: str) -> dict[str, Any]:
     if not node_id:
         raise ProgramError("node_id is required")
     return {
-        "schema_version": SCHEMA_VERSION,
         "case_id": case["case_id"],
         "graph_snapshot_id": graph["snapshot_id"],
         "context": _graph_node_context(records, node_id),
@@ -1206,6 +1240,14 @@ def _packet_context(
     item_id: str | None,
     results: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
+    if task == "pathology_source_adjudication":
+        screening = results["pathology_source_screening"]
+        return {
+            "resolved_disease": screening.get("resolved_disease"),
+            "flagged_sentences": _rows(
+                screening["records"], "flagged_sentences"
+            ),
+        }
     if task == "pathology_curation":
         documents = _all_documents(results)
         source_result = results["pathology_sources"]
@@ -1371,8 +1413,34 @@ def _build_packet(
         for name in results
     ]
     guidance = STAGE_GUIDANCE[task]
+    packet_rules = (
+        [
+            "Use only the supplied sentences; do not search or retrieve sources.",
+            "Return one compact decision for every supplied sentence_id and no others.",
+            "Never rewrite, quote, summarize, or create a pathology node from a sentence.",
+            "Return JSON only and do not include credentials or API keys.",
+        ]
+        if task == "pathology_source_adjudication"
+        else [
+            "Use only supplied or newly retrieved named sources; never invent citations.",
+            "Use PMID:<digits>, PMCID:PMC<digits>, DOI:<doi>, recognized accession:<id>, or "
+            "HTTPS URL document IDs; never invent DOC aliases.",
+            *(
+                [
+                    "Search and read freely, but return only documents that directly support a "
+                    "submitted claim, counterclaim, identity decision, or limitation.",
+                    "Every returned document_id must be cited in this result through source_ids, "
+                    "pathology_source_ids, or mechanism_source_ids; cited upstream documents do "
+                    "not need to be returned again.",
+                ]
+                if "documents" in guidance["collections"]
+                else []
+            ),
+            "Preserve contradictions, negative results, unresolved identity, and source gaps.",
+            "Return JSON only and do not include credentials or API keys.",
+        ]
+    )
     unsigned = {
-        "schema_version": SCHEMA_VERSION,
         "stage": task,
         "item_id": item_id,
         "role": guidance["role"],
@@ -1402,24 +1470,7 @@ def _build_packet(
             "gaps": "list of explicit limitations or unresolved questions",
             "notes": "optional list of concise notes",
         },
-        "rules": [
-            "Use only supplied or newly retrieved named sources; never invent citations.",
-            "Use PMID:<digits>, PMCID:PMC<digits>, DOI:<doi>, recognized accession:<id>, or "
-            "HTTPS URL document IDs; never invent DOC aliases.",
-            *(
-                [
-                    "Search and read freely, but return only documents that directly support a "
-                    "submitted claim, counterclaim, identity decision, or limitation.",
-                    "Every returned document_id must be cited in this result through source_ids, "
-                    "pathology_source_ids, or mechanism_source_ids; cited upstream documents do "
-                    "not need to be returned again.",
-                ]
-                if "documents" in guidance["collections"]
-                else []
-            ),
-            "Preserve contradictions, negative results, unresolved identity, and source gaps.",
-            "Return JSON only and do not include credentials or API keys.",
-        ],
+        "rules": packet_rules,
     }
     packet = {**unsigned, "packet_id": _stable_id("PACKET", unsigned)}
     _write_json(_packet_path(run_root, task, item_id), packet)
@@ -1540,7 +1591,6 @@ def _build_graph_result(
         records,
     )
     return {
-        "schema_version": SCHEMA_VERSION,
         "stage": "evidence_graph",
         "status": "complete",
         "snapshot_id": _stable_id("GRAPH", records),
@@ -1910,7 +1960,6 @@ def _build_seed_result(
         records,
     )
     return {
-        "schema_version": SCHEMA_VERSION,
         "stage": "candidate_seed_generation",
         "status": "complete",
         "graph_snapshot_id": results["evidence_graph"]["snapshot_id"],
@@ -1930,7 +1979,6 @@ def _empty_identity_result(results: Mapping[str, Mapping[str, Any]]) -> dict[str
     if _identity_queue(results["candidate_seed_generation"]["records"]):
         raise ProgramError("Candidate identity review is required before controller advancement")
     return {
-        "schema_version": SCHEMA_VERSION,
         "stage": "candidate_identity",
         "status": "complete",
         "records": {"documents": [], "identity_groups": []},
@@ -1953,7 +2001,6 @@ def _build_review_result(
         str(row["document_id"]) for row in _all_documents(results)
     }
     return {
-        "schema_version": SCHEMA_VERSION,
         "stage": "candidate_review",
         "status": "complete",
         "records": {
@@ -1980,12 +2027,45 @@ def _advance_controller(
     results: Mapping[str, Mapping[str, Any]],
     stage: str,
 ) -> None:
-    if stage == "pathology_sources":
+    if stage == "pathology_source_screening":
         try:
-            result = fetch_pathology_sources(root, str(case["disease"]), case.get("mondo"))
+            result = screen_pathology_sources(
+                root, str(case["disease"]), case.get("mondo")
+            )
         except SourceError as exc:
             raise ProgramError(str(exc)) from exc
-        result["schema_version"] = SCHEMA_VERSION
+        _validate_source_screening(result)
+    elif stage == "pathology_source_adjudication":
+        flagged = _rows(
+            results["pathology_source_screening"]["records"],
+            "flagged_sentences",
+        )
+        if flagged:
+            raise ProgramError("Flagged source sentences require agent adjudication")
+        result = {
+            "stage": "pathology_source_adjudication",
+            "status": "complete",
+            "records": {"sentence_decisions": []},
+            "gaps": [],
+            "notes": ["No DisMech free-text sentences required adjudication."],
+        }
+    elif stage == "pathology_sources":
+        decisions = {
+            str(row["sentence_id"]): str(row["decision"])
+            for row in _rows(
+                results["pathology_source_adjudication"]["records"],
+                "sentence_decisions",
+            )
+        }
+        try:
+            result = fetch_pathology_sources(
+                root,
+                str(case["disease"]),
+                case.get("mondo"),
+                decisions,
+            )
+        except SourceError as exc:
+            raise ProgramError(str(exc)) from exc
         _validate_source_result(result)
     elif stage == "evidence_graph":
         result = _build_graph_result(root, results)
@@ -2012,6 +2092,78 @@ def _validate_documents(
                 "authoritative accession, or HTTPS URL"
             )
     return documents
+
+
+def _validate_source_screening(result: Mapping[str, Any]) -> None:
+    if (
+        result.get("stage") != "pathology_source_screening"
+        or result.get("status") != "complete"
+    ):
+        raise ProgramError("Pathology source screening returned an invalid stage or status")
+    records = result.get("records")
+    if not isinstance(records, dict) or set(records) != {"flagged_sentences"}:
+        raise ProgramError("Pathology source screening requires only flagged_sentences")
+    rows = _contract_rows(records, "flagged_sentences", "sentence_id")
+    allowed_signals = {"named_intervention", "treatment_event", "treatment_language"}
+    for index, row in enumerate(rows):
+        label = f"flagged_sentences[{index}]"
+        unexpected = sorted(set(row) - set(ROW_FIELDS["flagged_sentences"]))
+        if unexpected:
+            raise ProgramError(f"{label} has unexpected fields: {unexpected}")
+        sentence = str(row["sentence"]).strip()
+        if not sentence or row["sentence_id"] != _stable_id(
+            "DISMECH-SENTENCE", sentence
+        ):
+            raise ProgramError(f"{label} does not have a stable sentence identity")
+        signals = row["signals"]
+        if (
+            not isinstance(signals, list)
+            or not signals
+            or any(signal not in allowed_signals for signal in signals)
+            or len(signals) != len(set(signals))
+        ):
+            raise ProgramError(f"{label}.signals contains invalid or duplicate values")
+        paths = row["paths"]
+        if (
+            not isinstance(paths, list)
+            or not paths
+            or any(
+                not isinstance(path, str) or not path.startswith("$")
+                for path in paths
+            )
+            or len(paths) != len(set(paths))
+        ):
+            raise ProgramError(f"{label}.paths must contain unique source paths")
+
+
+def _validate_source_adjudication(
+    records: Mapping[str, Any], prior: Mapping[str, Mapping[str, Any]]
+) -> None:
+    decisions = _contract_rows(records, "sentence_decisions", "sentence_id")
+    expected = {
+        str(row["sentence_id"])
+        for row in _rows(
+            prior["pathology_source_screening"]["records"],
+            "flagged_sentences",
+        )
+    }
+    actual = {str(row["sentence_id"]) for row in decisions}
+    if actual != expected:
+        raise ProgramError(
+            "Sentence adjudication must partition every flagged sentence exactly once; "
+            f"missing={sorted(expected - actual)}, unknown={sorted(actual - expected)}"
+        )
+    for index, row in enumerate(decisions):
+        label = f"sentence_decisions[{index}]"
+        unexpected = sorted(set(row) - set(ROW_FIELDS["sentence_decisions"]))
+        if unexpected:
+            raise ProgramError(f"{label} has unexpected fields: {unexpected}")
+        if row["decision"] not in SENTENCE_DECISIONS:
+            raise ProgramError(
+                f"{label}.decision must be one of {sorted(SENTENCE_DECISIONS)}"
+            )
+        if not str(row["reason"]).strip():
+            raise ProgramError(f"{label}.reason must be non-empty")
 
 
 def _validate_source_result(result: Mapping[str, Any]) -> None:
@@ -2592,6 +2744,9 @@ def _validate_result(
     if secrets:
         raise ProgramError(f"Credentials must never be persisted in results: {secrets}")
     validators = {
+        "pathology_source_adjudication": lambda: _validate_source_adjudication(
+            result["records"], prior
+        ),
         "pathology_curation": lambda: _validate_curation(result["records"], prior),
         "pathology_node_research": lambda: _validate_pathology_item(
             result["records"], str(item_id), prior
@@ -2942,7 +3097,6 @@ def build_outputs(root: str | Path) -> dict[str, Any]:
     rows, candidates = _ranked_rows(results)
     artifact_paths = _write_output_files(run_root, case, results, rows, candidates)
     manifest = {
-        "schema_version": SCHEMA_VERSION,
         "case_id": case["case_id"],
         "case_sha256": _sha256((run_root / "case.json").read_bytes()),
         "status": "complete",

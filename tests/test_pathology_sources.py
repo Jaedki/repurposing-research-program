@@ -19,7 +19,7 @@ class DisMechNormalizationTest(unittest.TestCase):
 
         self.assertEqual(relative, "sources/raw/dismech_Disease.yaml")
         self.assertEqual(
-            sources._treatment_text_paths({"raw_path": relative}, set()),
+            sources._flagged_sentences({"raw_path": relative}, set()),
             [],
         )
 
@@ -53,7 +53,11 @@ class DisMechNormalizationTest(unittest.TestCase):
         }
 
         terms = sources._treatment_terms(raw)
-        sanitized = sources._pathology_only(raw, terms)
+        decisions = {
+            row["sentence_id"]: "exclude_treatment"
+            for row in sources._flagged_sentences(raw, terms)
+        }
+        sanitized = sources._pathology_only(raw, terms, decisions)
         documents, nodes, edges, contexts, gaps = sources._normalize_dismech_sections(
             sanitized, "MONDO:1", "DISMECH-FILE-TEST"
         )
@@ -76,8 +80,8 @@ class DisMechNormalizationTest(unittest.TestCase):
         self.assertEqual(edges, [])
         self.assertEqual(gaps, [])
         self.assertEqual(
-            sources._treatment_text_paths(
-                {"nodes": nodes, "contexts": contexts}, terms
+            sources._unapproved_flagged_paths(
+                {"nodes": nodes, "contexts": contexts}, terms, decisions
             ),
             [],
         )
@@ -111,7 +115,11 @@ class DisMechNormalizationTest(unittest.TestCase):
         }
 
         terms = sources._treatment_terms(raw)
-        sanitized = sources._pathology_only(raw, terms)
+        decisions = {
+            row["sentence_id"]: "exclude_treatment"
+            for row in sources._flagged_sentences(raw, terms)
+        }
+        sanitized = sources._pathology_only(raw, terms, decisions)
 
         self.assertEqual(terms, {"Riluzole"})
         self.assertEqual(
@@ -132,7 +140,11 @@ class DisMechNormalizationTest(unittest.TestCase):
             with self.subTest(sentence=sentence):
                 self.assertTrue(sources._treatment_text(sentence, set()))
                 self.assertEqual(
-                    sources._sanitize_text(f"{pathology} {sentence}", set()),
+                    sources._sanitize_text(
+                        f"{pathology} {sentence}",
+                        set(),
+                        {sources._sentence_id(sentence): "exclude_treatment"},
+                    ),
                     pathology,
                 )
 
@@ -145,6 +157,69 @@ class DisMechNormalizationTest(unittest.TestCase):
             with self.subTest(sentence=sentence):
                 self.assertFalse(sources._treatment_text(sentence, set()))
 
+    def test_adjudication_can_restore_a_false_positive_without_rewriting(self):
+        sentence = "The approved HGNC symbol is SOD1."
+        raw = {
+            "genetic": [
+                {"name": "SOD1", "description": sentence},
+                {"name": "SOD1 metadata", "notes": sentence},
+            ]
+        }
+        flagged = sources._flagged_sentences(raw, set())
+
+        self.assertEqual([row["sentence"] for row in flagged], [sentence])
+        self.assertEqual(len(flagged[0]["paths"]), 2)
+        with self.assertRaisesRegex(sources.SourceError, "Missing valid adjudication"):
+            sources._pathology_only(raw, set(), {})
+        sanitized = sources._pathology_only(
+            raw,
+            set(),
+            {flagged[0]["sentence_id"]: "retain_pathology"},
+        )
+
+        self.assertEqual(sanitized["genetic"][0]["description"], sentence)
+        self.assertEqual(sanitized["genetic"][1]["notes"], sentence)
+
+    def test_screen_and_adjudication_reduce_errors_on_labeled_sentences(self):
+        samples = (
+            ("Patients on riluzole showed improved survival.", False),
+            ("Patients receiving edaravone showed slower decline.", False),
+            ("Following tofersen administration, motor scores improved.", False),
+            ("The approved HGNC symbol is SOD1.", True),
+            ("Restoring STMN2 rescued axonal regeneration in motor neurons.", True),
+        )
+        legacy_predictions = [
+            not bool(sources._TREATMENT_TEXT.search(sentence))
+            for sentence, _ in samples
+        ]
+        decisions = {
+            sources._sentence_id(sentence): (
+                "retain_pathology" if should_retain else "exclude_treatment"
+            )
+            for sentence, should_retain in samples
+            if sources._treatment_text(sentence, set())
+        }
+        hybrid_predictions = [
+            (
+                decisions[sources._sentence_id(sentence)] == "retain_pathology"
+                if sources._treatment_text(sentence, set())
+                else True
+            )
+            for sentence, _ in samples
+        ]
+        expected = [should_retain for _, should_retain in samples]
+
+        legacy_errors = sum(
+            actual != wanted
+            for actual, wanted in zip(legacy_predictions, expected)
+        )
+        hybrid_errors = sum(
+            actual != wanted
+            for actual, wanted in zip(hybrid_predictions, expected)
+        )
+        self.assertEqual(legacy_errors, 4)
+        self.assertEqual(hybrid_errors, 0)
+
     def test_explicit_intervention_name_supplies_a_bounded_acronym_alias(self):
         raw = {
             "description": (
@@ -155,7 +230,11 @@ class DisMechNormalizationTest(unittest.TestCase):
         }
 
         terms = sources._treatment_terms(raw)
-        sanitized = sources._pathology_only(raw, terms)
+        decisions = {
+            row["sentence_id"]: "exclude_treatment"
+            for row in sources._flagged_sentences(raw, terms)
+        }
+        sanitized = sources._pathology_only(raw, terms, decisions)
 
         self.assertEqual(
             terms, {"Hematopoietic stem cell transplantation", "HSCT"}
@@ -192,8 +271,18 @@ class ALSRegressionTest(unittest.TestCase):
             raise unittest.SkipTest("completed ALS raw artifacts are not available")
         cls.before = {path: path.stat().st_mtime_ns for path in required}
         cls.raw = yaml.safe_load(cls.yaml_path.read_text(encoding="utf-8-sig"))
-        cls.result = sources.fetch_pathology_sources(
+        screening = sources.screen_pathology_sources(
             cls.run_root, "amyotrophic lateral sclerosis", "MONDO:0004976"
+        )
+        cls.decisions = {
+            row["sentence_id"]: "exclude_treatment"
+            for row in screening["records"]["flagged_sentences"]
+        }
+        cls.result = sources.fetch_pathology_sources(
+            cls.run_root,
+            "amyotrophic lateral sclerosis",
+            "MONDO:0004976",
+            cls.decisions,
         )
         cls.after = {path: path.stat().st_mtime_ns for path in required}
         cls.nodes = cls.result["records"]["source_nodes"]
@@ -225,7 +314,11 @@ class ALSRegressionTest(unittest.TestCase):
             for key in ("documents", "source_nodes", "source_edges", "disease_context")
         }
         self.assertEqual(
-            sources._treatment_text_paths(emitted, sources._treatment_terms(self.raw)),
+            sources._unapproved_flagged_paths(
+                emitted,
+                sources._treatment_terms(self.raw),
+                self.decisions,
+            ),
             [],
         )
 
