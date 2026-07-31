@@ -12,6 +12,13 @@ sys.path.insert(0, str(SCRIPTS))
 import program_core as core  # noqa: E402
 
 
+PROGRAM_BASELINE = json.loads(
+    (Path(__file__).resolve().parent / "fixtures" / "program_baseline.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+
 def source_result(*_args):
     return {
         "stage": "pathology_sources",
@@ -895,6 +902,35 @@ class WorkflowTest(unittest.TestCase):
         exclusions = (self.root / "outputs" / "candidate_exclusions.jsonl").read_text()
         self.assertIn('"candidate_id":"UNICHEM:2"', exclusions)
         self.assertIn('"reason_code":"human_intervention"', exclusions)
+        self.assertEqual(core.status(self.root)["state"], "complete")
+        self.assertEqual(core.build_outputs(self.root), manifest)
+
+        normalized_stage_hashes = {}
+        for stage in core.STAGES:
+            result = json.loads(core._result_path(self.root, stage).read_text(encoding="utf-8"))
+            result.pop("packet_id", None)
+            normalized_stage_hashes[stage] = core._sha256(core._canonical_bytes(result))
+        baseline = {
+            "case_id": manifest["case_id"],
+            "counts": {
+                field: manifest[field]
+                for field in (
+                    "candidate_count",
+                    "deduplicated_candidate_count",
+                    "excluded_candidate_count",
+                    "raw_candidate_count",
+                )
+            },
+            "stage_results_without_packet_id": normalized_stage_hashes,
+            "artifacts": {
+                artifact["filename"]: {
+                    "bytes": artifact["bytes"],
+                    "sha256": artifact["sha256"],
+                }
+                for artifact in manifest["artifacts"]
+            },
+        }
+        self.assertEqual(baseline, PROGRAM_BASELINE)
 
     def test_curation_guidance_and_input_order_preserve_semantic_granularity(self):
         source = source_result()

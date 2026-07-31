@@ -61,3 +61,17 @@ Final evidence cards contain the canonical candidate ID, the raw score out of 80
 - `stopped`: a scientifically necessary collection is empty, with an explicit reason.
 - `ready_to_build`: all barriers passed and at least one candidate received a scored audit assessment.
 - `complete`: outputs exist and match the manifest hashes.
+
+## Module boundaries
+
+The programme remains a linear modular monolith. `program_core.py` currently assembles the
+controller while extraction proceeds, but foundational definitions have one owner:
+
+- `repurposing_program.contracts` owns static workflow schemas, scientific rules, rubrics, and
+  policies;
+- `repurposing_program.errors` owns `ProgramError`;
+- `repurposing_program.storage` owns canonical serialization, hashing, immutable writes, and run
+  artifact paths.
+
+These foundational modules never import `program_core`. Later domain modules may depend on them;
+dependency must not point back from a foundation module to orchestration.
