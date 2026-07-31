@@ -6,7 +6,7 @@ This file dictates agent judgment, behaviour, and communication. Use `SKILL.md`,
 
 ## General behaviour
 
-- Maintain scientific accuracy through thorough, source-backed research
+- Maintain scientific accuracy through thorough, literature-backed research
 - Explore creative mechanisms without overlooking obvious or simple routes to a useful result.
 - Apply only the judgments assigned to the current stage; do not anticipate later inclusion or exclusion decisions.
 
@@ -20,5 +20,5 @@ This file dictates agent judgment, behaviour, and communication. Use `SKILL.md`,
 
 ## Communication
 
-- Keep commentary brief and operational: report material state changes, current action, results, or blockers only at meaningful checkpoints.
+- Keep commentary concise and operational: report material state changes, current action, results, or blockers only at meaningful checkpoints.
 - Do not narrate routine compliance, restate packet contents, or explain obvious controller steps unless the user asks.

@@ -1,7 +1,9 @@
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
@@ -9,9 +11,46 @@ import yaml
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import pathology_sources as sources  # noqa: E402
+import program_core as core  # noqa: E402
 
 
 class DisMechNormalizationTest(unittest.TestCase):
+    def test_dismech_receipt_hashes_every_cached_source_artifact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "sources" / "raw"
+            cache.mkdir(parents=True)
+            commit_path = cache / "dismech_commit.json"
+            export_path = cache / "dismech_mondo_emc.tsv"
+            yaml_path = cache / "dismech_example.yaml"
+            commit_path.write_text('{"sha":"abc123"}', encoding="utf-8")
+            export_path.write_text("mondo_id\tdismech_url\n", encoding="utf-8")
+            yaml_path.write_text("name: Example disease\n", encoding="utf-8")
+            metadata = {
+                "commit_sha": "abc123",
+                "page": "https://example.org/example.html",
+                "slug": "example",
+                "yaml_path": yaml_path,
+            }
+
+            with patch.object(
+                sources,
+                "_load_dismech",
+                return_value=({"name": "Example disease"}, metadata, []),
+            ):
+                *_, receipt, _ = sources._dismech(cache, "MONDO:1", {})
+
+            self.assertEqual(
+                {row["path"] for row in receipt["raw_files"]},
+                {
+                    "sources/raw/dismech_commit.json",
+                    "sources/raw/dismech_mondo_emc.tsv",
+                    "sources/raw/dismech_example.yaml",
+                },
+            )
+            for row in receipt["raw_files"]:
+                path = Path(directory) / row["path"]
+                self.assertEqual(row["sha256"], sources._sha256(path.read_bytes()))
+
     def test_raw_cache_paths_do_not_expose_run_directory_language(self):
         path = Path("C:/repurposing package/a-run/sources/raw/dismech_Disease.yaml")
 
@@ -290,6 +329,15 @@ class ALSRegressionTest(unittest.TestCase):
     def test_completed_raw_artifacts_parse_from_existing_package(self):
         self.assertEqual(self.result["status"], "complete")
         self.assertEqual(self.before, self.after)
+
+    def test_normalized_sources_pass_controller_validation_without_duplicate_counts(self):
+        core._validate_source_result(self.result)
+        dismech_receipt = next(
+            row
+            for row in self.result["records"]["source_receipts"]
+            if row["source"] == "dismech"
+        )
+        self.assertNotIn("sentence_adjudication", dismech_receipt)
 
     def test_sod1_label_survives_without_fallback_node(self):
         self.assertEqual(

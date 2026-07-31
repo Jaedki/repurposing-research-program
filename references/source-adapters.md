@@ -28,7 +28,7 @@ Every top-level DisMech section is accounted for. Sections that can express dist
 - `phenotypes`, `histopathology`, and `imaging_findings` become `phenotype` nodes;
 - `genetic`, `variants`, `environmental`, and `infectious_agent` become `driver` nodes.
 
-All remaining pathology-safe sections are retained once in `disease_context` rather than expanded into low-value nodes. This includes disease description, classifications, mappings, inheritance, progression, stages, subtypes, prevalence, epidemiology, datasets, models, diagnostic context, discussions, and other source metadata. Curation receives the complete context; repeated research packets receive only compact disease-defining context.
+All remaining pathology-safe sections are retained once in `disease_context` rather than expanded into low-value nodes. This includes disease description, classifications, mappings, inheritance, progression, stages, subtypes, prevalence, epidemiology, datasets, models, diagnostic context, discussions, and other source metadata. The controller retains the complete context and provenance. Curation receives source nodes, edges, and only compact disease-defining context; repeated research packets receive the same bounded context.
 
 Treatment, clinical-trial, intervention, regimen, surrogate-endpoint, and related sections or
 nested fields are excluded unconditionally. Explicit intervention names and their bounded

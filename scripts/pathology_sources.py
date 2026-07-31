@@ -914,7 +914,11 @@ def _dismech(
             "see the accepted pathology-source adjudication result."
         )
 
-    raw_files = [cache / "dismech_mondo_emc.tsv", Path(metadata["yaml_path"])]
+    raw_files = [
+        cache / "dismech_commit.json",
+        cache / "dismech_mondo_emc.tsv",
+        Path(metadata["yaml_path"]),
+    ]
     receipt = {
         "source": "dismech",
         "version": commit_sha,
@@ -934,10 +938,6 @@ def _dismech(
         ),
         "excluded_sections": sorted(str(key) for key in raw if _blocked_key(key)),
         "context_count": len(contexts),
-        "sentence_adjudication": {
-            "flagged_count": len(flagged),
-            **{f"{decision}_count": count for decision, count in decision_counts.items()},
-        },
     }
     return list(documents.values()), nodes, edges, contexts, receipt, gaps
 

@@ -44,8 +44,8 @@ Python preserves accepted results unchanged and applies this rule as a soft prop
   introduce replacement text. Python restores only exact sentences classified
   `retain_pathology`; mixed and ambiguous sentences fail closed and become explicit gaps.
 
-- Monarch and DisMech nodes are disease-specific claims with a typed biological level and retained sources.
-- Non-node DisMech material is retained in `disease_context`. It informs curation and compact shared disease context without creating independent research tasks.
+- Monarch and DisMech nodes are disease-specific claims with a provisional source-adapter type and retained sources. The curator assigns the authoritative run-local concept type from the supplied claim, payload, and edges.
+- Non-node DisMech material is retained in `disease_context`. The curator receives only compact disease-defining context and performs packet-only classification without searching or deep research. Receipts and full provenance remain controller-owned and do not create independent research tasks.
 - A curated concept chooses one member source-node ID as its run-local `concept_id`, retains member IDs and aliases, and uses one of `driver`, `mechanism`, `phenotype`, or `context`. Nodes merge only when they express the same claim at the same causal level; shared identifiers or biological relationships are not equivalence. Same-label gene-level disease claims may merge across sources, while mutation-, variant-, repeat-, model-, and mechanism-specific claims remain separate. True duplicates remain as members of the retained concept, and Python rejects duplicate retained type-label pairs. Python requires an exact partition and does not perform fuzzy matching.
 - Only `research` concepts receive deep work. Each `context_only` concept names at least one research concept in `related_concept_ids`; Python retains it in the frozen graph and creates explicit context edges without a separate research packet. `exclude` concepts remain visible in the curation artifact but do not enter the graph.
 - Each researched concept returns one detailed profile covering normal and pathological state, desired biological state, causal role, granular mechanisms, cell types, anatomy, timing, upstream causes, downstream consequences, contradictions, uncertainty, and gaps. `desired_biological_state` is one concise state that would reverse the pathology or compensate for an irreversible driver; it is not a treatment, assay, control, candidate, or generic clinical improvement.
@@ -62,7 +62,7 @@ Each seed packet contains one frozen focal concept, a compact index of every ret
 
 Each candidate links established drug action to the focal profile's desired biological state and carries:
 
-- exact or explicitly unresolved identity;
+- a preferred candidate name and every authoritative identifier found;
 - frozen graph node IDs;
 - `pathology_source_ids`;
 - `mechanism_source_ids` supporting the drug's action.
@@ -73,11 +73,11 @@ For every `graph_node_id`, `pathology_source_ids` includes at least one source a
 
 Seed workers derive candidates from the supplied biological change and retrieve evidence connecting its target or process to established drug action. They do not use disease-specific drug literature or queries combining the disease with drug, treatment, therapy, trial, or repurposing terms. Such literature is reserved for candidate review and reported only when it changes the decision.
 
-Workers retain every authoritative candidate identifier found. Python submits every supported identifier to UniChem, automatically merges only exact UCI matches, and queues every connectivity-only match, conflicting or partial mapping, unsupported identifier, and no result. A no-result record is unresolved, never evidence of uniqueness. The identity reviewer receives the entire queue plus a compact exact-resolved index, so possible aliases are not selected by name heuristics. Same-name matching never merges candidates automatically.
+Seed workers do not classify identity status. They retain every authoritative candidate identifier found. Python submits every supported identifier to UniChem, automatically merges only exact UCI matches, and queues every connectivity-only match, conflicting or partial mapping, unsupported identifier, and no result. A no-result record is unresolved, never evidence of uniqueness. The identity reviewer receives the entire queue plus a compact, controller-generated `canonical_candidate_options` list, so legal canonical IDs are explicit and possible aliases are not selected by name heuristics. Same-name matching never merges candidates automatically.
 
 UniChem identifiers use their native database values under `chembl`, `drugbank`, `gtopdb`, `chebi`, `unii`, `pubchem_cid`, `drugcentral`, `inchi`, or `inchikey`. Other identifier types remain visible but are not rewritten or submitted speculatively.
 
-The identity reviewer may attach queued seeds to an exact supplied `UNICHEM:<uci>` candidate or partition them into new resolved, unresolved, or conflicting groups. Seeds sharing one exact UCI are an indivisible identity block even when that block enters review because of a connectivity relationship. Each group cites newly retained authoritative identity evidence. Python validates complete, non-overlapping queue coverage and constructs the final candidate records without rewriting pathology or mechanism evidence.
+The identity reviewer may attach a resolved queued group only to a candidate ID copied exactly from `canonical_candidate_options`, or partition queued seeds into new resolved, unresolved, or conflicting groups with a null `canonical_candidate_id`. Each option is either an existing resolved candidate or a queued exact-UCI block and names any queued seed IDs that the group must contain. UCI values appearing elsewhere in a partial or conflicting queue record are identity evidence, not canonical options. Seeds sharing one exact UCI are an indivisible identity block even when that block enters review because of a connectivity relationship. Each group cites newly retained authoritative identity evidence. Python validates complete, non-overlapping queue coverage and constructs the final candidate records without rewriting pathology or mechanism evidence.
 
 Review packets retain the assigned candidates and all of their linked frozen pathology concepts and profiles, including complete cross-concept provenance, and include document metadata for the candidates' identity and drug-mechanism sources. Pathology citations remain attached to the frozen graph and candidate records without duplicating other graph sections or the full pathology source library into every review packet. Workers first verify drug facts with primary or authoritative sources and map them to the supplied pathology, then check exact-disease prior art. A review is an evidence dossier, not a decision: it contains a hypothesis, cited supporting findings, an explicit mechanistic bridge, assumptions, cited counterevidence, prior-art classification, supported aliases, and limitations. It does not score, rank, or exclude the candidate.
 
@@ -87,4 +87,6 @@ Each assessment contains `source_integrity`, exactly four `component_scores`, a 
 
 An exclusion contains `candidate_id`, a cited `finding`, and one `reason_code`: `exact_disease_use`, `human_intervention`, `unsupported_action`, `opposite_action`, `impossible_translational_feasibility`, or `invalid_candidate`. The packet carries the exact definition of every code. In particular, missing downstream evidence is not an unsupported drug action, uncertainty is not demonstrated translational impossibility, and unresolved identity is not an invalid candidate. A component-level failure corresponding to zero belongs in this exclusion record rather than in a scored assessment. Final cards use only audit-owned assessment fields; review fields never enter them directly.
 
-Only `status=complete` results are accepted. Operational failure is not scientific content: fix or rerun the worker and submit again. Conflicting replacement of an accepted result is rejected.
+Only `status=complete` results are accepted. On validation failure, stop and report the exact
+error; do not retry automatically or repair the worker's research JSON. Conflicting replacement
+of an accepted result is rejected.

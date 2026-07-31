@@ -96,6 +96,22 @@ def unichem_result(endpoint, body):
 
 
 class UniChemTransportTest(unittest.TestCase):
+    def test_accepts_explicit_compound_not_found_response(self):
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "compounds": [],
+            "response": "Not found",
+        }).encode()
+        with patch.object(core, "urlopen", return_value=response) as request:
+            result = core._post_unichem(
+                "compounds",
+                {"compound": "CHEMBL1201607", "type": "sourceID", "sourceID": 1},
+            )
+
+        self.assertEqual(result["response"], "Not found")
+        self.assertEqual(result["compounds"], [])
+        self.assertEqual(request.call_count, 1)
+
     def test_rejects_non_success_response_with_http_200(self):
         response = MagicMock()
         response.__enter__.return_value.read.return_value = json.dumps({
@@ -150,7 +166,26 @@ class ArtifactPersistenceTest(unittest.TestCase):
             self.assertEqual(path.read_bytes(), accepted)
 
 
+class InstructionContractTest(unittest.TestCase):
+    def test_validation_failure_stops_instead_of_retrying_automatically(self):
+        skill = (Path(__file__).resolve().parents[1] / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        normalized = " ".join(skill.split())
+        self.assertIn("stop and report the exact validation error", normalized)
+        self.assertIn("Do not retry automatically", normalized)
+        self.assertNotIn("give the same packet to another new agent", normalized)
+
+
 class SourceAdjudicationWorkflowTest(unittest.TestCase):
+    def test_source_validation_still_rejects_treatment_fields_in_pathology_content(self):
+        result = source_result()
+        core._validate_source_result(result)
+        result["records"]["source_nodes"][1]["treatment"] = "not pathology"
+
+        with self.assertRaisesRegex(core.ProgramError, "Treatment fields reached"):
+            core._validate_source_result(result)
+
     def test_batched_adjudication_is_complete_bounded_and_applied_once(self):
         sentences = (
             "The approved HGNC symbol is SOD1.",
@@ -317,6 +352,18 @@ class WorkflowTest(unittest.TestCase):
         action = core.next_action(self.root)
         self.assertEqual(action["next_task"], "pathology_curation")
         curation_packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
+        self.assertNotIn("objective", curation_packet)
+        self.assertEqual(
+            set(curation_packet["case"]),
+            {"case_id", "disease", "gene", "mondo"},
+        )
+        self.assertEqual(action["display_item_id"], "pathology_curation")
+        invalid_packet = {
+            key: value for key, value in curation_packet.items() if key != "packet_id"
+        }
+        invalid_packet["objective"] = core.OBJECTIVE
+        with self.assertRaisesRegex(core.ProgramError, "global objective"):
+            core._validate_packet(invalid_packet, "pathology_curation", None)
         self.assertEqual(
             [row["node_id"] for row in curation_packet["context"]["source_nodes"]],
             ["NODE:1"],
@@ -359,6 +406,11 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn(action["suggested_result_path"], action["worker_prompt"])
         first_item = action["next_item_id"]
         self.assertEqual(first_item, "NODE:1")
+        self.assertEqual(
+            action["display_item_id"],
+            f"pathology_node_research/NODE:1/{core._item_token('NODE:1')}",
+        )
+        self.assertIn(action["display_item_id"], action["worker_prompt"])
         node_type = research_packet["context"]["node"]["node_type"]
         self.assertEqual(
             research_packet["context"]["disease_context"][0]["section"],
@@ -389,6 +441,13 @@ class WorkflowTest(unittest.TestCase):
         )
         self.assertEqual(action["next_item_id"], "NODE:1")
         packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
+        candidate_contract = packet["result_contract"]["records"]["candidates"]
+        self.assertEqual(
+            candidate_contract,
+            {"type": "list of objects", **core.ROW_SCHEMAS["candidates"]},
+        )
+        self.assertIn("identifiers", candidate_contract["required_fields"])
+        self.assertNotIn("identity", candidate_contract["required_fields"])
         self.assertEqual(packet["context"]["focal_context"]["node"]["node_id"], "NODE:1")
         self.assertEqual(packet["context"]["focal_context"]["profile"]["node_id"], "NODE:1")
         self.assertEqual(
@@ -410,11 +469,7 @@ class WorkflowTest(unittest.TestCase):
                 {
                     "candidate_id": "CHEMBL:1",
                     "name": "Drug",
-                    "identity": {
-                        "status": "resolved",
-                        "preferred_name": "Drug",
-                        "identifiers": {"chembl": "CHEMBL1"},
-                    },
+                    "identifiers": {"chembl": "CHEMBL1"},
                     "mechanism_hypothesis": "inhibits the process",
                     "graph_node_ids": ["NODE:1"],
                     "pathology_source_ids": ["SRC:1"],
@@ -423,11 +478,7 @@ class WorkflowTest(unittest.TestCase):
                 {
                     "candidate_id": "CHEMBL:2",
                     "name": "Second drug",
-                    "identity": {
-                        "status": "resolved",
-                        "preferred_name": "Second drug",
-                        "identifiers": {"chembl": "CHEMBL2"},
-                    },
+                    "identifiers": {"chembl": "CHEMBL2"},
                     "mechanism_hypothesis": "modulates the process",
                     "graph_node_ids": ["NODE:1"],
                     "pathology_source_ids": ["SRC:1"],
@@ -443,6 +494,10 @@ class WorkflowTest(unittest.TestCase):
         invalid_records = json.loads(json.dumps(seed_records))
         invalid_records["candidates"][0]["unexpected_field"] = "not in the contract"
         with self.assertRaisesRegex(core.ProgramError, "unexpected fields"):
+            self.submit(action, invalid_records)
+        invalid_records = json.loads(json.dumps(seed_records))
+        invalid_records["candidates"][0]["identifiers"] = "CHEMBL1"
+        with self.assertRaisesRegex(core.ProgramError, "identifiers must be an object"):
             self.submit(action, invalid_records)
         self.submit(
             action,
@@ -626,6 +681,22 @@ class WorkflowTest(unittest.TestCase):
 
     def test_curation_guidance_and_input_order_preserve_semantic_granularity(self):
         source = source_result()
+        source["records"]["disease_context"].extend(
+            [
+                {
+                    "context_id": "CONTEXT:ADMIN",
+                    "section": "creation_date",
+                    "value": "2026-01-01",
+                    "source_ids": ["SRC:1"],
+                },
+                {
+                    "context_id": "CONTEXT:SUBTYPES",
+                    "section": "has_subtypes",
+                    "value": ["Subtype"],
+                    "source_ids": ["SRC:1"],
+                },
+            ]
+        )
         source["records"]["source_nodes"].extend(
             [
                 {
@@ -658,6 +729,16 @@ class WorkflowTest(unittest.TestCase):
             [row["node_id"] for row in context["source_nodes"]],
             ["NODE:A", "NODE:Z", "NODE:1", "NODE:P"],
         )
+        self.assertEqual(
+            [row["section"] for row in context["disease_context"]],
+            ["description", "has_subtypes"],
+        )
+        self.assertNotIn("source_index", context)
+        self.assertNotIn("source_receipts", context)
+        self.assertIn("Use only the supplied packet", guidance)
+        self.assertIn("do not search or perform deep research", guidance)
+        self.assertIn("node_type values are provisional", guidance)
+        self.assertIn("assign concept_type independently", guidance)
         self.assertIn("do not minimize concept count", guidance)
         self.assertIn("do not establish equivalence", guidance)
         self.assertIn("same-label gene-level", guidance)
@@ -865,11 +946,7 @@ class WorkflowTest(unittest.TestCase):
                 {
                     "candidate_id": "CHEMBL:1",
                     "name": "Drug",
-                    "identity": {
-                        "status": "resolved",
-                        "preferred_name": "Drug",
-                        "identifiers": {"chembl": "CHEMBL1"},
-                    },
+                    "identifiers": {"chembl": "CHEMBL1"},
                     "mechanism_hypothesis": "Mechanism using both contexts",
                     "graph_node_ids": ["NODE:1", "NODE:2"],
                     "pathology_source_ids": ["SRC:1"],
@@ -1071,6 +1148,90 @@ class WorkflowTest(unittest.TestCase):
                 "SEED-NO-RESULT": "no_result",
             },
         )
+
+    def test_identity_packet_exposes_one_explicit_set_of_canonical_options(self):
+        records = {"candidates": [
+            self.seed(
+                "PUBCHEM:42", "SEED-EXACT", name="existing candidate",
+                resolution={"status": "exact", "uci": "42"},
+            ),
+            self.seed(
+                "PUBCHEM:10", "SEED-CONNECTED", name="queued exact block",
+                resolution={"status": "connectivity_match", "uci": "10"},
+            ),
+            self.seed(
+                "CHEMBL:PARTIAL", "SEED-PARTIAL", name="partial result",
+                resolution={
+                    "status": "conflicting_or_partial_result",
+                    "ucis": ["1657"],
+                },
+            ),
+        ]}
+        results = {
+            "evidence_graph": {"records": {}},
+            "candidate_seed_generation": {"records": records},
+        }
+
+        context = core._packet_context(
+            self.root, "candidate_identity", None, results
+        )
+        options = {
+            row["candidate_id"]: row
+            for row in context["canonical_candidate_options"]
+        }
+
+        self.assertNotIn("resolved_candidates", context)
+        self.assertEqual(set(options), {"UNICHEM:10", "UNICHEM:42"})
+        self.assertEqual(
+            options["UNICHEM:10"]["required_member_seed_ids"],
+            ["SEED-CONNECTED"],
+        )
+        self.assertEqual(
+            options["UNICHEM:42"]["required_member_seed_ids"], []
+        )
+        self.assertNotIn("UNICHEM:1657", options)
+        self.assertTrue(all(
+            "mechanism_hypothesis" not in row for row in options.values()
+        ))
+        rules = " ".join(core.FIELD_RULES["candidate_identity"])
+        self.assertIn("context.canonical_candidate_options", rules)
+        self.assertIn("identity_resolution.ucis", rules)
+
+    def test_partial_unichem_observation_cannot_be_used_as_canonical_id(self):
+        seed_records = {"candidates": [self.seed(
+            "CHEMBL:PARTIAL", "SEED-PARTIAL", name="partial result",
+            resolution={
+                "status": "conflicting_or_partial_result",
+                "ucis": ["1657"],
+            },
+        )]}
+        prior = {
+            "candidate_seed_generation": {"records": seed_records},
+        }
+        records = {
+            "documents": [{
+                "document_id": "https://example.org/identity",
+                "title": "Authoritative identity",
+                "source": "test",
+            }],
+            "identity_groups": [{
+                "member_seed_ids": ["SEED-PARTIAL"],
+                "canonical_candidate_id": "UNICHEM:1657",
+                "status": "resolved",
+                "preferred_name": "partial result",
+                "identifiers": {"unichem_uci": "1657"},
+                "reason": "Identity evidence supports one residual identity",
+                "source_ids": ["https://example.org/identity"],
+            }],
+        }
+
+        with self.assertRaisesRegex(
+            core.ProgramError, "context.canonical_candidate_options"
+        ):
+            core._validate_candidate_identity(records, prior)
+
+        records["identity_groups"][0]["canonical_candidate_id"] = None
+        core._validate_candidate_identity(records, prior)
 
     def test_identity_review_partitions_all_flagged_seeds_before_merge(self):
         resolution = {
@@ -1495,18 +1656,17 @@ class WorkflowTest(unittest.TestCase):
         cls, candidate_id, seed_id, *, name="candidate", identifiers=None,
         resolution=None, concept_id="NODE:A",
     ):
-        row = cls.candidate(
-            candidate_id,
-            name,
-            {
-                "status": "resolved" if identifiers else "unresolved",
-                "preferred_name": name,
-                "identifiers": identifiers or {},
-            },
-            concept_id,
-            concept_id,
-        )
-        row["seed_id"] = seed_id
+        row = {
+            "candidate_id": candidate_id,
+            "name": name,
+            "identifiers": identifiers or {},
+            "mechanism_hypothesis": f"mechanism {concept_id}",
+            "graph_node_ids": [concept_id],
+            "pathology_source_ids": [f"PATH:{concept_id}"],
+            "mechanism_source_ids": [f"MOA:{concept_id}"],
+            "origin_concept_ids": [concept_id],
+            "seed_id": seed_id,
+        }
         if resolution is not None:
             row["identity_resolution"] = resolution
         return row

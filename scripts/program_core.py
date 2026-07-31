@@ -170,12 +170,16 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
     "pathology_curation": {
         "role": "disease pathology concept curator",
         "task": (
-            "Convert the supplied source-derived pathology nodes into coherent run-local concepts "
+            "Use only the supplied packet; do not search or perform deep research. Convert the "
+            "supplied source-derived pathology nodes into coherent run-local concepts "
             "before research; do not minimize concept count. Merge only when one disease-specific "
             "biological profile and one desired biological state accurately describe every "
             "member at the same causal level. Shared genes, ontology IDs, pathways, anatomy, or "
             "causal relationships do not establish equivalence; keep bare entities, disease "
             "drivers, mechanisms, and phenotypes separate unless they express the same claim. "
+            "Input node_type values are provisional source-adapter categories, not curated "
+            "classifications; assign concept_type independently from the supplied claim, "
+            "source_payloads, and edges. "
             "The supplied nodes are disease-specific source claims, so same-label gene-level "
             "claims from different sources may merge when neither specifies a mutation, variant, "
             "repeat, model genotype, or downstream mechanism; keep those more specific claims "
@@ -239,8 +243,9 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
         "task": (
             "Resolve only the supplied UniChem-flagged candidate identities before evidence "
             "review. Every queued seed must appear exactly once. Use authoritative identity "
-            "sources to decide whether queued seeds are the same intervention, attach to an "
-            "existing exact-UniChem candidate, remain separate, or stay unresolved/conflicting. "
+            "sources to decide whether queued seeds are the same intervention, attach a resolved "
+            "group to one controller-listed canonical candidate option, remain separate, or stay "
+            "unresolved/conflicting. "
             "Do not alter mechanism or pathology evidence or split seeds sharing an exact UCI. "
             "Exact UniChem groups not present in the queue are controller-owned and must not be "
             "reconsidered."
@@ -288,49 +293,99 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
     },
 }
 
-ROW_FIELDS = {
-    "flagged_sentences": ["sentence_id", "sentence", "signals", "paths"],
-    "sentence_decisions": ["sentence_id", "decision", "reason"],
-    "documents": ["document_id", "title", "source"],
-    "source_nodes": ["node_id", "label", "node_type", "source_ids"],
-    "source_edges": [
-        "edge_id", "subject_id", "relation", "object_id", "evidence_summary", "source_ids",
-    ],
-    "source_receipts": ["source", "version", "query", "record_count"],
-    "disease_context": ["context_id", "section", "value", "source_ids"],
-    "concepts": [
-        "concept_id", "preferred_label", "concept_type", "member_node_ids",
-        "aliases", "disposition", "reason", "related_concept_ids",
-    ],
-    "profiles": [
-        "node_id", "node_type", "summary", "normal_state", "pathological_state",
-        "desired_biological_state", "established_pathology_observations", "causal_role",
-        "mechanisms", "cell_types", "anatomical_context",
-        "temporal_context", "upstream_causes", "downstream_consequences",
-        "contradictions", "gaps", "uncertainty", "source_ids",
-    ],
-    "assertions": [
-        "assertion_id", "subject_id", "relation", "object_id",
-        "evidence_summary", "source_ids",
-    ],
-    "candidates": [
-        "candidate_id", "name", "identity", "mechanism_hypothesis",
-        "graph_node_ids", "pathology_source_ids", "mechanism_source_ids",
-    ],
-    "exclusions": ["name", "reason"],
-    "identity_groups": [
-        "member_seed_ids", "canonical_candidate_id", "status", "preferred_name",
-        "identifiers", "reason", "source_ids",
-    ],
-    "reviews": [
-        "candidate_id", "hypothesis", "supporting_findings", "mechanistic_bridge",
-        "assumptions", "why_not", "prior_art", "aliases", "limitations",
-    ],
-    "assessments": [
-        "candidate_id", "source_integrity", "component_scores", "net_assessment",
-        "aliases", "why_not",
-    ],
-    "excluded_candidates": ["candidate_id", "reason_code", "finding", "source_ids"],
+ROW_SCHEMAS = {
+    "flagged_sentences": {
+        "required_fields": ["sentence_id", "sentence", "signals", "paths"],
+        "additional_fields": False,
+    },
+    "sentence_decisions": {
+        "required_fields": ["sentence_id", "decision", "reason"],
+        "additional_fields": False,
+    },
+    "documents": {
+        "required_fields": ["document_id", "title", "source"],
+        "additional_fields": True,
+    },
+    "source_nodes": {
+        "required_fields": ["node_id", "label", "node_type", "source_ids"],
+        "additional_fields": True,
+    },
+    "source_edges": {
+        "required_fields": [
+            "edge_id", "subject_id", "relation", "object_id", "evidence_summary", "source_ids",
+        ],
+        "additional_fields": True,
+    },
+    "source_receipts": {
+        "required_fields": ["source", "version", "query", "record_count"],
+        "additional_fields": True,
+    },
+    "disease_context": {
+        "required_fields": ["context_id", "section", "value", "source_ids"],
+        "additional_fields": True,
+    },
+    "concepts": {
+        "required_fields": [
+            "concept_id", "preferred_label", "concept_type", "member_node_ids",
+            "aliases", "disposition", "reason", "related_concept_ids",
+        ],
+        "additional_fields": False,
+    },
+    "profiles": {
+        "required_fields": [
+            "node_id", "node_type", "summary", "normal_state", "pathological_state",
+            "desired_biological_state", "established_pathology_observations", "causal_role",
+            "mechanisms", "cell_types", "anatomical_context", "temporal_context",
+            "upstream_causes", "downstream_consequences", "contradictions", "gaps",
+            "uncertainty", "source_ids",
+        ],
+        "additional_fields": False,
+    },
+    "assertions": {
+        "required_fields": [
+            "assertion_id", "subject_id", "relation", "object_id",
+            "evidence_summary", "source_ids",
+        ],
+        "additional_fields": False,
+    },
+    "candidates": {
+        "required_fields": [
+            "candidate_id", "name", "identifiers", "mechanism_hypothesis",
+            "graph_node_ids", "pathology_source_ids", "mechanism_source_ids",
+        ],
+        "additional_fields": False,
+        "field_types": {"identifiers": "object"},
+    },
+    "exclusions": {
+        "required_fields": ["name", "reason"],
+        "additional_fields": False,
+    },
+    "identity_groups": {
+        "required_fields": [
+            "member_seed_ids", "canonical_candidate_id", "status", "preferred_name",
+            "identifiers", "reason", "source_ids",
+        ],
+        "additional_fields": False,
+        "field_types": {"identifiers": "object"},
+    },
+    "reviews": {
+        "required_fields": [
+            "candidate_id", "hypothesis", "supporting_findings", "mechanistic_bridge",
+            "assumptions", "why_not", "prior_art", "aliases", "limitations",
+        ],
+        "additional_fields": False,
+    },
+    "assessments": {
+        "required_fields": [
+            "candidate_id", "source_integrity", "component_scores", "net_assessment",
+            "aliases", "why_not",
+        ],
+        "additional_fields": False,
+    },
+    "excluded_candidates": {
+        "required_fields": ["candidate_id", "reason_code", "finding", "source_ids"],
+        "additional_fields": False,
+    },
 }
 
 PATHOLOGY_PROFILE_LIST_FIELDS = (
@@ -374,8 +429,9 @@ FIELD_RULES = {
         "no treatment content",
     ],
     "candidate_seed_research": [
-        "identity has status, preferred_name, and identifiers; include every authoritative "
-        "identifier found because Python submits all supported identifiers to UniChem",
+        "include every authoritative candidate identifier found because Python submits all "
+        "supported identifiers to UniChem; identity resolution belongs to Python and the later "
+        "identity-review stage",
         "use native database values under exact UniChem keys: chembl, drugbank, gtopdb, chebi, "
         "unii, pubchem_cid, drugcentral, inchi, or inchikey; retain other identifiers under "
         "their own keys for identity review",
@@ -391,8 +447,11 @@ FIELD_RULES = {
     "candidate_identity": [
         "partition every queued seed_id exactly once across identity_groups",
         "all queued seeds sharing one exact UniChem UCI remain together in one identity_group",
-        "canonical_candidate_id is null for a new residual identity or an exact supplied "
-        "UNICHEM:<uci> candidate_id when authoritative evidence establishes attachment",
+        "canonical_candidate_id is null unless a resolved group attaches to one entry in "
+        "context.canonical_candidate_options; when set, copy that entry's candidate_id exactly",
+        "for a queued_exact_block option, include every required_member_seed_id in the group; "
+        "UCI values elsewhere in identity_queue, including identity_resolution.ucis, are "
+        "identity evidence only and are not canonical candidate options",
         "status is resolved, unresolved, or conflicting; uncertainty must remain explicit",
         "member_seed_ids, identifiers, and source_ids are JSON collections",
         "each identity group cites at least one newly retained authoritative identity source",
@@ -544,10 +603,19 @@ def _contract_rows(
     records: Mapping[str, Any], name: str, id_field: str | None = None
 ) -> list[dict[str, Any]]:
     rows = _rows(records, name)
+    schema = ROW_SCHEMAS[name]
+    required_fields = schema["required_fields"]
     for index, row in enumerate(rows):
-        missing = [field for field in ROW_FIELDS[name] if field not in row]
+        missing = [field for field in required_fields if field not in row]
         if missing:
             raise ProgramError(f"{name}[{index}] is missing fields: {', '.join(missing)}")
+        if not schema["additional_fields"]:
+            unexpected = sorted(set(row) - set(required_fields))
+            if unexpected:
+                raise ProgramError(f"{name}[{index}] has unexpected fields: {unexpected}")
+        for field, field_type in schema.get("field_types", {}).items():
+            if field_type == "object" and not isinstance(row[field], dict):
+                raise ProgramError(f"{name}[{index}].{field} must be an object")
     if id_field:
         _ids(rows, id_field, name)
     return rows
@@ -848,6 +916,13 @@ def _source_index(
         {key: row[key] for key in fields if key in row}
         for row in documents
         if source_ids is None or str(row["document_id"]) in source_ids
+    ]
+
+
+def _compact_disease_context(records: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        row for row in _rows(records, "disease_context")
+        if row["section"] in _RESEARCH_CONTEXT_SECTIONS
     ]
 
 
@@ -1249,7 +1324,6 @@ def _packet_context(
             ),
         }
     if task == "pathology_curation":
-        documents = _all_documents(results)
         source_result = results["pathology_sources"]
         source = source_result["records"]
         nodes = sorted(
@@ -1265,16 +1339,12 @@ def _packet_context(
             ),
         )
         edges = _rows(source, "source_edges")
-        disease_context = _rows(source, "disease_context")
+        disease_context = _compact_disease_context(source)
         return {
             "resolved_disease": source_result.get("resolved_disease"),
             "source_nodes": nodes,
             "source_edges": edges,
             "disease_context": disease_context,
-            "source_index": _source_index(
-                documents, _cited_ids([*nodes, *edges, *disease_context])
-            ),
-            "source_receipts": _rows(source, "source_receipts"),
             "upstream_gaps": source_result.get("gaps", []),
         }
     if task == "pathology_node_research":
@@ -1307,11 +1377,7 @@ def _packet_context(
         related_nodes = [
             row for row in canonical_nodes if str(row["node_id"]) in related_ids
         ]
-        disease_context = [
-            row
-            for row in _rows(source, "disease_context")
-            if row["section"] in _RESEARCH_CONTEXT_SECTIONS
-        ]
+        disease_context = _compact_disease_context(source)
         return {
             "concept": concept,
             "node": node,
@@ -1350,7 +1416,7 @@ def _packet_context(
         queued = _identity_queue(seeds)
         return {
             "identity_queue": queued,
-            "resolved_candidates": _canonical_candidates(results, reviewed=False),
+            "canonical_candidate_options": _identity_candidate_options(seeds),
         }
     if task == "candidate_evidence_review":
         documents = _all_documents(results)
@@ -1395,6 +1461,32 @@ def _packet_context(
         "reviews": _rows(results["candidate_review"]["records"], "reviews"),
         "source_index": _source_index(documents),
     }
+
+
+_PACKET_CASE_FIELDS = ("case_id", "disease", "gene", "mondo")
+
+
+def _record_contract(task: str) -> dict[str, dict[str, Any]]:
+    return {
+        name: {"type": "list of objects", **ROW_SCHEMAS[name]}
+        for name in STAGE_GUIDANCE[task]["collections"]
+    }
+
+
+def _validate_packet(unsigned: Mapping[str, Any], task: str, item_id: str | None) -> None:
+    if unsigned.get("stage") != task or unsigned.get("item_id") != item_id:
+        raise ProgramError("Packet stage or item_id does not match the ready task")
+    if "objective" in unsigned:
+        raise ProgramError("Worker packets must use their stage task, not the global objective")
+    case = unsigned.get("case")
+    if not isinstance(case, dict) or set(case) != set(_PACKET_CASE_FIELDS):
+        raise ProgramError("Worker packet case must contain only case_id, disease, gene, and mondo")
+    contract = unsigned.get("result_contract")
+    if not isinstance(contract, dict) or contract.get("records") != _record_contract(task):
+        raise ProgramError("Worker packet result contract does not match the task schema")
+    secrets = _secret_paths(unsigned)
+    if secrets:
+        raise ProgramError(f"Credentials must never be persisted in packets: {secrets}")
 
 
 def _build_packet(
@@ -1444,9 +1536,11 @@ def _build_packet(
         "stage": task,
         "item_id": item_id,
         "role": guidance["role"],
-        "objective": OBJECTIVE,
         "task": guidance["task"],
-        "case": case,
+        "case": {
+            key: case.get(key)
+            for key in _PACKET_CASE_FIELDS
+        },
         "upstream": upstream,
         "context": _packet_context(run_root, task, item_id, results),
         "result_contract": {
@@ -1454,10 +1548,7 @@ def _build_packet(
             "item_id": item_id,
             "packet_id": "copy from this packet",
             "status": "complete",
-            "records": {
-                name: {"type": "list of objects", "required_fields": ROW_FIELDS[name]}
-                for name in guidance["collections"]
-            },
+            "records": _record_contract(task),
             "field_rules": FIELD_RULES[task],
             **(
                 {
@@ -1472,6 +1563,7 @@ def _build_packet(
         },
         "rules": packet_rules,
     }
+    _validate_packet(unsigned, task, item_id)
     packet = {**unsigned, "packet_id": _stable_id("PACKET", unsigned)}
     _write_json(_packet_path(run_root, task, item_id), packet)
     return packet
@@ -1495,13 +1587,20 @@ def next_action(root: str | Path) -> dict[str, Any]:
     packet = _build_packet(run_root, case, results, task, item_id)
     packet_path = _packet_path(run_root, task, item_id)
     result_path = _submission_path(run_root, task, item_id)
+    display_item_id = (
+        f"{task}/{item_id}/{_item_token(str(item_id))}"
+        if item_id is not None
+        else task
+    )
     return {
         **current,
+        "display_item_id": display_item_id,
         "packet_id": packet["packet_id"],
         "packet_path": str(packet_path),
         "suggested_result_path": str(result_path),
         "worker_prompt": (
-            f"Read only the content packet at {packet_path} and any controller-returned graph "
+            f"Complete {display_item_id}. Read only the content packet at {packet_path} and any "
+            "controller-returned graph "
             f"context explicitly authorized by that packet. Complete the {task} task and write "
             f"one JSON object matching result_contract to {result_path}. Use this exact header: "
             f"stage={json.dumps(task)}, item_id={json.dumps(item_id)}, "
@@ -1636,8 +1735,7 @@ def _review_batches(
 
 def _candidate_queries(row: Mapping[str, Any]) -> list[dict[str, Any]]:
     queries: set[tuple[str, int | None, str]] = set()
-    identity = row.get("identity") if isinstance(row.get("identity"), Mapping) else {}
-    identifiers = identity.get("identifiers", {})
+    identifiers = row.get("identifiers", {})
     if isinstance(identifiers, Mapping):
         for key, raw_value in identifiers.items():
             values = raw_value if isinstance(raw_value, list) else [raw_value]
@@ -1683,7 +1781,16 @@ def _post_unichem(endpoint: str, body: Mapping[str, Any]) -> dict[str, Any]:
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ProgramError(f"UniChem {endpoint} returned invalid JSON: {exc}") from exc
         else:
-            if not isinstance(result, dict) or result.get("response") != "Success":
+            explicit_no_result = (
+                endpoint == "compounds"
+                and isinstance(result, dict)
+                and result.get("response") == "Not found"
+                and result.get("compounds") == []
+            )
+            if (
+                not isinstance(result, dict)
+                or result.get("response") != "Success"
+            ) and not explicit_no_result:
                 raise ProgramError(f"UniChem {endpoint} returned an invalid response")
             return result
         time.sleep(2**attempt)
@@ -1831,6 +1938,30 @@ def _exact_identity_groups(records: Mapping[str, Any]) -> dict[str, list[str]]:
     return {candidate_id: sorted(groups[candidate_id]) for candidate_id in sorted(groups)}
 
 
+def _identity_candidate_options(records: Mapping[str, Any]) -> list[dict[str, Any]]:
+    seeds = {str(row["seed_id"]): row for row in _rows(records, "candidates")}
+    queued_ids = {str(row["seed_id"]) for row in _identity_queue(records)}
+    options: list[dict[str, Any]] = []
+    for candidate_id, member_ids in _exact_identity_groups(records).items():
+        rows = [seeds[seed_id] for seed_id in member_ids]
+        queued_block = bool(set(member_ids) & queued_ids)
+        options.append({
+            "candidate_id": candidate_id,
+            "option_type": (
+                "queued_exact_block" if queued_block else "existing_resolved_candidate"
+            ),
+            "candidate_names": sorted(
+                {str(row["name"]) for row in rows},
+                key=lambda value: (value.casefold(), value),
+            ),
+            "asserted_candidate_ids": sorted({
+                str(row["candidate_id"]) for row in rows
+            }),
+            "required_member_seed_ids": member_ids if queued_block else [],
+        })
+    return options
+
+
 def _merge_candidate_rows(
     rows: list[dict[str, Any]], candidate_id: str, identity: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -1874,7 +2005,7 @@ def _canonical_candidates(
             continue
         rows = [seeds[seed_id] for seed_id in sorted(member_ids)]
         preferred_name = min(
-            (str(row["identity"]["preferred_name"]) for row in rows),
+            (str(row["name"]) for row in rows),
             key=lambda value: (value.casefold(), value),
         )
         identity = {
@@ -1894,7 +2025,7 @@ def _canonical_candidates(
             exact = exact_groups[str(target)]
             rows.extend(seeds[seed_id] for seed_id in exact)
             preferred_name = min(
-                (str(row["identity"]["preferred_name"]) for row in rows),
+                (str(row["name"]) for row in rows),
                 key=lambda value: (value.casefold(), value),
             )
             identity = {
@@ -2107,9 +2238,6 @@ def _validate_source_screening(result: Mapping[str, Any]) -> None:
     allowed_signals = {"named_intervention", "treatment_event", "treatment_language"}
     for index, row in enumerate(rows):
         label = f"flagged_sentences[{index}]"
-        unexpected = sorted(set(row) - set(ROW_FIELDS["flagged_sentences"]))
-        if unexpected:
-            raise ProgramError(f"{label} has unexpected fields: {unexpected}")
         sentence = str(row["sentence"]).strip()
         if not sentence or row["sentence_id"] != _stable_id(
             "DISMECH-SENTENCE", sentence
@@ -2155,9 +2283,6 @@ def _validate_source_adjudication(
         )
     for index, row in enumerate(decisions):
         label = f"sentence_decisions[{index}]"
-        unexpected = sorted(set(row) - set(ROW_FIELDS["sentence_decisions"]))
-        if unexpected:
-            raise ProgramError(f"{label} has unexpected fields: {unexpected}")
         if row["decision"] not in SENTENCE_DECISIONS:
             raise ProgramError(
                 f"{label}.decision must be one of {sorted(SENTENCE_DECISIONS)}"
@@ -2365,32 +2490,13 @@ def _validate_seed_item(
     }
     for index, row in enumerate(candidates):
         label = f"candidates[{index}]"
-        unexpected = sorted(set(row) - set(ROW_FIELDS["candidates"]))
-        if unexpected:
-            raise ProgramError(f"{label} has unexpected fields: {unexpected}")
         _required(
             row,
-            ("candidate_id", "name", "identity", "mechanism_hypothesis"),
+            ("candidate_id", "name", "mechanism_hypothesis"),
             label,
         )
         if str(row["name"]).strip().casefold() in _COMPARATORS:
             raise ProgramError(f"{label} is a comparator, not a drug candidate")
-        identity = row.get("identity")
-        if not isinstance(identity, dict) or identity.get("status") not in {
-            "resolved",
-            "unresolved",
-            "conflicting",
-        }:
-            raise ProgramError(
-                f"{label}.identity.status must be resolved, unresolved, or conflicting"
-            )
-        _required(identity, ("preferred_name", "identifiers"), f"{label}.identity")
-        if not isinstance(identity["identifiers"], dict):
-            raise ProgramError(f"{label}.identity.identifiers must be an object")
-        if identity["status"] == "resolved" and not identity["identifiers"]:
-            raise ProgramError(
-                f"{label}.identity requires an authoritative identifier when resolved"
-            )
         graph_refs = _references(row, "graph_node_ids", allowed_node_ids, label)
         if concept_id not in graph_refs:
             raise ProgramError(f"{label}.graph_node_ids must include the focal item concept")
@@ -2422,6 +2528,10 @@ def _validate_candidate_identity(
         candidate_id: set(member_ids)
         for candidate_id, member_ids in _exact_identity_groups(seed_records).items()
     }
+    candidate_options = {
+        str(row["candidate_id"]): row
+        for row in _identity_candidate_options(seed_records)
+    }
     document_ids = {str(row["document_id"]) for row in documents}
     for index, group in enumerate(groups):
         label = f"identity_groups[{index}]"
@@ -2448,17 +2558,19 @@ def _validate_candidate_identity(
         target = group.get("canonical_candidate_id")
         if target is not None:
             target = str(target)
+            option = candidate_options.get(target)
             valid = (
-                target in exact_blocks
+                option is not None
                 and group["status"] == "resolved"
                 and member_exact_ids <= {target}
             )
-            if valid and exact_blocks[target] & queue_ids:
-                valid = exact_blocks[target] <= member_set
+            if valid and option["required_member_seed_ids"]:
+                valid = set(option["required_member_seed_ids"]) <= member_set
             if not valid:
                 raise ProgramError(
-                    f"{label}.canonical_candidate_id must be an exact supplied UniChem "
-                    "candidate, contain no different UCI, and the group must be resolved"
+                    f"{label}.canonical_candidate_id must be null or copied exactly from "
+                    "context.canonical_candidate_options for a resolved group containing any "
+                    "required queued block and no different exact UCI"
                 )
             targets.append(target)
         elif group["status"] == "resolved" and len(member_exact_ids) == 1:
@@ -2553,9 +2665,6 @@ def _validate_review_item(
     }
     for index, row in enumerate(reviews):
         label = f"reviews[{index}]"
-        unexpected = sorted(set(row) - set(ROW_FIELDS["reviews"]))
-        if unexpected:
-            raise ProgramError(f"{label} has unexpected fields: {unexpected}")
         _required(row, ("candidate_id", "hypothesis", "mechanistic_bridge"), label)
         _validate_cited_entries(
             row["supporting_findings"],
@@ -2629,9 +2738,6 @@ def _validate_candidate_audit(
     }
     for index, row in enumerate(assessments):
         label = f"assessments[{index}]"
-        unexpected = sorted(set(row) - set(ROW_FIELDS["assessments"]))
-        if unexpected:
-            raise ProgramError(f"{label} has unexpected fields: {unexpected}")
         prior_status = reviews[str(row["candidate_id"])]["prior_art"]["status"]
         if prior_status in {"human_intervention", "established_use"}:
             raise ProgramError(
@@ -2694,9 +2800,6 @@ def _validate_candidate_audit(
     }
     for index, row in enumerate(exclusions):
         label = f"excluded_candidates[{index}]"
-        unexpected = sorted(set(row) - set(ROW_FIELDS["excluded_candidates"]))
-        if unexpected:
-            raise ProgramError(f"{label} has unexpected fields: {unexpected}")
         if row["reason_code"] not in AUDIT_EXCLUSION_REASONS:
             raise ProgramError(
                 f"{label}.reason_code must be one of {sorted(AUDIT_EXCLUSION_REASONS)}"

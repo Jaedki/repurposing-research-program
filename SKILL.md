@@ -29,7 +29,8 @@ Install the pinned runtime dependencies once with `python -m pip install -r requ
    python scripts/orchestrate_program.py submit <run-folder> <result.json>
    ```
 
-   If validation rejects the result, discard it and give the same packet to another new agent; do not repair research JSON in the controller.
+   If validation rejects the result, stop and report the exact validation error. Do not retry
+   automatically and do not repair research JSON in the controller.
 
 4. Repeat `next -> new agent -> submit` in the visible controller chat. Do not replace this loop with a persistent or background supervisor. The controller progresses through:
 
