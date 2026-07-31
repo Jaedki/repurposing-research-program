@@ -11,7 +11,7 @@ import yaml
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import pathology_sources as sources  # noqa: E402
-import program_core as core  # noqa: E402
+from repurposing_program import evidence, pathology  # noqa: E402
 
 
 class DisMechNormalizationTest(unittest.TestCase):
@@ -343,7 +343,7 @@ class ALSRegressionTest(unittest.TestCase):
         self.assertEqual(self.before, self.after)
 
     def test_normalized_sources_pass_controller_validation_without_duplicate_counts(self):
-        core._validate_source_result(self.result)
+        pathology._validate_source_result(self.result)
         dismech_receipt = next(
             row
             for row in self.result["records"]["source_receipts"]
@@ -358,7 +358,9 @@ class ALSRegressionTest(unittest.TestCase):
             if row.get("source") == "Monarch Initiative"
         ]
         self.assertTrue(monarch_documents)
-        self.assertTrue(all(core._document_has_inspectable_content(row) for row in monarch_documents))
+        self.assertTrue(
+            all(evidence._document_has_inspectable_content(row) for row in monarch_documents)
+        )
 
     def test_sod1_label_survives_without_fallback_node(self):
         self.assertEqual(

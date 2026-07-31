@@ -11,10 +11,20 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import program_core as core  # noqa: E402
 from repurposing_program import (  # noqa: E402
+    audit,
     bibliography,
     candidates as candidate_rules,
+    contracts,
+    evidence,
+    evidence_cards,
+    graph as graph_rules,
     identity,
     orchestration,
+    packets,
+    pathology,
+    ranking,
+    run_state,
+    storage,
 )
 
 
@@ -112,7 +122,7 @@ def bibliographic_metadata(_root, documents):
     resolved = {}
     for row in documents:
         document_id = str(row["document_id"])
-        normalized = core._normalized_publication_id(document_id)
+        normalized = bibliography._normalized_publication_id(document_id)
         if normalized is None:
             continue
         resolved[document_id] = {
@@ -135,7 +145,7 @@ class UniChemTransportTest(unittest.TestCase):
             "response": "Not found",
         }).encode()
         with patch.object(identity, "urlopen", return_value=response) as request:
-            result = core._post_unichem(
+            result = identity._post_unichem(
                 "compounds",
                 {"compound": "CHEMBL1201607", "type": "sourceID", "sourceID": 1},
             )
@@ -154,7 +164,7 @@ class UniChemTransportTest(unittest.TestCase):
             with self.assertRaisesRegex(
                 core.ProgramError, "UniChem compounds returned an invalid response"
             ):
-                core._post_unichem(
+                identity._post_unichem(
                     "compounds",
                     {"compound": "4021", "type": "sourceID", "sourceID": 22},
                 )
@@ -172,7 +182,7 @@ class UniChemTransportTest(unittest.TestCase):
             patch.object(identity, "urlopen", side_effect=[error, response]) as request,
             patch.object(identity.time, "sleep") as pause,
         ):
-            result = core._post_unichem(
+            result = identity._post_unichem(
                 "compounds", {"compound": "4021", "type": "sourceID", "sourceID": 22}
             )
 
@@ -191,7 +201,7 @@ class BibliographicMetadataTest(unittest.TestCase):
             patch.object(bibliography, "urlopen", side_effect=[error, response]) as request,
             patch.object(bibliography.time, "sleep") as pause,
         ):
-            result = core._bibliographic_get("https://example.org/record")
+            result = bibliography._bibliographic_get("https://example.org/record")
 
         self.assertEqual(result, {"record": "canonical"})
         self.assertEqual(request.call_count, 2)
@@ -203,8 +213,8 @@ class BibliographicMetadataTest(unittest.TestCase):
             bibliography, "_bibliographic_get", return_value={"record": "canonical"}
         ) as fetch:
             root = Path(directory)
-            first = core._bibliographic_request(root, "test", "https://example.org/record")
-            second = core._bibliographic_request(root, "test", "https://example.org/record")
+            first = bibliography._bibliographic_request(root, "test", "https://example.org/record")
+            second = bibliography._bibliographic_request(root, "test", "https://example.org/record")
 
         self.assertEqual(first, {"record": "canonical"})
         self.assertEqual(second, first)
@@ -221,7 +231,7 @@ class BibliographicMetadataTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.object(
             bibliography, "_bibliographic_request", return_value=response
         ):
-            records = core._id_converter_records(
+            records = bibliography._id_converter_records(
                 Path(directory), ["PMID:11", "PMCID:PMC11", "DOI:10.1000/ELEVEN"]
             )
 
@@ -234,7 +244,7 @@ class BibliographicMetadataTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.object(
             bibliography, "_bibliographic_request", return_value={"records": []}
         ) as request:
-            core._id_converter_records(
+            bibliography._id_converter_records(
                 Path(directory), [f"PMID:{identifier}" for identifier in range(1, 202)]
             )
 
@@ -284,7 +294,7 @@ class BibliographicMetadataTest(unittest.TestCase):
             patch.object(bibliography, "_ncbi_summaries", side_effect=summaries),
             patch.object(bibliography, "_doi_metadata", return_value=doi_metadata) as doi,
         ):
-            resolved = core._resolve_bibliographic_metadata(Path(directory), documents)
+            resolved = bibliography._resolve_bibliographic_metadata(Path(directory), documents)
 
         self.assertEqual(set(resolved), {"PMID:11", "PMCID:PMC22", "DOI:10.1000/example"})
         self.assertEqual(resolved["PMID:11"]["canonical_publication_id"], "PMID:11")
@@ -306,7 +316,7 @@ class BibliographicMetadataTest(unittest.TestCase):
             patch.object(bibliography, "_ncbi_summaries", return_value={}),
         ):
             with self.assertRaisesRegex(core.ProgramError, "Canonical metadata was not found"):
-                core._resolve_bibliographic_metadata(
+                bibliography._resolve_bibliographic_metadata(
                     Path(directory), [{"document_id": "PMID:999", "title": "Invented"}]
                 )
 
@@ -327,7 +337,7 @@ class BibliographicMetadataTest(unittest.TestCase):
             bibliography, "_resolve_bibliographic_metadata", return_value=metadata
         ):
             with self.assertRaisesRegex(core.ProgramError, "identify the same publication"):
-                core._validate_bibliographic_documents(
+                bibliography._validate_bibliographic_documents(
                     Path(directory), {"documents": documents}
                 )
 
@@ -341,7 +351,7 @@ class BibliographicMetadataTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.object(
             bibliography, "_bibliographic_request", return_value=response
         ):
-            metadata = core._doi_metadata(Path(directory), "10.1000/example")
+            metadata = bibliography._doi_metadata(Path(directory), "10.1000/example")
 
         self.assertEqual(metadata["title"], "A DOI article")
         self.assertEqual(metadata["journal"], "A Journal")
@@ -355,12 +365,12 @@ class ArtifactPersistenceTest(unittest.TestCase):
             path = Path(directory) / "results" / "items" / "accepted.json"
             accepted = b'{"status":"complete"}\n'
             replacement = b'{"status":"complete","different":true}\n'
-            core._write_once(path, accepted)
+            storage._write_once(path, accepted)
 
             with self.assertRaisesRegex(
                 core.ProgramError, "Immutable artifact conflicts with existing file"
             ):
-                core._write_once(path, replacement)
+                storage._write_once(path, replacement)
 
             self.assertEqual(path.read_bytes(), accepted)
 
@@ -379,11 +389,11 @@ class InstructionContractTest(unittest.TestCase):
 class SourceAdjudicationWorkflowTest(unittest.TestCase):
     def test_source_validation_still_rejects_treatment_fields_in_pathology_content(self):
         result = source_result()
-        core._validate_source_result(result)
+        pathology._validate_source_result(result)
         result["records"]["source_nodes"][1]["treatment"] = "not pathology"
 
         with self.assertRaisesRegex(core.ProgramError, "Treatment fields reached"):
-            core._validate_source_result(result)
+            pathology._validate_source_result(result)
 
     def test_batched_adjudication_is_complete_bounded_and_applied_once(self):
         sentences = (
@@ -397,7 +407,7 @@ class SourceAdjudicationWorkflowTest(unittest.TestCase):
             "records": {
                 "flagged_sentences": [
                     {
-                        "sentence_id": core._stable_id("DISMECH-SENTENCE", sentence),
+                        "sentence_id": storage._stable_id("DISMECH-SENTENCE", sentence),
                         "sentence": sentence,
                         "signals": ["treatment_language"] if index == 0 else ["treatment_event"],
                         "paths": [f"$.pathophysiology[{index}].description"],
@@ -578,7 +588,7 @@ class WorkflowTest(unittest.TestCase):
         }
         invalid_packet["objective"] = core.OBJECTIVE
         with self.assertRaisesRegex(core.ProgramError, "global objective"):
-            core._validate_packet(invalid_packet, "pathology_curation", None)
+            packets._validate_packet(invalid_packet, "pathology_curation", None)
         self.assertEqual(
             [row["node_id"] for row in curation_packet["context"]["source_nodes"]],
             ["NODE:1"],
@@ -623,7 +633,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(first_item, "NODE:1")
         self.assertEqual(
             action["display_item_id"],
-            f"pathology_node_research/NODE:1/{core._item_token('NODE:1')}",
+            f"pathology_node_research/NODE:1/{storage._item_token('NODE:1')}",
         )
         self.assertIn(action["display_item_id"], action["worker_prompt"])
         node_type = research_packet["context"]["node"]["node_type"]
@@ -637,7 +647,7 @@ class WorkflowTest(unittest.TestCase):
         )
         self.submit(action, pathology_records)
         accepted_pathology = json.loads(
-            core._item_result_path(self.root, "pathology_node_research", first_item).read_text()
+            storage._item_result_path(self.root, "pathology_node_research", first_item).read_text()
         )
         self.assertEqual(
             [row["document_id"] for row in accepted_pathology["records"]["documents"]],
@@ -659,7 +669,7 @@ class WorkflowTest(unittest.TestCase):
         candidate_contract = packet["result_contract"]["records"]["candidates"]
         self.assertEqual(
             candidate_contract,
-            {"type": "list of objects", **core.ROW_SCHEMAS["candidates"]},
+            {"type": "list of objects", **contracts.ROW_SCHEMAS["candidates"]},
         )
         self.assertIn("identifiers", candidate_contract["required_fields"])
         self.assertNotIn("identity", candidate_contract["required_fields"])
@@ -816,8 +826,8 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("without weighting", rubric["method"])
         self.assertIn("not a probability", rubric["method"])
         self.assertIn("Counterevidence earns no points", rubric["method"])
-        self.assertEqual(set(rubric["components"]), set(core.SCORE_COMPONENTS))
-        self.assertEqual(core.MAX_SCORE, 80)
+        self.assertEqual(set(rubric["components"]), set(contracts.SCORE_COMPONENTS))
+        self.assertEqual(contracts.MAX_SCORE, 80)
         self.assertEqual(
             set(rubric["components"]["mechanistic_bridge_plausibility"]["anchors"]),
             {"5", "10", "15", "20"},
@@ -827,7 +837,7 @@ class WorkflowTest(unittest.TestCase):
             rubric["components"]["mechanistic_bridge_plausibility"]["anchors"]["5"],
         )
         exclusion_policy = audit_packet["result_contract"]["exclusion_policy"]
-        self.assertEqual(set(exclusion_policy), set(core.AUDIT_EXCLUSION_REASONS))
+        self.assertEqual(set(exclusion_policy), set(contracts.AUDIT_EXCLUSION_REASONS))
         self.assertIn("missing data", exclusion_policy["impossible_translational_feasibility"])
         self.assertIn("unresolved identity alone", exclusion_policy["invalid_candidate"])
         review_result = json.loads(
@@ -917,9 +927,9 @@ class WorkflowTest(unittest.TestCase):
 
         normalized_stage_hashes = {}
         for stage in core.STAGES:
-            result = json.loads(core._result_path(self.root, stage).read_text(encoding="utf-8"))
+            result = json.loads(storage._result_path(self.root, stage).read_text(encoding="utf-8"))
             result.pop("packet_id", None)
-            normalized_stage_hashes[stage] = core._sha256(core._canonical_bytes(result))
+            normalized_stage_hashes[stage] = storage._sha256(storage._canonical_bytes(result))
         baseline = {
             "case_id": manifest["case_id"],
             "counts": {
@@ -983,10 +993,10 @@ class WorkflowTest(unittest.TestCase):
             ]
         )
 
-        context = core._packet_context(
+        context = packets._packet_context(
             self.root, "pathology_curation", None, {"pathology_sources": source}
         )
-        guidance = core.STAGE_GUIDANCE["pathology_curation"]["task"]
+        guidance = contracts.STAGE_GUIDANCE["pathology_curation"]["task"]
 
         self.assertEqual(
             [row["node_id"] for row in context["source_nodes"]],
@@ -1011,22 +1021,22 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("context_only even when measurable", guidance)
         self.assertIn("bare entity or observational readout", guidance)
         self.assertIn("uncertainty never upgrades", guidance)
-        pathology_guidance = core.STAGE_GUIDANCE["pathology_node_research"]["task"]
+        pathology_guidance = contracts.STAGE_GUIDANCE["pathology_node_research"]["task"]
         self.assertIn("Keep discovery pathology-led", pathology_guidance)
         self.assertIn("directional evidence", pathology_guidance)
-        seed_guidance = core.STAGE_GUIDANCE["candidate_seed_research"]["task"]
+        seed_guidance = contracts.STAGE_GUIDANCE["candidate_seed_research"]["task"]
         self.assertIn("symptomatic or compensatory benefit", seed_guidance)
         self.assertIn("linked context nodes", seed_guidance)
         self.assertIn("do not use disease-specific drug literature", seed_guidance)
         self.assertIn(
-            "evidence dossier", core.STAGE_GUIDANCE["candidate_evidence_review"]["task"]
+            "evidence dossier", contracts.STAGE_GUIDANCE["candidate_evidence_review"]["task"]
         )
         self.assertIn(
             "exact-disease prior art",
-            core.STAGE_GUIDANCE["candidate_evidence_review"]["task"],
+            contracts.STAGE_GUIDANCE["candidate_evidence_review"]["task"],
         )
         self.assertIn(
-            "unresolved identity", " ".join(core.FIELD_RULES["candidate_audit"])
+            "unresolved identity", " ".join(contracts.FIELD_RULES["candidate_audit"])
         )
 
     def test_curation_requires_an_exact_partition(self):
@@ -1045,11 +1055,11 @@ class WorkflowTest(unittest.TestCase):
             ]
         }
         prior = {"pathology_sources": source_result()}
-        core._validate_curation(records, prior)
+        pathology._validate_curation(records, prior)
         records["concepts"][0]["member_node_ids"] = ["UNKNOWN"]
         records["concepts"][0]["concept_id"] = "UNKNOWN"
         with self.assertRaisesRegex(core.ProgramError, "partition every supplied"):
-            core._validate_curation(records, prior)
+            pathology._validate_curation(records, prior)
 
     def test_curation_merges_nodes_and_collapses_self_edges(self):
         source = source_result()
@@ -1090,7 +1100,7 @@ class WorkflowTest(unittest.TestCase):
                 }
             },
         }
-        nodes, edges = core._canonical_source_records(results)
+        nodes, edges = pathology._canonical_source_records(results)
         self.assertEqual([row["node_id"] for row in nodes], ["MONDO:1", "NODE:1"])
         self.assertEqual(nodes[1]["member_node_ids"], ["NODE:1", "NODE:2"])
         self.assertEqual(len(edges), 1)
@@ -1122,7 +1132,7 @@ class WorkflowTest(unittest.TestCase):
         ]
 
         with self.assertRaisesRegex(core.ProgramError, "duplicates the retained type and label"):
-            core._validate_curation(
+            pathology._validate_curation(
                 {"concepts": concepts}, {"pathology_sources": source}
             )
 
@@ -1168,9 +1178,9 @@ class WorkflowTest(unittest.TestCase):
             "pathology_sources": source,
             "pathology_curation": {"records": {"concepts": concepts}},
         }
-        core._validate_curation(results["pathology_curation"]["records"], results)
-        self.assertEqual(core._item_ids("evidence_graph", results), ["NODE:1"])
-        nodes, edges = core._canonical_source_records(results)
+        pathology._validate_curation(results["pathology_curation"]["records"], results)
+        self.assertEqual(run_state._item_ids("evidence_graph", results), ["NODE:1"])
+        nodes, edges = pathology._canonical_source_records(results)
         self.assertEqual(
             [row["node_id"] for row in nodes], ["MONDO:1", "NODE:1", "NODE:2"]
         )
@@ -1189,12 +1199,13 @@ class WorkflowTest(unittest.TestCase):
             "assertions": [],
         }
         self.assertEqual(
-            [row["node_id"] for row in core._graph_index(graph)], ["NODE:1", "NODE:2"]
+            [row["node_id"] for row in graph_rules._graph_index(graph)],
+            ["NODE:1", "NODE:2"],
         )
-        context = core._graph_node_context(graph, "NODE:2")
+        context = graph_rules._graph_node_context(graph, "NODE:2")
         self.assertIsNone(context["profile"])
         self.assertEqual([row["node_id"] for row in context["related_nodes"]], ["NODE:1"])
-        self.assertEqual(core._graph_support_ids(graph)["NODE:2"], {"SRC:2"})
+        self.assertEqual(graph_rules._graph_support_ids(graph)["NODE:2"], {"SRC:2"})
 
         graph["documents"] = [
             *source["records"]["documents"],
@@ -1219,9 +1230,9 @@ class WorkflowTest(unittest.TestCase):
             "exclusions": [],
         }
         with self.assertRaisesRegex(core.ProgramError, "do not support graph nodes"):
-            core._validate_seed_item(seed_records, "NODE:1", results)
+            candidate_rules._validate_seed_item(seed_records, "NODE:1", results)
         seed_records["candidates"][0]["pathology_source_ids"].append("SRC:2")
-        core._validate_seed_item(seed_records, "NODE:1", results)
+        candidate_rules._validate_seed_item(seed_records, "NODE:1", results)
 
     def test_pathology_research_requires_retained_evidence(self):
         self.curate_single_process()
@@ -1265,11 +1276,11 @@ class WorkflowTest(unittest.TestCase):
             "MONARCH-ASSOC-" + "A" * 24, "CLINGEN:CCID004621",
             "UNIPROT:P09651", "NCBI:NBK551641", "https://example.org/report",
         ):
-            self.assertIsNotNone(core.CANONICAL_DOCUMENT_ID.fullmatch(document_id))
-        self.assertIsNone(core.CANONICAL_DOCUMENT_ID.fullmatch("DOC-AUTHOR-2026-TOPIC"))
+            self.assertIsNotNone(contracts.CANONICAL_DOCUMENT_ID.fullmatch(document_id))
+        self.assertIsNone(contracts.CANONICAL_DOCUMENT_ID.fullmatch("DOC-AUTHOR-2026-TOPIC"))
 
     def test_document_metadata_enriches_only_when_identity_fields_agree(self):
-        documents = core._merge_documents([
+        documents = evidence._merge_documents([
             {
                 "document_id": "PMID:22312314",
                 "title": "Disruption of Axonal Transport in Motor Neuron Diseases",
@@ -1299,7 +1310,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(documents[0]["supports"], ["PARTIAL", "SUPPORT"])
 
         with self.assertRaisesRegex(core.ProgramError, "Conflicting document metadata"):
-            core._merge_documents([
+            evidence._merge_documents([
                 documents[0],
                 {**documents[0], "title": "A different article"},
             ])
@@ -1328,8 +1339,8 @@ class WorkflowTest(unittest.TestCase):
         ):
             root = Path(directory)
             with self.assertRaisesRegex(core.ProgramError, "metadata mismatch"):
-                core._canonicalize_documents(root, [document], verify_titles=True)
-            projected = core._canonicalize_documents(root, [document], verify_titles=False)[0]
+                bibliography._canonicalize_documents(root, [document], verify_titles=True)
+            projected = bibliography._canonicalize_documents(root, [document], verify_titles=False)[0]
 
         self.assertEqual(projected["title"], "Canonical article title")
         self.assertEqual(projected["submitted_title"], "Incorrect title")
@@ -1360,11 +1371,11 @@ class WorkflowTest(unittest.TestCase):
         }
 
         self.assertEqual(
-            core._cited_ids(records),
+            evidence._cited_ids(records),
             {"UPSTREAM:1", "PMID:10", "PMID:11"},
         )
         self.assertEqual(
-            [row["document_id"] for row in core._cited_documents(records)],
+            [row["document_id"] for row in evidence._cited_documents(records)],
             ["PMID:10", "PMID:11"],
         )
         identity_results = {
@@ -1379,13 +1390,13 @@ class WorkflowTest(unittest.TestCase):
             }}
         }
         self.assertEqual(
-            [row["document_id"] for row in core._all_documents(identity_results)],
+            [row["document_id"] for row in evidence._all_documents(identity_results)],
             ["PMID:13"],
         )
 
     def test_non_document_identity_conflicts_remain_strict(self):
         with self.assertRaisesRegex(core.ProgramError, "Conflicting profiles records"):
-            core._merge_unique(
+            evidence._merge_unique(
                 [
                     {"node_id": "NODE:1", "label": "one"},
                     {"node_id": "NODE:1", "label": "two"},
@@ -1434,9 +1445,9 @@ class WorkflowTest(unittest.TestCase):
             }
 
         with patch.object(identity, "_post_unichem", response):
-            enriched, receipts = core._resolve_seed_identities(self.root, rows)
+            enriched, receipts = identity._resolve_seed_identities(self.root, rows)
         records = {"candidates": enriched}
-        groups = core._exact_identity_groups(records)
+        groups = identity._exact_identity_groups(records)
         self.assertEqual(groups["UNICHEM:42"], ["SEED-A", "SEED-B"])
         self.assertEqual(groups["UNICHEM:10"], ["SEED-10"])
         self.assertEqual(groups["UNICHEM:20"], ["SEED-20"])
@@ -1444,7 +1455,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(
             {
                 row["seed_id"]: row["identity_resolution"]["status"]
-                for row in core._identity_queue(records)
+                for row in identity._identity_queue(records)
             },
             {
                 "SEED-10": "connectivity_match",
@@ -1477,7 +1488,7 @@ class WorkflowTest(unittest.TestCase):
             "candidate_seed_generation": {"records": records},
         }
 
-        context = core._packet_context(
+        context = packets._packet_context(
             self.root, "candidate_identity", None, results
         )
         options = {
@@ -1498,7 +1509,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertTrue(all(
             "mechanism_hypothesis" not in row for row in options.values()
         ))
-        rules = " ".join(core.FIELD_RULES["candidate_identity"])
+        rules = " ".join(contracts.FIELD_RULES["candidate_identity"])
         self.assertIn("context.canonical_candidate_options", rules)
         self.assertIn("identity_resolution.ucis", rules)
 
@@ -1533,10 +1544,10 @@ class WorkflowTest(unittest.TestCase):
         with self.assertRaisesRegex(
             core.ProgramError, "context.canonical_candidate_options"
         ):
-            core._validate_candidate_identity(records, prior)
+            identity._validate_candidate_identity(records, prior)
 
         records["identity_groups"][0]["canonical_candidate_id"] = None
-        core._validate_candidate_identity(records, prior)
+        identity._validate_candidate_identity(records, prior)
 
     def test_identity_review_partitions_all_flagged_seeds_before_merge(self):
         resolution = {
@@ -1578,15 +1589,15 @@ class WorkflowTest(unittest.TestCase):
             }],
         }
 
-        core._validate_candidate_identity(records, prior)
+        identity._validate_candidate_identity(records, prior)
         prior["candidate_identity"] = {"records": records}
-        candidates = core._canonical_candidates(prior)
+        candidates = identity._canonical_candidates(prior)
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0]["candidate_id"], "UNICHEM:121892")
         self.assertEqual(candidates[0]["member_seed_ids"], ["SEED-A", "SEED-B"])
         records["identity_groups"][0]["member_seed_ids"] = ["SEED-A"]
         with self.assertRaisesRegex(core.ProgramError, "cannot split an exact UniChem"):
-            core._validate_candidate_identity(records, prior)
+            identity._validate_candidate_identity(records, prior)
 
     def test_identity_review_can_attach_no_result_to_exact_candidate(self):
         exact = self.seed(
@@ -1624,9 +1635,9 @@ class WorkflowTest(unittest.TestCase):
             }],
         }
 
-        core._validate_candidate_identity(records, prior)
+        identity._validate_candidate_identity(records, prior)
         prior["candidate_identity"] = {"records": records}
-        candidates = core._canonical_candidates(prior)
+        candidates = identity._canonical_candidates(prior)
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0]["member_seed_ids"], ["SEED-ALIAS", "SEED-EXACT"])
 
@@ -1665,11 +1676,11 @@ class WorkflowTest(unittest.TestCase):
             "pathology_curation": {"records": {"concepts": concepts}},
         }
         with patch.object(candidate_rules, "_canonical_candidates", return_value=candidates):
-            first = core._review_batches(results)
+            first = candidate_rules._review_batches(results)
         with patch.object(
             candidate_rules, "_canonical_candidates", return_value=list(reversed(candidates))
         ):
-            second = core._review_batches(results)
+            second = candidate_rules._review_batches(results)
 
         self.assertEqual(first, second)
         self.assertEqual(
@@ -1689,25 +1700,25 @@ class WorkflowTest(unittest.TestCase):
         }
         batch = [{"concept_id": "NODE:A", "candidate_ids": ["DRUG-A", "DRUG-B"]}]
         with patch.object(candidate_rules, "_review_batches", return_value=batch):
-            core._validate_review_item(records, "NODE:A", {})
+            candidate_rules._validate_review_item(records, "NODE:A", {})
             records["reviews"][0]["aliases"] = [{"name": "Drug salt", "source_ids": []}]
             with self.assertRaisesRegex(core.ProgramError, "must be a non-empty list"):
-                core._validate_review_item(records, "NODE:A", {})
+                candidate_rules._validate_review_item(records, "NODE:A", {})
             records["reviews"][0]["aliases"] = []
             records["reviews"][0]["why_not"] = [{
                 "finding": "Unsupported concern",
                 "source_ids": ["PMID:404"],
             }]
             with self.assertRaisesRegex(core.ProgramError, "unknown IDs"):
-                core._validate_review_item(records, "NODE:A", {})
+                candidate_rules._validate_review_item(records, "NODE:A", {})
             records["reviews"][0]["why_not"] = []
             records["reviews"][0]["counterevidence"] = []
             with self.assertRaisesRegex(core.ProgramError, "unexpected fields"):
-                core._validate_review_item(records, "NODE:A", {})
+                candidate_rules._validate_review_item(records, "NODE:A", {})
             del records["reviews"][0]["counterevidence"]
             records["documents"] = []
             with self.assertRaisesRegex(core.ProgramError, "retained by this review"):
-                core._validate_review_item(
+                candidate_rules._validate_review_item(
                     records,
                     "NODE:A",
                     {"prior": {"records": {
@@ -1722,7 +1733,7 @@ class WorkflowTest(unittest.TestCase):
             ]
             records["reviews"] = [self.review("DRUG-A")]
             with self.assertRaisesRegex(core.ProgramError, "exactly the supplied batch"):
-                core._validate_review_item(records, "NODE:A", {})
+                candidate_rules._validate_review_item(records, "NODE:A", {})
 
     def test_audit_validation_partitions_candidates_and_preserves_longshots(self):
         second_review = self.review("DRUG-B")
@@ -1749,7 +1760,7 @@ class WorkflowTest(unittest.TestCase):
         }
         longshot = self.assessment(
             "DRUG-A",
-            values={component: 5 for component in core.SCORE_COMPONENTS},
+            values={component: 5 for component in contracts.SCORE_COMPONENTS},
         )
         records = {
             "assessments": [longshot],
@@ -1762,8 +1773,8 @@ class WorkflowTest(unittest.TestCase):
             }],
         }
 
-        core._validate_candidate_audit(records, results)
-        self.assertEqual(core._final_score(longshot), 20)
+        audit._validate_candidate_audit(records, results)
+        self.assertEqual(ranking._final_score(longshot), 20)
 
         all_excluded = {
             "assessments": [],
@@ -1778,27 +1789,27 @@ class WorkflowTest(unittest.TestCase):
                 records["excluded_candidates"][0],
             ],
         }
-        core._validate_candidate_audit(all_excluded, results)
+        audit._validate_candidate_audit(all_excluded, results)
         self.assertEqual(
-            core._stop_reason({"candidate_audit": {"records": all_excluded}}),
+            run_state._stop_reason({"candidate_audit": {"records": all_excluded}}),
             "the audit excluded every reviewed candidate",
         )
 
         invalid = json.loads(json.dumps(records))
         invalid["assessments"][0]["component_scores"]["drug_action_confidence"]["value"] = 12
         with self.assertRaisesRegex(core.ProgramError, "must be one of"):
-            core._validate_candidate_audit(invalid, results)
+            audit._validate_candidate_audit(invalid, results)
 
         invalid = json.loads(json.dumps(records))
         invalid["excluded_candidates"] = []
         with self.assertRaisesRegex(core.ProgramError, "partition every reviewed candidate"):
-            core._validate_candidate_audit(invalid, results)
+            audit._validate_candidate_audit(invalid, results)
 
         invalid = json.loads(json.dumps(records))
         invalid["assessments"].append(self.assessment("DRUG-B"))
         invalid["excluded_candidates"] = []
         with self.assertRaisesRegex(core.ProgramError, "disqualifying prior-art status"):
-            core._validate_candidate_audit(invalid, results)
+            audit._validate_candidate_audit(invalid, results)
 
     def test_counterevidence_is_unscored_and_cannot_restore_robustness_points(self):
         results = {
@@ -1815,18 +1826,18 @@ class WorkflowTest(unittest.TestCase):
             }}
         }
         assessment = self.assessment(
-            "DRUG-A", values={component: 5 for component in core.SCORE_COMPONENTS}
+            "DRUG-A", values={component: 5 for component in contracts.SCORE_COMPONENTS}
         )
-        baseline_score = core._final_score(assessment)
+        baseline_score = ranking._final_score(assessment)
         assessment["why_not"] = [{
             "finding": "Independent disease models found no efficacy.",
             "source_ids": ["PMID:1"],
         }]
         assessment["source_integrity"] = self.source_integrity(assessment)
-        core._validate_candidate_audit(
+        audit._validate_candidate_audit(
             {"assessments": [assessment], "excluded_candidates": []}, results
         )
-        self.assertEqual(core._final_score(assessment), baseline_score)
+        self.assertEqual(ranking._final_score(assessment), baseline_score)
 
         invalid = json.loads(json.dumps(assessment))
         invalid["component_scores"]["evidence_robustness"] = {
@@ -1835,7 +1846,7 @@ class WorkflowTest(unittest.TestCase):
             "source_ids": ["PMID:1"],
         }
         with self.assertRaisesRegex(core.ProgramError, "unexpected fields"):
-            core._validate_candidate_audit(
+            audit._validate_candidate_audit(
                 {"assessments": [invalid], "excluded_candidates": []}, results
             )
 
@@ -1857,7 +1868,7 @@ class WorkflowTest(unittest.TestCase):
             {"name": "Alias two", "source_ids": ["PMID:1"]},
         ]
         assessment["source_integrity"] = self.source_integrity(assessment)
-        core._validate_candidate_audit(
+        audit._validate_candidate_audit(
             {"assessments": [assessment], "excluded_candidates": []}, results
         )
         scopes = {
@@ -1873,14 +1884,14 @@ class WorkflowTest(unittest.TestCase):
             "source_ids": ["PMID:1"],
         }
         with self.assertRaisesRegex(core.ProgramError, "missing fields: checks"):
-            core._validate_candidate_audit(
+            audit._validate_candidate_audit(
                 {"assessments": [generic], "excluded_candidates": []}, results
             )
 
         missing = json.loads(json.dumps(assessment))
         missing["source_integrity"]["checks"].pop()
         with self.assertRaisesRegex(core.ProgramError, "cover every cited source use"):
-            core._validate_candidate_audit(
+            audit._validate_candidate_audit(
                 {"assessments": [missing], "excluded_candidates": []}, results
             )
 
@@ -1889,7 +1900,7 @@ class WorkflowTest(unittest.TestCase):
             "This source needs independent verification."
         )
         with self.assertRaisesRegex(core.ProgramError, "not defer verification"):
-            core._validate_candidate_audit(
+            audit._validate_candidate_audit(
                 {"assessments": [deferred], "excluded_candidates": []}, results
             )
 
@@ -1897,14 +1908,14 @@ class WorkflowTest(unittest.TestCase):
             "This citation is unverifiable from the packet."
         )
         with self.assertRaisesRegex(core.ProgramError, "not defer verification"):
-            core._validate_candidate_audit(
+            audit._validate_candidate_audit(
                 {"assessments": [deferred], "excluded_candidates": []}, results
             )
 
         no_content = json.loads(json.dumps(results))
         del no_content["candidate_review"]["records"]["documents"][0]["evidence_passages"]
         with self.assertRaisesRegex(core.ProgramError, "no inspectable content"):
-            core._validate_candidate_audit(
+            audit._validate_candidate_audit(
                 {"assessments": [assessment], "excluded_candidates": []}, no_content
             )
 
@@ -1928,7 +1939,7 @@ class WorkflowTest(unittest.TestCase):
             },
         ]
         with self.assertRaisesRegex(core.ProgramError, "more than once"):
-            core._validate_candidate_audit(
+            audit._validate_candidate_audit(
                 {"assessments": [duplicate_publication], "excluded_candidates": []},
                 results,
                 source_index,
@@ -1946,8 +1957,8 @@ class WorkflowTest(unittest.TestCase):
             }
             for candidate_id in ("DRUG-A", "DRUG-B", "DRUG-C")
         ]
-        high = {component: 20 for component in core.SCORE_COMPONENTS}
-        medium = {component: 10 for component in core.SCORE_COMPONENTS}
+        high = {component: 20 for component in contracts.SCORE_COMPONENTS}
+        medium = {component: 10 for component in contracts.SCORE_COMPONENTS}
         results = {
             "candidate_audit": {"records": {
                 "assessments": [
@@ -1958,8 +1969,8 @@ class WorkflowTest(unittest.TestCase):
                 "excluded_candidates": [],
             }}
         }
-        with patch.object(core, "_canonical_candidates", return_value=candidates):
-            rows, _ = core._ranked_rows(results)
+        with patch.object(ranking, "_canonical_candidates", return_value=candidates):
+            rows, _ = ranking._ranked_rows(results)
 
         self.assertEqual(
             [(row["candidate_id"], row["rank"], row["final_score"]) for row in rows],
@@ -1973,9 +1984,9 @@ class WorkflowTest(unittest.TestCase):
                 "reason": "Bounded support.",
                 "source_ids": ["PMID:1"],
             }
-            for component in core.SCORE_COMPONENTS
+            for component in contracts.SCORE_COMPONENTS
         }
-        payload = core._cards_bytes([{
+        payload = evidence_cards._cards_bytes([{
             "drug_id": "CANDIDATE-UNRESOLVED",
             "aliases": [],
             "score": 40,
@@ -1990,7 +2001,7 @@ class WorkflowTest(unittest.TestCase):
                         "verdict": "partly_supports" if scope == "translational_feasibility" else "supports",
                         "finding": "Direct support." if scope != "translational_feasibility" else "Only model-level support.",
                     }
-                    for scope in (*core.SCORE_COMPONENTS, "net_assessment")
+                    for scope in (*contracts.SCORE_COMPONENTS, "net_assessment")
                 ],
             },
         }]).decode("utf-8")
@@ -2019,7 +2030,7 @@ class WorkflowTest(unittest.TestCase):
             "evidence_summary": "first finding",
             "source_ids": ["PMID:1"],
         }
-        merged = core._merge_assertions([
+        merged = graph_rules._merge_assertions([
             assertion,
             {
                 **assertion,
@@ -2034,7 +2045,9 @@ class WorkflowTest(unittest.TestCase):
             merged[0]["evidence_summary"], "first finding | second finding"
         )
         with self.assertRaisesRegex(core.ProgramError, "Conflicting assertion identities"):
-            core._merge_assertions([assertion, {**assertion, "object_id": "NODE:3"}])
+            graph_rules._merge_assertions(
+                [assertion, {**assertion, "object_id": "NODE:3"}]
+            )
 
     @staticmethod
     def profile(item_id, node_type):
@@ -2137,7 +2150,7 @@ class WorkflowTest(unittest.TestCase):
                     "reason": f"The retained evidence supports the {component} rating.",
                     "source_ids": [source_id],
                 }
-                for component in core.SCORE_COMPONENTS
+                for component in contracts.SCORE_COMPONENTS
             },
             "net_assessment": {
                 "text": "The mechanistic support outweighs the retained uncertainty.",
@@ -2159,7 +2172,7 @@ class WorkflowTest(unittest.TestCase):
                     "verdict": "supports",
                     "finding": "The retained passage supports this exact use.",
                 }
-                for source_id, scope in sorted(core._assessment_source_uses(assessment))
+                for source_id, scope in sorted(audit._assessment_source_uses(assessment))
             ],
         }
 

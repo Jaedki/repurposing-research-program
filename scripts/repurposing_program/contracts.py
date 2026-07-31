@@ -1,6 +1,6 @@
 """Static workflow and scientific contracts.
 
-This module contains data only. Runtime orchestration remains in program_core.
+This module contains data only. Runtime orchestration is owned by the orchestration module.
 """
 
 from __future__ import annotations
@@ -535,4 +535,3 @@ _UNICHEM_SOURCE_IDS = {
     "pubchem_cid": 22,
     "drugcentral": 34,
 }
-

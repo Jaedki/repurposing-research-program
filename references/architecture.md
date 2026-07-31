@@ -88,16 +88,28 @@ point while extracted responsibilities have one owner:
   validation, including pathology-versus-mechanism citation separation;
 - `repurposing_program.audit` owns closed-corpus audit partition, component-score, exact source-use,
   publication-alias, and bounded-exclusion validation;
+- `repurposing_program.ranking` owns raw-score calculation, deterministic assessment ordering,
+  dense ranks, and ranked-row projection;
+- `repurposing_program.evidence_cards` owns final evidence-card projection and deterministic
+  Markdown rendering;
+- `repurposing_program.candidate_exports` owns candidate provenance and audited-exclusion output
+  projections;
+- `repurposing_program.manifests` owns artifact metadata and final manifest construction;
 - `repurposing_program.run_state` owns case identity and initialization, accepted stage and item
   loading, derived stop/status state, output-manifest verification, and read-only graph context;
 - `repurposing_program.packets` owns stage-specific context projection, worker result-contract
   construction, packet validation, content addressing, and packet persistence;
 - `repurposing_program.orchestration` owns deterministic controller advancement, item-result
-  aggregation, controller-built stage results, worker-result validation, and immutable submission.
+  aggregation, controller-built stage results, worker-result validation, and immutable submission;
+- `repurposing_program.outputs` owns final CSV, JSON, JSONL, Markdown, graph, citation, and summary
+  export plus the public output-build operation.
 
 These extracted modules never import `program_core`. Higher domain modules may depend on evidence,
 validation, and foundation modules; dependency must not point back from an extracted module to
 orchestration. Orchestration depends on run state and packets, which remain independent of it.
-`program_core` re-exports the controller lifecycle as the stable API and retains only final output
-projection, rendering, and build ownership. That output-generation boundary remains Stage 6 and is
-not part of the Stage 5 extraction.
+The output modules form a terminal dependency branch: domain, validation, packet, orchestration,
+and run-state modules do not import them; focused output projections do not import run state,
+packets, orchestration, or the output coordinator. `outputs` alone coordinates read-only final
+state with those projections and persistence. `program_core` contains no implementation logic and
+re-exports only the unchanged explicit public API: programme contracts, controller lifecycle, and
+the output build operation.
