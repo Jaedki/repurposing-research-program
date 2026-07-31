@@ -95,6 +95,25 @@ def unichem_result(endpoint, body):
     }
 
 
+def bibliographic_metadata(_root, documents):
+    resolved = {}
+    for row in documents:
+        document_id = str(row["document_id"])
+        normalized = core._normalized_publication_id(document_id)
+        if normalized is None:
+            continue
+        resolved[document_id] = {
+            "title": row["title"],
+            "year": 2026,
+            "journal": "Test journal",
+            "authors": ["Test Author"],
+            "canonical_publication_id": normalized,
+            "identifier_aliases": [normalized],
+            "metadata_source": "test",
+        }
+    return resolved
+
+
 class UniChemTransportTest(unittest.TestCase):
     def test_accepts_explicit_compound_not_found_response(self):
         response = MagicMock()
@@ -148,6 +167,173 @@ class UniChemTransportTest(unittest.TestCase):
         self.assertEqual(request.call_count, 2)
         pause.assert_called_once_with(1)
         error.close()
+
+
+class BibliographicMetadataTest(unittest.TestCase):
+    def test_metadata_transport_retries_transient_server_failure(self):
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"record":"canonical"}'
+        error = HTTPError("https://example.org", 503, "unavailable", {}, None)
+        with (
+            patch.object(core, "urlopen", side_effect=[error, response]) as request,
+            patch.object(core.time, "sleep") as pause,
+        ):
+            result = core._bibliographic_get("https://example.org/record")
+
+        self.assertEqual(result, {"record": "canonical"})
+        self.assertEqual(request.call_count, 2)
+        pause.assert_called_once_with(1)
+        error.close()
+
+    def test_cached_request_fetches_once_and_reuses_immutable_response(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            core, "_bibliographic_get", return_value={"record": "canonical"}
+        ) as fetch:
+            root = Path(directory)
+            first = core._bibliographic_request(root, "test", "https://example.org/record")
+            second = core._bibliographic_request(root, "test", "https://example.org/record")
+
+        self.assertEqual(first, {"record": "canonical"})
+        self.assertEqual(second, first)
+        fetch.assert_called_once_with("https://example.org/record", accept="application/json")
+
+    def test_identifier_converter_indexes_every_returned_publication_alias(self):
+        response = {
+            "records": [{
+                "pmid": "11",
+                "pmcid": "PMC11",
+                "doi": "10.1000/eleven",
+            }]
+        }
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            core, "_bibliographic_request", return_value=response
+        ):
+            records = core._id_converter_records(
+                Path(directory), ["PMID:11", "PMCID:PMC11", "DOI:10.1000/ELEVEN"]
+            )
+
+        self.assertEqual(
+            set(records),
+            {"PMID:11", "PMCID:PMC11", "DOI:10.1000/eleven"},
+        )
+
+    def test_large_identifier_sets_are_split_into_bounded_requests(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            core, "_bibliographic_request", return_value={"records": []}
+        ) as request:
+            core._id_converter_records(
+                Path(directory), [f"PMID:{identifier}" for identifier in range(1, 202)]
+            )
+
+        self.assertEqual(request.call_count, 2)
+
+    def test_resolver_covers_pmid_pmcid_doi_and_ignores_other_ids(self):
+        documents = [
+            {"document_id": "PMID:11", "title": "Eleven"},
+            {"document_id": "PMCID:PMC22", "title": "Twenty two"},
+            {"document_id": "DOI:10.1000/example", "title": "DOI article"},
+            {"document_id": "https://example.org/database", "title": "Database"},
+        ]
+        converted = {
+            "PMID:11": {"pmid": "11", "pmcid": "PMC11", "doi": "10.1000/eleven"},
+            "PMCID:PMC22": {"pmcid": "PMC22"},
+        }
+
+        def summaries(_root, database, identifiers):
+            self.assertEqual(set(identifiers), {"11"} if database == "pubmed" else {"22"})
+            if database == "pubmed":
+                return {"11": {
+                    "title": "Eleven",
+                    "pubdate": "2020 Jan",
+                    "fulljournalname": "Journal A",
+                    "authors": [{"name": "A Author"}],
+                    "articleids": [],
+                }}
+            return {"22": {
+                "title": "Twenty two",
+                "pubdate": "2021",
+                "source": "Journal B",
+                "authors": [],
+                "articleids": [{"idtype": "pmc", "value": "PMC22"}],
+            }}
+
+        doi_metadata = {
+            "title": "DOI article",
+            "year": 2022,
+            "journal": "Journal C",
+            "authors": ["C Author"],
+            "identifier_aliases": ["DOI:10.1000/example"],
+            "metadata_source": "DOI",
+        }
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(core, "_id_converter_records", return_value=converted),
+            patch.object(core, "_ncbi_summaries", side_effect=summaries),
+            patch.object(core, "_doi_metadata", return_value=doi_metadata) as doi,
+        ):
+            resolved = core._resolve_bibliographic_metadata(Path(directory), documents)
+
+        self.assertEqual(set(resolved), {"PMID:11", "PMCID:PMC22", "DOI:10.1000/example"})
+        self.assertEqual(resolved["PMID:11"]["canonical_publication_id"], "PMID:11")
+        self.assertEqual(
+            resolved["PMID:11"]["identifier_aliases"],
+            ["DOI:10.1000/eleven", "PMCID:PMC11", "PMID:11"],
+        )
+        self.assertEqual(resolved["PMCID:PMC22"]["canonical_publication_id"], "PMCID:PMC22")
+        self.assertEqual(
+            resolved["DOI:10.1000/example"]["canonical_publication_id"],
+            "DOI:10.1000/example",
+        )
+        doi.assert_called_once()
+
+    def test_missing_canonical_publication_metadata_stops_validation(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(core, "_id_converter_records", return_value={}),
+            patch.object(core, "_ncbi_summaries", return_value={}),
+        ):
+            with self.assertRaisesRegex(core.ProgramError, "Canonical metadata was not found"):
+                core._resolve_bibliographic_metadata(
+                    Path(directory), [{"document_id": "PMID:999", "title": "Invented"}]
+                )
+
+    def test_one_worker_result_cannot_return_two_aliases_for_one_publication(self):
+        documents = [
+            {"document_id": "PMID:11", "title": "One article"},
+            {"document_id": "DOI:10.1000/one", "title": "One article"},
+        ]
+        metadata = {
+            document["document_id"]: {
+                "title": "One article",
+                "canonical_publication_id": "PMID:11",
+                "identifier_aliases": ["PMID:11", "DOI:10.1000/one"],
+            }
+            for document in documents
+        }
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            core, "_resolve_bibliographic_metadata", return_value=metadata
+        ):
+            with self.assertRaisesRegex(core.ProgramError, "identify the same publication"):
+                core._validate_bibliographic_documents(
+                    Path(directory), {"documents": documents}
+                )
+
+    def test_doi_metadata_projection_is_bounded_and_canonical(self):
+        response = {
+            "title": "A DOI article",
+            "container-title": "A Journal",
+            "author": [{"given": "Ada", "family": "Lovelace"}],
+            "issued": {"date-parts": [[2024, 2, 1]]},
+        }
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            core, "_bibliographic_request", return_value=response
+        ):
+            metadata = core._doi_metadata(Path(directory), "10.1000/example")
+
+        self.assertEqual(metadata["title"], "A DOI article")
+        self.assertEqual(metadata["journal"], "A Journal")
+        self.assertEqual(metadata["authors"], ["Ada Lovelace"])
+        self.assertEqual(metadata["year"], 2024)
 
 
 class ArtifactPersistenceTest(unittest.TestCase):
@@ -291,15 +477,27 @@ class WorkflowTest(unittest.TestCase):
         self.patch.start()
         self.unichem_patch = patch.object(core, "_post_unichem", unichem_result)
         self.unichem_patch.start()
+        self.bibliographic_patch = patch.object(
+            core, "_resolve_bibliographic_metadata", bibliographic_metadata
+        )
+        self.bibliographic_patch.start()
         core.initialize(self.root, "Disease", mondo="MONDO:1")
 
     def tearDown(self):
         self.screening_patch.stop()
         self.patch.stop()
         self.unichem_patch.stop()
+        self.bibliographic_patch.stop()
         self.temp.cleanup()
 
-    def submit(self, action, records):
+    def submit(self, action, records, *, add_evidence_passages=True):
+        records = json.loads(json.dumps(records))
+        if add_evidence_passages:
+            for document in records.get("documents", []):
+                document.setdefault("evidence_passages", [{
+                    "text": f"Inspectable evidence from {document['title']}",
+                    "locator": "test fixture",
+                }])
         packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
         result = {
             "stage": action["next_task"],
@@ -580,6 +778,23 @@ class WorkflowTest(unittest.TestCase):
             [row["document_id"] for row in audit_packet["context"]["source_index"]],
             ["PMID:1", "PMID:2", "PMID:3", "SRC:1"],
         )
+        self.assertEqual(
+            audit_packet["context"]["evidence_graph"]["profiles"][0]["node_id"],
+            "NODE:1",
+        )
+        self.assertEqual(
+            audit_packet["context"]["candidate_identity"]["identity_groups"], []
+        )
+        self.assertTrue(
+            audit_packet["context"]["source_index"][0]["evidence_passages"]
+        )
+        self.assertEqual(
+            audit_packet["context"]["source_index"][0]["canonical_publication_id"],
+            "PMID:1",
+        )
+        self.assertEqual(
+            audit_packet["context"]["source_index"][0]["year"], 2026
+        )
         rubric = audit_packet["result_contract"]["score_rubric"]
         self.assertIn("without weighting", rubric["method"])
         self.assertIn("not a probability", rubric["method"])
@@ -605,40 +820,41 @@ class WorkflowTest(unittest.TestCase):
             [row["document_id"] for row in review_result["records"]["documents"]],
             ["PMID:3"],
         )
+        first_assessment = {
+            **self.assessment(
+                "UNICHEM:1",
+                "PMID:3",
+                {
+                    "drug_action_confidence": 15,
+                    "disease_mechanism_relevance": 20,
+                    "mechanistic_bridge_plausibility": 5,
+                    "translational_feasibility": 15,
+                },
+            ),
+            "aliases": [
+                {"name": "Drug hydrochloride", "source_ids": ["PMID:3"]},
+                {"name": "Drug", "source_ids": ["PMID:2"]},
+            ],
+            "why_not": [{
+                "finding": "Relevant exposure remains uncertain",
+                "source_ids": ["PMID:3"],
+            }],
+            "net_assessment": {
+                "text": "Supported action and pathology fit outweigh a speculative bridge.",
+                "source_ids": ["PMID:3"],
+            },
+        }
+        first_assessment["source_integrity"] = self.source_integrity(first_assessment)
         self.submit(
             action,
             {
-                "assessments": [
-                    {
-                        **self.assessment(
-                            "UNICHEM:1",
-                            "PMID:3",
-                            {
-                                "drug_action_confidence": 15,
-                                "disease_mechanism_relevance": 20,
-                                "mechanistic_bridge_plausibility": 5,
-                                "translational_feasibility": 15,
-                            },
-                        ),
-                        "aliases": [
-                            {"name": "Drug hydrochloride", "source_ids": ["PMID:3"]},
-                            {"name": "Drug", "source_ids": ["PMID:2"]},
-                        ],
-                        "why_not": [{
-                            "finding": "Relevant exposure remains uncertain",
-                            "source_ids": ["PMID:3"],
-                        }],
-                        "net_assessment": {
-                            "text": "Supported action and pathology fit outweigh a speculative bridge.",
-                            "source_ids": ["PMID:3"],
-                        },
-                    },
-                ],
+                "assessments": [first_assessment],
                 "excluded_candidates": [{
                     "candidate_id": "UNICHEM:2",
                     "reason_code": "human_intervention",
                     "finding": "An exact-disease human intervention disqualifies repurposing.",
                     "source_ids": ["PMID:3"],
+                    "source_integrity": self.exclusion_integrity(["PMID:3"]),
                 }],
             },
         )
@@ -653,12 +869,13 @@ class WorkflowTest(unittest.TestCase):
         cards = (self.root / "outputs" / "candidate_cards.md").read_text(encoding="utf-8")
         self.assertIn("## UNICHEM:1", cards)
         self.assertIn(
-            "Aliases:\n- Drug (References: PMID:2)\n"
-            "- Drug hydrochloride (References: PMID:3)",
+            "Aliases:\n- Drug hydrochloride (References: PMID:3)\n"
+            "- Drug (References: PMID:2)",
             cards,
         )
         self.assertEqual(cards.count("Aliases:"), 1)
         self.assertIn("Score: 55/80", cards)
+        self.assertIn("Source verification:", cards)
         self.assertIn("Mechanistic-bridge plausibility: 5/20", cards)
         self.assertIn(
             "### Why\n\nSupported action and pathology fit outweigh a speculative bridge."
@@ -965,6 +1182,10 @@ class WorkflowTest(unittest.TestCase):
         action = core.next_action(self.root)
         packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
         records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
+        with self.assertRaisesRegex(core.ProgramError, "evidence_passages"):
+            self.submit(action, records, add_evidence_passages=False)
+
+        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
         records["profiles"][0]["temporal_context"] = "disease progression"
         with self.assertRaisesRegex(core.ProgramError, "temporal_context must be a list"):
             self.submit(action, records)
@@ -1001,11 +1222,11 @@ class WorkflowTest(unittest.TestCase):
             self.assertIsNotNone(core.CANONICAL_DOCUMENT_ID.fullmatch(document_id))
         self.assertIsNone(core.CANONICAL_DOCUMENT_ID.fullmatch("DOC-AUTHOR-2026-TOPIC"))
 
-    def test_document_metadata_enriches_without_identity_conflict(self):
+    def test_document_metadata_enriches_only_when_identity_fields_agree(self):
         documents = core._merge_documents([
             {
                 "document_id": "PMID:22312314",
-                "title": "PMID:22312314",
+                "title": "Disruption of Axonal Transport in Motor Neuron Diseases",
                 "source": "DisMech evidence",
                 "citation": "PMID:22312314",
                 "snippets": ["source snippet"],
@@ -1013,8 +1234,9 @@ class WorkflowTest(unittest.TestCase):
             },
             {
                 "document_id": "PMID:22312314",
-                "title": "Disruption of Axonal Transport in Motor Neuron Diseases",
+                "title": "Disruption of axonal transport in motor neuron diseases.",
                 "source": "PubMed Central",
+                "citation": "PMID:22312314",
                 "snippets": ["research snippet"],
                 "supports": ["SUPPORT"],
             },
@@ -1025,10 +1247,47 @@ class WorkflowTest(unittest.TestCase):
             documents[0]["title"],
             "Disruption of Axonal Transport in Motor Neuron Diseases",
         )
-        self.assertEqual(documents[0]["source"], "PubMed Central")
+        self.assertEqual(documents[0]["source"], "DisMech evidence")
         self.assertEqual(documents[0]["citation"], "PMID:22312314")
         self.assertEqual(documents[0]["snippets"], ["research snippet", "source snippet"])
         self.assertEqual(documents[0]["supports"], ["PARTIAL", "SUPPORT"])
+
+        with self.assertRaisesRegex(core.ProgramError, "Conflicting document metadata"):
+            core._merge_documents([
+                documents[0],
+                {**documents[0], "title": "A different article"},
+            ])
+
+    def test_bibliographic_title_mismatch_is_rejected_and_projection_is_authoritative(self):
+        document = {
+            "document_id": "PMID:12024045",
+            "title": "Incorrect title",
+            "source": "test",
+            "evidence_passages": [{"text": "Evidence", "locator": "abstract"}],
+        }
+        canonical = {
+            "PMID:12024045": {
+                "title": "Canonical article title",
+                "year": 2002,
+                "journal": "Canonical journal",
+                "authors": ["A. Author"],
+                "canonical_publication_id": "PMID:12024045",
+                "identifier_aliases": ["PMID:12024045", "DOI:10.1/example"],
+                "metadata_source": "PubMed",
+            }
+        }
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(core, "_resolve_bibliographic_metadata", return_value=canonical),
+        ):
+            root = Path(directory)
+            with self.assertRaisesRegex(core.ProgramError, "metadata mismatch"):
+                core._canonicalize_documents(root, [document], verify_titles=True)
+            projected = core._canonicalize_documents(root, [document], verify_titles=False)[0]
+
+        self.assertEqual(projected["title"], "Canonical article title")
+        self.assertEqual(projected["submitted_title"], "Incorrect title")
+        self.assertEqual(projected["canonical_publication_id"], "PMID:12024045")
 
     def test_document_propagation_recurses_and_ignores_document_metadata(self):
         records = {
@@ -1432,7 +1691,12 @@ class WorkflowTest(unittest.TestCase):
         results = {
             "candidate_review": {"records": {
                 "documents": [
-                    {"document_id": "PMID:1", "title": "Retained evidence", "source": "test"}
+                    {
+                        "document_id": "PMID:1",
+                        "title": "Retained evidence",
+                        "source": "test",
+                        "evidence_passages": [{"text": "Evidence", "locator": "abstract"}],
+                    }
                 ],
                 "reviews": [self.review("DRUG-A"), second_review],
             }}
@@ -1448,6 +1712,7 @@ class WorkflowTest(unittest.TestCase):
                 "reason_code": "human_intervention",
                 "finding": "Exact-disease human intervention is disqualifying.",
                 "source_ids": ["PMID:1"],
+                "source_integrity": self.exclusion_integrity(["PMID:1"]),
             }],
         }
 
@@ -1462,6 +1727,7 @@ class WorkflowTest(unittest.TestCase):
                     "reason_code": "unsupported_action",
                     "finding": "The retained corpus does not support the proposed drug action.",
                     "source_ids": ["PMID:1"],
+                    "source_integrity": self.exclusion_integrity(["PMID:1"]),
                 },
                 records["excluded_candidates"][0],
             ],
@@ -1492,7 +1758,12 @@ class WorkflowTest(unittest.TestCase):
         results = {
             "candidate_review": {"records": {
                 "documents": [
-                    {"document_id": "PMID:1", "title": "Retained evidence", "source": "test"}
+                    {
+                        "document_id": "PMID:1",
+                        "title": "Retained evidence",
+                        "source": "test",
+                        "evidence_passages": [{"text": "Evidence", "locator": "abstract"}],
+                    }
                 ],
                 "reviews": [self.review("DRUG-A")],
             }}
@@ -1505,6 +1776,7 @@ class WorkflowTest(unittest.TestCase):
             "finding": "Independent disease models found no efficacy.",
             "source_ids": ["PMID:1"],
         }]
+        assessment["source_integrity"] = self.source_integrity(assessment)
         core._validate_candidate_audit(
             {"assessments": [assessment], "excluded_candidates": []}, results
         )
@@ -1519,6 +1791,101 @@ class WorkflowTest(unittest.TestCase):
         with self.assertRaisesRegex(core.ProgramError, "unexpected fields"):
             core._validate_candidate_audit(
                 {"assessments": [invalid], "excluded_candidates": []}, results
+            )
+
+    def test_source_integrity_checks_every_cited_use_and_cannot_defer_judgment(self):
+        results = {
+            "candidate_review": {"records": {
+                "documents": [{
+                    "document_id": "PMID:1",
+                    "title": "Retained evidence",
+                    "source": "test",
+                    "evidence_passages": [{"text": "Evidence", "locator": "results"}],
+                }],
+                "reviews": [self.review("DRUG-A")],
+            }}
+        }
+        assessment = self.assessment("DRUG-A")
+        assessment["aliases"] = [
+            {"name": "Alias one", "source_ids": ["PMID:1"]},
+            {"name": "Alias two", "source_ids": ["PMID:1"]},
+        ]
+        assessment["source_integrity"] = self.source_integrity(assessment)
+        core._validate_candidate_audit(
+            {"assessments": [assessment], "excluded_candidates": []}, results
+        )
+        scopes = {
+            check["scope"] for check in assessment["source_integrity"]["checks"]
+        }
+        self.assertIn("aliases[0]", scopes)
+        self.assertIn("aliases[1]", scopes)
+
+        generic = json.loads(json.dumps(assessment))
+        generic["source_integrity"] = {
+            "status": "supported",
+            "finding": "Looks sound.",
+            "source_ids": ["PMID:1"],
+        }
+        with self.assertRaisesRegex(core.ProgramError, "missing fields: checks"):
+            core._validate_candidate_audit(
+                {"assessments": [generic], "excluded_candidates": []}, results
+            )
+
+        missing = json.loads(json.dumps(assessment))
+        missing["source_integrity"]["checks"].pop()
+        with self.assertRaisesRegex(core.ProgramError, "cover every cited source use"):
+            core._validate_candidate_audit(
+                {"assessments": [missing], "excluded_candidates": []}, results
+            )
+
+        deferred = json.loads(json.dumps(assessment))
+        deferred["source_integrity"]["checks"][0]["finding"] = (
+            "This source needs independent verification."
+        )
+        with self.assertRaisesRegex(core.ProgramError, "not defer verification"):
+            core._validate_candidate_audit(
+                {"assessments": [deferred], "excluded_candidates": []}, results
+            )
+
+        deferred["source_integrity"]["checks"][0]["finding"] = (
+            "This citation is unverifiable from the packet."
+        )
+        with self.assertRaisesRegex(core.ProgramError, "not defer verification"):
+            core._validate_candidate_audit(
+                {"assessments": [deferred], "excluded_candidates": []}, results
+            )
+
+        no_content = json.loads(json.dumps(results))
+        del no_content["candidate_review"]["records"]["documents"][0]["evidence_passages"]
+        with self.assertRaisesRegex(core.ProgramError, "no inspectable content"):
+            core._validate_candidate_audit(
+                {"assessments": [assessment], "excluded_candidates": []}, no_content
+            )
+
+        duplicate_publication = json.loads(json.dumps(assessment))
+        duplicate_publication["component_scores"]["drug_action_confidence"][
+            "source_ids"
+        ].append("DOI:10.1000/same")
+        duplicate_publication["source_integrity"] = self.source_integrity(
+            duplicate_publication
+        )
+        source_index = [
+            {
+                **results["candidate_review"]["records"]["documents"][0],
+                "canonical_publication_id": "PMID:1",
+            },
+            {
+                "document_id": "DOI:10.1000/same",
+                "title": "Retained evidence",
+                "canonical_publication_id": "PMID:1",
+                "evidence_passages": [{"text": "Evidence", "locator": "results"}],
+            },
+        ]
+        with self.assertRaisesRegex(core.ProgramError, "more than once"):
+            core._validate_candidate_audit(
+                {"assessments": [duplicate_publication], "excluded_candidates": []},
+                results,
+                source_index,
             )
 
     def test_raw_scores_sort_deterministically_and_ties_share_rank(self):
@@ -1569,10 +1936,26 @@ class WorkflowTest(unittest.TestCase):
             "components": components,
             "why": {"text": "Evidence supports nomination.", "source_ids": ["PMID:1"]},
             "why_not": [],
+            "source_integrity": {
+                "checks": [
+                    {
+                        "source_id": "PMID:1",
+                        "scope": scope,
+                        "verdict": "partly_supports" if scope == "translational_feasibility" else "supports",
+                        "finding": "Direct support." if scope != "translational_feasibility" else "Only model-level support.",
+                    }
+                    for scope in (*core.SCORE_COMPONENTS, "net_assessment")
+                ],
+            },
         }]).decode("utf-8")
 
         self.assertIn("## CANDIDATE-UNRESOLVED", payload)
         self.assertIn("Score: 40/80", payload)
+        self.assertIn("Source verification: 5 cited uses checked (4 supports, 1 partly supports)", payload)
+        self.assertIn(
+            "PMID:1 in translational_feasibility: partly supports — Only model-level support.",
+            payload,
+        )
         self.assertIn("Drug-action confidence: 10/20", payload)
         self.assertIn(
             "### Why\n\nEvidence supports nomination.\n\nReferences: PMID:1",
@@ -1700,13 +2083,8 @@ class WorkflowTest(unittest.TestCase):
             "mechanistic_bridge_plausibility": 15,
             "translational_feasibility": 15,
         }
-        return {
+        assessment = {
             "candidate_id": candidate_id,
-            "source_integrity": {
-                "status": "supported",
-                "finding": "The decisive premises are supported by the retained corpus.",
-                "source_ids": [source_id],
-            },
             "component_scores": {
                 component: {
                     "value": values[component],
@@ -1721,6 +2099,36 @@ class WorkflowTest(unittest.TestCase):
             },
             "aliases": [],
             "why_not": [],
+        }
+        assessment["source_integrity"] = WorkflowTest.source_integrity(assessment)
+        return assessment
+
+    @staticmethod
+    def source_integrity(assessment):
+        return {
+            "checks": [
+                {
+                    "source_id": source_id,
+                    "scope": scope,
+                    "verdict": "supports",
+                    "finding": "The retained passage supports this exact use.",
+                }
+                for source_id, scope in sorted(core._assessment_source_uses(assessment))
+            ],
+        }
+
+    @staticmethod
+    def exclusion_integrity(source_ids):
+        return {
+            "checks": [
+                {
+                    "source_id": source_id,
+                    "scope": "exclusion",
+                    "verdict": "supports",
+                    "finding": "The retained passage directly supports the exclusion finding.",
+                }
+                for source_id in sorted(source_ids)
+            ],
         }
 
 

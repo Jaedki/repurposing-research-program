@@ -50,6 +50,10 @@ If no MONDO-mapped DisMech entry exists, the adapter records an explicit gap and
 - Source traversal never means scientific completion.
 - Add source types by normalizing into the existing pathology source records; do not add workflow branches.
 
+## Publication identity
+
+PMID, PMCID, and DOI references from source adapters and research workers use the same small controller-owned validation path. Responses from the NCBI identifier converter, PubMed or PubMed Central summary service, and DOI resolver are cached immutably under `<run>/sources/raw/bibliography/`. The controller uses them only to validate and project bibliographic identity; it does not infer scientific support from metadata. A submitted publication title that does not match the identifier stops acceptance. Known aliases are retained under one canonical publication identity in downstream source projections, while the originally cited document ID remains stable for provenance.
+
 ## UniChem candidate identity
 
 Candidate identity resolution is separate from treatment-blind pathology ingestion. After every

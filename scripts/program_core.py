@@ -5,15 +5,18 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import html
 import io
 import json
 import os
 import re
 import time
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from pathology_sources import (
@@ -32,8 +35,10 @@ OBJECTIVE = (
 EXPERIMENTAL_USE_POLICY = (
     "Hypothesis generation only. Outputs are not clinical advice or proof of efficacy."
 )
+_PUBLICATION_ID_PATTERN = r"(?:PMID:\d+|PMCID:PMC\d+|DOI:10\.\d{4,9}/\S+)"
+_PUBLICATION_ID = re.compile(rf"^{_PUBLICATION_ID_PATTERN}$", re.IGNORECASE)
 CANONICAL_DOCUMENT_ID = re.compile(
-    r"^(?:PMID:\d+|PMCID:PMC\d+|DOI:10\.\d{4,9}/\S+|"
+    rf"^(?:{_PUBLICATION_ID_PATTERN}|"
     r"(?:MONARCH-ASSOC|DISMECH-FILE)-[A-F0-9]{24}|"
     r"(?:ORPHA|CGGV|CLINGEN|GENCC|CLINVAR|UNIPROT(?:KB)?|HPA|"
     r"NCBI(?:-BOOKSHELF|-GENE)?|CHEMBL|PUBCHEM|DRUGBANK|DAILYMED|FDA|EMA|"
@@ -53,6 +58,9 @@ STAGES = (
 )
 GRAPH_INDEX_FIELDS = ("node_id", "label", "node_type", "disposition", "aliases")
 _CITATION_FIELDS = frozenset({"source_ids", "pathology_source_ids", "mechanism_source_ids"})
+_SOURCE_CHECK_VERDICTS = frozenset({
+    "supports", "partly_supports", "does_not_support", "contradicts",
+})
 SCORE_VALUES = frozenset({5, 10, 15, 20})
 SCORE_COMPONENT_RUBRIC = {
     "drug_action_confidence": {
@@ -274,14 +282,17 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
         "role": "independent candidate auditor",
         "task": (
             "Use only the supplied retained corpus; do not search for or add evidence. Independently "
-            "read and weigh each dossier rather than restating it. Partition every candidate exactly "
+            "inspect the supplied evidence passages, abstracts, structured source content, raw-source "
+            "references, and frozen graph rather than restating each dossier. Partition every candidate exactly "
             "once into a scored assessment or a cited exclusion. Exclude only established exact-"
             "disease use, exact-disease human intervention, unsupported proposed drug action, action "
             "clearly opposite to the desired state without compensation, demonstrated impossibility "
             "of relevant action or exposure, or an invalid candidate class. Unresolved identity, "
             "weak evidence, long causal distance, uncertain exposure, preclinical-only evidence, and "
-            "material assumptions remain scored with explicit why-not findings. For every assessment, "
-            "audit source integrity. Counterevidence earns no points: lower any component whose premise "
+            "material assumptions remain scored with explicit why-not findings. For every assessment and "
+            "exclusion, decide whether each cited source supports, partly supports, does not support, or "
+            "contradicts the exact place it is used. Do not defer this judgment or request re-verification. "
+            "Counterevidence earns no points: lower any component whose premise "
             "it directly challenges; if it does not challenge a scored premise, retain it only as an "
             "unscored why-not finding and in the net assessment. Assign one cited 5, 10, 15, or 20 score "
             "for each of drug-action confidence, disease-mechanism relevance, mechanistic-bridge "
@@ -383,7 +394,9 @@ ROW_SCHEMAS = {
         "additional_fields": False,
     },
     "excluded_candidates": {
-        "required_fields": ["candidate_id", "reason_code", "finding", "source_ids"],
+        "required_fields": [
+            "candidate_id", "reason_code", "finding", "source_ids", "source_integrity",
+        ],
         "additional_fields": False,
     },
 }
@@ -480,8 +493,15 @@ FIELD_RULES = {
     "candidate_audit": [
         "assessments and excluded_candidates form a complete non-overlapping partition of every "
         "reviewed candidate",
-        "source_integrity has exactly status, finding, and source_ids; status is supported or "
-        "partly_supported",
+        "source_integrity has exactly checks; do not return a summary status or generic declaration",
+        "each source-integrity check has source_id, scope, verdict, and finding and covers exactly "
+        "one source use in a component score, net assessment, indexed alias, indexed why-not "
+        "finding, or exclusion",
+        "verdict is supports, partly_supports, does_not_support, or contradicts; inspect the supplied "
+        "passage, abstract, structured source content, or raw source record and make the decision now; "
+        "never defer the decision as needing re-verification",
+        "PMID, PMCID, and DOI aliases with the same canonical_publication_id are one source and "
+        "must not be cited as independent support within the same scope",
         "component_scores has exactly drug_action_confidence, disease_mechanism_relevance, "
         "mechanistic_bridge_plausibility, and translational_feasibility",
         "each component has exactly value, reason, and source_ids; value is 5, 10, 15, or 20; "
@@ -492,7 +512,8 @@ FIELD_RULES = {
         "against the strongest reservation",
         "audited aliases and why_not use cited name or finding objects and are the only review-like "
         "fields that may enter final cards",
-        "excluded_candidates use a source-backed reason_code from the bounded exclusion policy",
+        "excluded_candidates use a source-backed reason_code from the bounded exclusion policy and "
+        "verify every cited source under the exclusion scope",
         "do not exclude a candidate merely for unresolved identity, weak evidence, long causal "
         "distance, uncertain exposure, preclinical-only evidence, or material assumptions",
     ],
@@ -585,6 +606,380 @@ def _write_once(path: Path, payload: bytes) -> None:
 
 def _write_json(path: Path, value: Any) -> None:
     _write_once(path, _canonical_bytes(value))
+
+
+def _normalized_title(value: Any) -> str:
+    text = html.unescape(str(value))
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = unicodedata.normalize("NFKC", text).casefold()
+    return " ".join(re.findall(r"[\w]+", text, flags=re.UNICODE))
+
+
+def _normalized_publication_id(value: Any) -> str | None:
+    document_id = str(value).strip()
+    match = _PUBLICATION_ID.fullmatch(document_id)
+    if not match:
+        return None
+    prefix, identifier = document_id.split(":", 1)
+    prefix = prefix.upper()
+    if prefix == "DOI":
+        identifier = identifier.lower()
+    elif prefix == "PMCID":
+        identifier = identifier.upper()
+    return f"{prefix}:{identifier}"
+
+
+def _bibliographic_get(url: str, *, accept: str = "application/json") -> dict[str, Any]:
+    request = Request(
+        url,
+        headers={
+            "Accept": accept,
+            "User-Agent": "repurposing-research-program/5",
+        },
+        method="GET",
+    )
+    for attempt in range(3):
+        try:
+            with urlopen(request, timeout=30) as response:
+                result = json.loads(response.read().decode("utf-8-sig"))
+        except HTTPError as exc:
+            if attempt == 2 or (exc.code != 429 and not 500 <= exc.code < 600):
+                raise ProgramError(f"Bibliographic metadata request failed: {exc}") from exc
+        except (URLError, TimeoutError) as exc:
+            if attempt == 2:
+                raise ProgramError(f"Bibliographic metadata request failed: {exc}") from exc
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ProgramError(f"Bibliographic metadata returned invalid JSON: {exc}") from exc
+        else:
+            if not isinstance(result, dict):
+                raise ProgramError("Bibliographic metadata returned a non-object response")
+            return result
+        time.sleep(2**attempt)
+    raise AssertionError("unreachable")
+
+
+def _bibliographic_request(
+    root: Path,
+    kind: str,
+    url: str,
+    *,
+    accept: str = "application/json",
+) -> dict[str, Any]:
+    token = _sha256(_canonical_bytes({"url": url, "accept": accept}))[:24]
+    path = root / "sources" / "raw" / "bibliography" / f"{kind}-{token}.json"
+    if path.exists():
+        return _read_json(path)
+    result = _bibliographic_get(url, accept=accept)
+    _write_json(path, result)
+    return result
+
+
+def _year(value: Any) -> int | None:
+    match = re.search(r"\b(1[6-9]\d{2}|20\d{2}|21\d{2})\b", str(value))
+    return int(match.group(1)) if match else None
+
+
+def _batches(values: list[str], size: int = 200) -> Iterable[list[str]]:
+    for index in range(0, len(values), size):
+        yield values[index:index + size]
+
+
+def _ncbi_summaries(root: Path, database: str, identifiers: Iterable[str]) -> dict[str, dict[str, Any]]:
+    values = sorted({str(value) for value in identifiers if str(value)})
+    output: dict[str, dict[str, Any]] = {}
+    for batch in _batches(values):
+        query = urlencode({
+            "db": database,
+            "id": ",".join(batch),
+            "retmode": "json",
+            "tool": "repurposing-research-program",
+        })
+        response = _bibliographic_request(
+            root,
+            f"ncbi-{database}-summary",
+            f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?{query}",
+        )
+        payload = response.get("result")
+        if not isinstance(payload, dict):
+            raise ProgramError(f"NCBI {database} metadata response has no result object")
+        for identifier in batch:
+            row = payload.get(identifier)
+            if isinstance(row, dict):
+                output[identifier] = row
+    return output
+
+
+def _id_converter_records(root: Path, document_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+    normalized = sorted({
+        value
+        for document_id in document_ids
+        if (value := _normalized_publication_id(document_id)) is not None
+    })
+    by_alias: dict[str, dict[str, Any]] = {}
+    for batch in _batches(normalized):
+        query = urlencode({
+            "ids": ",".join(value.split(":", 1)[1] for value in batch),
+            "format": "json",
+            "versions": "no",
+            "tool": "repurposing-research-program",
+        })
+        response = _bibliographic_request(
+            root,
+            "ncbi-idconv",
+            f"https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?{query}",
+        )
+        records = response.get("records")
+        if not isinstance(records, list):
+            raise ProgramError("NCBI identifier conversion response has no records list")
+        for record in records:
+            if not isinstance(record, dict) or record.get("status") == "error":
+                continue
+            aliases = []
+            if record.get("pmid"):
+                aliases.append(f"PMID:{record['pmid']}")
+            if record.get("pmcid"):
+                aliases.append(f"PMCID:{str(record['pmcid']).upper()}")
+            if record.get("doi"):
+                aliases.append(f"DOI:{str(record['doi']).lower()}")
+            for alias in aliases:
+                by_alias[alias] = record
+    return by_alias
+
+
+def _summary_metadata(
+    row: Mapping[str, Any],
+    *,
+    source: str,
+    aliases: Iterable[str],
+) -> dict[str, Any]:
+    article_ids = row.get("articleids", [])
+    resolved_aliases = set(aliases)
+    if isinstance(article_ids, list):
+        for item in article_ids:
+            if not isinstance(item, dict) or not item.get("value"):
+                continue
+            id_type = str(item.get("idtype", "")).casefold()
+            value = str(item["value"])
+            if id_type == "pubmed":
+                resolved_aliases.add(f"PMID:{value}")
+            elif id_type == "pmc":
+                resolved_aliases.add(f"PMCID:{value.upper()}")
+            elif id_type == "doi":
+                resolved_aliases.add(f"DOI:{value.lower()}")
+    authors = row.get("authors", [])
+    author_names = [
+        str(author.get("name"))
+        for author in authors
+        if isinstance(author, dict) and author.get("name")
+    ] if isinstance(authors, list) else []
+    return {
+        "title": str(row.get("title") or "").strip(),
+        "year": _year(row.get("pubdate")),
+        "journal": str(row.get("fulljournalname") or row.get("source") or "").strip(),
+        "authors": author_names,
+        "identifier_aliases": sorted(resolved_aliases),
+        "metadata_source": source,
+    }
+
+
+def _doi_metadata(root: Path, doi: str) -> dict[str, Any]:
+    response = _bibliographic_request(
+        root,
+        "doi-csl",
+        f"https://doi.org/{quote(doi, safe='/')}",
+        accept="application/vnd.citationstyles.csl+json",
+    )
+    authors = response.get("author", [])
+    author_names = []
+    if isinstance(authors, list):
+        for author in authors:
+            if not isinstance(author, dict):
+                continue
+            name = " ".join(
+                value for value in (str(author.get("given") or "").strip(),
+                                    str(author.get("family") or "").strip()) if value
+            )
+            if name:
+                author_names.append(name)
+    issued = response.get("issued", {})
+    date_parts = issued.get("date-parts", []) if isinstance(issued, dict) else []
+    year = None
+    if isinstance(date_parts, list) and date_parts and isinstance(date_parts[0], list) and date_parts[0]:
+        try:
+            year = int(date_parts[0][0])
+        except (TypeError, ValueError):
+            year = None
+    title = response.get("title")
+    if isinstance(title, list):
+        title = title[0] if title else ""
+    journal = response.get("container-title")
+    if isinstance(journal, list):
+        journal = journal[0] if journal else ""
+    return {
+        "title": str(title or "").strip(),
+        "year": year,
+        "journal": str(journal or "").strip(),
+        "authors": author_names,
+        "identifier_aliases": [f"DOI:{doi.lower()}"],
+        "metadata_source": "DOI",
+    }
+
+
+def _resolve_bibliographic_metadata(
+    root: Path, documents: Iterable[Mapping[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    publication_ids = [
+        str(row["document_id"])
+        for row in documents
+        if _normalized_publication_id(row.get("document_id")) is not None
+    ]
+    converted = _id_converter_records(root, publication_ids)
+    identities: dict[str, dict[str, str]] = {}
+    for document_id in publication_ids:
+        normalized = _normalized_publication_id(document_id)
+        assert normalized is not None
+        record = converted.get(normalized, {})
+        identity: dict[str, str] = {}
+        if record.get("pmid"):
+            identity["pmid"] = str(record["pmid"])
+        if record.get("pmcid"):
+            identity["pmcid"] = str(record["pmcid"]).upper()
+        if record.get("doi"):
+            identity["doi"] = str(record["doi"]).lower()
+        prefix, value = normalized.split(":", 1)
+        identity.setdefault(prefix.casefold(), value)
+        identities[document_id] = identity
+
+    pubmed = _ncbi_summaries(root, "pubmed", (
+        identity["pmid"] for identity in identities.values() if identity.get("pmid")
+    ))
+    pmc = _ncbi_summaries(root, "pmc", (
+        identity["pmcid"].removeprefix("PMC")
+        for identity in identities.values()
+        if identity.get("pmcid") and not identity.get("pmid") and not identity.get("doi")
+    ))
+
+    resolved: dict[str, dict[str, Any]] = {}
+    for document_id, identity in identities.items():
+        aliases = []
+        if identity.get("pmid"):
+            aliases.append(f"PMID:{identity['pmid']}")
+        if identity.get("pmcid"):
+            aliases.append(f"PMCID:{identity['pmcid']}")
+        if identity.get("doi"):
+            aliases.append(f"DOI:{identity['doi']}")
+        if identity.get("pmid") and identity["pmid"] in pubmed:
+            metadata = _summary_metadata(
+                pubmed[identity["pmid"]], source="PubMed", aliases=aliases
+            )
+        elif identity.get("doi"):
+            metadata = _doi_metadata(root, identity["doi"])
+            metadata["identifier_aliases"] = sorted({
+                *metadata["identifier_aliases"], *aliases,
+            })
+        elif identity.get("pmcid"):
+            key = identity["pmcid"].removeprefix("PMC")
+            if key not in pmc:
+                raise ProgramError(f"Canonical metadata was not found for {document_id}")
+            metadata = _summary_metadata(pmc[key], source="PubMed Central", aliases=aliases)
+        else:
+            raise ProgramError(f"Canonical metadata was not found for {document_id}")
+        if not metadata["title"]:
+            raise ProgramError(f"Canonical metadata has no title for {document_id}")
+        alias_set = set(map(str, metadata["identifier_aliases"]))
+        canonical_id = next(
+            (value for prefix in ("PMID:", "DOI:", "PMCID:")
+             for value in sorted(alias_set) if value.startswith(prefix)),
+            _normalized_publication_id(document_id),
+        )
+        resolved[document_id] = {
+            **metadata,
+            "canonical_publication_id": canonical_id,
+            "identifier_aliases": sorted(alias_set),
+        }
+    return resolved
+
+
+def _canonicalize_documents(
+    root: Path,
+    documents: Iterable[dict[str, Any]],
+    *,
+    verify_titles: bool,
+) -> list[dict[str, Any]]:
+    rows = [dict(row) for row in documents]
+    metadata = _resolve_bibliographic_metadata(root, rows)
+    output: list[dict[str, Any]] = []
+    for row in rows:
+        document_id = str(row["document_id"])
+        canonical = metadata.get(document_id)
+        if canonical is None:
+            output.append(row)
+            continue
+        if _normalized_title(row.get("title")) != _normalized_title(canonical["title"]):
+            if verify_titles:
+                raise ProgramError(
+                    f"Document metadata mismatch for {document_id}: submitted title "
+                    f"{row.get('title')!r}; canonical title {canonical['title']!r}"
+                )
+            row["submitted_title"] = row.get("title")
+        row.update({key: value for key, value in canonical.items() if value not in (None, "", [])})
+        output.append(row)
+    return output
+
+
+def _validate_bibliographic_documents(root: Path, records: Mapping[str, Any]) -> None:
+    documents = _rows(records, "documents")
+    canonicalized = _canonicalize_documents(root, documents, verify_titles=True)
+    seen: dict[str, str] = {}
+    for row in canonicalized:
+        canonical_id = row.get("canonical_publication_id")
+        if canonical_id is None:
+            continue
+        document_id = str(row["document_id"])
+        prior = seen.setdefault(str(canonical_id), document_id)
+        if prior != document_id:
+            raise ProgramError(
+                f"Documents {prior} and {document_id} identify the same publication "
+                f"{canonical_id}; return one canonical citation"
+            )
+
+
+def _validate_research_document_content(records: Mapping[str, Any]) -> None:
+    for index, row in enumerate(_rows(records, "documents")):
+        passages = row.get("evidence_passages")
+        if not isinstance(passages, list) or not passages:
+            raise ProgramError(
+                f"documents[{index}].evidence_passages must contain inspectable source content"
+            )
+        for passage_index, passage in enumerate(passages):
+            label = f"documents[{index}].evidence_passages[{passage_index}]"
+            if not isinstance(passage, dict) or set(passage) != {"text", "locator"}:
+                raise ProgramError(f"{label} must contain exactly text and locator")
+            if not str(passage["text"]).strip() or not str(passage["locator"]).strip():
+                raise ProgramError(f"{label}.text and locator must be non-empty")
+
+
+def _document_has_inspectable_content(row: Mapping[str, Any]) -> bool:
+    passages = row.get("evidence_passages")
+    if isinstance(passages, list) and any(
+        isinstance(passage, dict) and str(passage.get("text", "")).strip()
+        for passage in passages
+    ):
+        return True
+    if str(row.get("abstract", "")).strip() or str(row.get("raw_path", "")).strip():
+        return True
+    if str(row.get("supporting_text", "")).strip():
+        return True
+    snippets = row.get("snippets")
+    if isinstance(snippets, list) and any(str(value).strip() for value in snippets):
+        return True
+    supports = row.get("supports")
+    if isinstance(supports, list) and any(str(value).strip() for value in supports):
+        return True
+    structured = row.get("structured_content")
+    if isinstance(structured, (Mapping, list)) and bool(structured):
+        return True
+    return False
 
 
 def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -911,7 +1306,12 @@ def status(root: str | Path) -> dict[str, Any]:
 def _source_index(
     documents: list[dict[str, Any]], source_ids: set[str] | None = None
 ) -> list[dict[str, Any]]:
-    fields = ("document_id", "title", "source", "citation", "url", "raw_path", "abstract")
+    fields = (
+        "document_id", "canonical_publication_id", "identifier_aliases", "title",
+        "submitted_title", "year", "journal", "authors", "source", "metadata_source",
+        "citation", "url", "raw_path", "abstract", "evidence_passages", "supporting_text",
+        "structured_content", "snippets", "supports",
+    )
     return [
         {key: row[key] for key in fields if key in row}
         for row in documents
@@ -952,6 +1352,7 @@ def _merge_text(*values: Any) -> str:
 
 def _merge_documents(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
+    identity_fields = {"title", "year", "canonical_publication_id"}
     for row in rows:
         document_id = str(row.get("document_id", "")).strip()
         if not document_id:
@@ -960,12 +1361,23 @@ def _merge_documents(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         for field, value in row.items():
             if field == "document_id" or value in (None, "", []):
                 continue
+            conflict = field in identity_fields and field in current and current[field] != value
+            if field == "title" and conflict:
+                conflict = _normalized_title(current[field]) != _normalized_title(value)
+            if field == "year" and conflict:
+                conflict = _year(current[field]) != _year(value)
+            if conflict:
+                raise ProgramError(
+                    f"Conflicting document metadata for {document_id}: {field}"
+                )
             if isinstance(value, list):
                 prior = current.get(field, [])
                 if not isinstance(prior, list):
                     raise ProgramError(f"documents.{field} changes type")
                 values = {_canonical_bytes(item): item for item in [*prior, *value]}
                 value = [values[key] for key in sorted(values)]
+            elif field in current and current[field] != value:
+                continue
             current[field] = value
     return [merged[key] for key in sorted(merged)]
 
@@ -1455,10 +1867,14 @@ def _packet_context(
             "pathology_profiles": profiles,
             "source_index": _source_index(documents, review_source_ids),
         }
-    documents = _all_documents(results)
+    documents = _canonicalize_documents(
+        run_root, _all_documents(results), verify_titles=False
+    )
     return {
         "candidates": _canonical_candidates(results),
         "reviews": _rows(results["candidate_review"]["records"], "reviews"),
+        "evidence_graph": graph,
+        "candidate_identity": results["candidate_identity"]["records"],
         "source_index": _source_index(documents),
     }
 
@@ -1521,6 +1937,8 @@ def _build_packet(
                 [
                     "Search and read freely, but return only documents that directly support a "
                     "submitted claim, counterclaim, identity decision, or limitation.",
+                    "Every returned document must include evidence_passages with at least one "
+                    "non-empty text and locator copied from inspectable source content.",
                     "Every returned document_id must be cited in this result through source_ids, "
                     "pathology_source_ids, or mechanism_source_ids; cited upstream documents do "
                     "not need to be returned again.",
@@ -2197,6 +2615,11 @@ def _advance_controller(
             )
         except SourceError as exc:
             raise ProgramError(str(exc)) from exc
+        result["records"]["documents"] = _canonicalize_documents(
+            root,
+            _rows(result["records"], "documents"),
+            verify_titles=False,
+        )
         _validate_source_result(result)
     elif stage == "evidence_graph":
         result = _build_graph_result(root, results)
@@ -2717,8 +3140,96 @@ def _validate_review_item(
             raise ProgramError(f"{label} needs a cited document retained by this review")
 
 
+def _assessment_source_uses(row: Mapping[str, Any]) -> set[tuple[str, str]]:
+    uses = {
+        (str(source_id), component)
+        for component in SCORE_COMPONENTS
+        for source_id in row["component_scores"][component]["source_ids"]
+    }
+    uses.update(
+        (str(source_id), "net_assessment")
+        for source_id in row["net_assessment"]["source_ids"]
+    )
+    for collection in ("aliases", "why_not"):
+        uses.update(
+            (str(source_id), f"{collection}[{index}]")
+            for index, entry in enumerate(row[collection])
+            for source_id in entry["source_ids"]
+        )
+    return uses
+
+
+def _validate_source_integrity(
+    value: Any,
+    *,
+    expected_uses: set[tuple[str, str]],
+    documents: Mapping[str, Mapping[str, Any]],
+    label: str,
+) -> None:
+    integrity = _validate_exact_object(value, {"checks"}, label)
+    checks = integrity["checks"]
+    if not isinstance(checks, list):
+        raise ProgramError(f"{label}.checks must be a list")
+    actual_uses: list[tuple[str, str]] = []
+    for index, check in enumerate(checks):
+        check_label = f"{label}.checks[{index}]"
+        check = _validate_exact_object(
+            check, {"source_id", "scope", "verdict", "finding"}, check_label
+        )
+        source_id = str(check["source_id"])
+        scope = str(check["scope"])
+        verdict = str(check["verdict"])
+        finding = str(check["finding"]).strip()
+        if verdict not in _SOURCE_CHECK_VERDICTS:
+            raise ProgramError(
+                f"{check_label}.verdict must be one of {sorted(_SOURCE_CHECK_VERDICTS)}"
+            )
+        if not finding:
+            raise ProgramError(f"{check_label}.finding must be non-empty")
+        if re.search(
+            r"\b(?:re-?verify|unverif(?:ied|iable)|needs? (?:independent )?verification|"
+            r"verify later|requires? verification|(?:cannot|could not|unable to) verify|"
+            r"verification (?:unavailable|pending))\b",
+            finding,
+            flags=re.IGNORECASE,
+        ):
+            raise ProgramError(
+                f"{check_label}.finding must decide the supplied source use now, not defer verification"
+            )
+        document = documents.get(source_id)
+        if document is None:
+            raise ProgramError(f"{check_label}.source_id is not in the retained corpus")
+        if not _document_has_inspectable_content(document):
+            raise ProgramError(
+                f"{check_label}.source_id has no inspectable content in the retained corpus"
+            )
+        actual_uses.append((source_id, scope))
+    if len(actual_uses) != len(set(actual_uses)):
+        raise ProgramError(f"{label}.checks contains duplicate source-use checks")
+    actual = set(actual_uses)
+    if actual != expected_uses:
+        raise ProgramError(
+            f"{label}.checks must cover every cited source use exactly once; "
+            f"missing={sorted(expected_uses - actual)}, unknown={sorted(actual - expected_uses)}"
+        )
+    publication_uses: dict[tuple[str, str], str] = {}
+    for source_id, scope in expected_uses:
+        canonical_id = str(
+            documents[source_id].get("canonical_publication_id") or source_id
+        )
+        key = (scope, canonical_id)
+        prior = publication_uses.setdefault(key, source_id)
+        if prior != source_id:
+            raise ProgramError(
+                f"{label}.checks cites publication {canonical_id} more than once in {scope} "
+                f"through identifier aliases {sorted({prior, source_id})}"
+            )
+
+
 def _validate_candidate_audit(
-    records: Mapping[str, Any], results: Mapping[str, Mapping[str, Any]]
+    records: Mapping[str, Any],
+    results: Mapping[str, Mapping[str, Any]],
+    source_index: Iterable[Mapping[str, Any]] | None = None,
 ) -> None:
     assessments = _contract_rows(records, "assessments", "candidate_id")
     exclusions = _contract_rows(records, "excluded_candidates", "candidate_id")
@@ -2731,7 +3242,9 @@ def _validate_candidate_audit(
         raise ProgramError(
             "assessments and excluded_candidates must partition every reviewed candidate exactly once"
         )
-    source_ids = {str(row["document_id"]) for row in _all_documents(results)}
+    corpus = source_index if source_index is not None else _all_documents(results)
+    documents = {str(row["document_id"]): row for row in corpus}
+    source_ids = set(documents)
     reviews = {
         str(row["candidate_id"]): row
         for row in _rows(results["candidate_review"]["records"], "reviews")
@@ -2743,19 +3256,6 @@ def _validate_candidate_audit(
             raise ProgramError(
                 f"{label} cannot assess a candidate with disqualifying prior-art status {prior_status}"
             )
-        integrity = _validate_exact_object(
-            row["source_integrity"],
-            {"status", "finding", "source_ids"},
-            f"{label}.source_integrity",
-        )
-        if integrity["status"] not in {"supported", "partly_supported"}:
-            raise ProgramError(
-                f"{label}.source_integrity.status must be supported or partly_supported"
-            )
-        if not str(integrity["finding"]).strip():
-            raise ProgramError(f"{label}.source_integrity.finding must be non-empty")
-        _references(integrity, "source_ids", source_ids, f"{label}.source_integrity")
-
         components = _validate_exact_object(
             row["component_scores"], set(SCORE_COMPONENTS), f"{label}.component_scores"
         )
@@ -2793,6 +3293,12 @@ def _validate_candidate_audit(
             text_field="finding",
             source_ids=source_ids,
         )
+        _validate_source_integrity(
+            row["source_integrity"],
+            expected_uses=_assessment_source_uses(row),
+            documents=documents,
+            label=f"{label}.source_integrity",
+        )
 
     expected_prior_reasons = {
         "established_use": "exact_disease_use",
@@ -2806,7 +3312,13 @@ def _validate_candidate_audit(
             )
         if not str(row["finding"]).strip():
             raise ProgramError(f"{label}.finding must be non-empty")
-        _references(row, "source_ids", source_ids, label)
+        exclusion_sources = _references(row, "source_ids", source_ids, label)
+        _validate_source_integrity(
+            row["source_integrity"],
+            expected_uses={(source_id, "exclusion") for source_id in exclusion_sources},
+            documents=documents,
+            label=f"{label}.source_integrity",
+        )
         prior_status = reviews[str(row["candidate_id"])]["prior_art"]["status"]
         expected_reason = expected_prior_reasons.get(prior_status)
         if expected_reason and row["reason_code"] != expected_reason:
@@ -2843,6 +3355,8 @@ def _validate_result(
         )
     if "notes" in result and not isinstance(result["notes"], list):
         raise ProgramError("Result notes must be a list when supplied")
+    if "documents" in expected_collections:
+        _validate_research_document_content(result["records"])
     secrets = _secret_paths(result)
     if secrets:
         raise ProgramError(f"Credentials must never be persisted in results: {secrets}")
@@ -2863,7 +3377,9 @@ def _validate_result(
         "candidate_evidence_review": lambda: _validate_review_item(
             result["records"], str(item_id), prior
         ),
-        "candidate_audit": lambda: _validate_candidate_audit(result["records"], prior),
+        "candidate_audit": lambda: _validate_candidate_audit(
+            result["records"], prior, packet["context"]["source_index"]
+        ),
     }
     validators[task]()
 
@@ -2879,6 +3395,8 @@ def submit(root: str | Path, result_path: str | Path) -> dict[str, Any]:
     packet = _build_packet(run_root, case, prior, task, item_id)
     result = _read_json(Path(result_path).expanduser().resolve())
     _validate_result(task, item_id, result, packet, prior)
+    if "documents" in STAGE_GUIDANCE[task]["collections"]:
+        _validate_bibliographic_documents(run_root, result["records"])
     destination = (
         _item_result_path(run_root, task, str(item_id))
         if item_id is not None
@@ -2957,34 +3475,20 @@ def _evidence_card_rows(
     for ranked_row in ranked_rows:
         candidate_id = str(ranked_row["candidate_id"])
         assessment = assessments[candidate_id]
-        aliases = sorted(
-            (
-                {
-                    "name": str(alias["name"]).strip(),
-                    "source_ids": sorted(set(map(str, alias["source_ids"]))),
-                }
-                for alias in assessment["aliases"]
-            ),
-            key=lambda alias: (
-                alias["name"].casefold(),
-                alias["name"],
-                alias["source_ids"],
-            ),
-        )
-        why_not = sorted(
-            (
-                {
-                    "finding": str(finding["finding"]).strip(),
-                    "source_ids": sorted(set(map(str, finding["source_ids"]))),
-                }
-                for finding in assessment["why_not"]
-            ),
-            key=lambda finding: (
-                finding["finding"].casefold(),
-                finding["finding"],
-                finding["source_ids"],
-            ),
-        )
+        aliases = [
+            {
+                "name": str(alias["name"]).strip(),
+                "source_ids": sorted(set(map(str, alias["source_ids"]))),
+            }
+            for alias in assessment["aliases"]
+        ]
+        why_not = [
+            {
+                "finding": str(finding["finding"]).strip(),
+                "source_ids": sorted(set(map(str, finding["source_ids"]))),
+            }
+            for finding in assessment["why_not"]
+        ]
         cards.append(
             {
                 "drug_id": candidate_id,
@@ -3009,6 +3513,7 @@ def _evidence_card_rows(
                     ))),
                 },
                 "why_not": why_not,
+                "source_integrity": assessment["source_integrity"],
             }
         )
     return cards
@@ -3020,6 +3525,21 @@ def _single_line(value: Any) -> str:
 
 def _reference_line(source_ids: Iterable[Any]) -> str:
     return "References: " + ", ".join(sorted(set(map(str, source_ids))))
+
+
+def _source_verification_summary(checks: Iterable[Mapping[str, Any]]) -> str:
+    counts = {verdict: 0 for verdict in _SOURCE_CHECK_VERDICTS}
+    total = 0
+    for check in checks:
+        verdict = str(check["verdict"])
+        counts[verdict] += 1
+        total += 1
+    details = ", ".join(
+        f"{counts[verdict]} {verdict.replace('_', ' ')}"
+        for verdict in ("supports", "partly_supports", "does_not_support", "contradicts")
+        if counts[verdict]
+    )
+    return f"{total} cited use{'s' if total != 1 else ''} checked ({details})"
 
 
 def _cards_bytes(cards: list[dict[str, Any]]) -> bytes:
@@ -3035,6 +3555,27 @@ def _cards_bytes(cards: list[dict[str, Any]]) -> bytes:
             )
             lines.append("")
         lines.extend([f"Score: {card['score']}/{MAX_SCORE}", ""])
+        lines.extend(
+            [
+                "Source verification: "
+                f"{_source_verification_summary(card['source_integrity']['checks'])}",
+                "",
+            ]
+        )
+        exceptions = [
+            check
+            for check in card["source_integrity"]["checks"]
+            if check["verdict"] != "supports"
+        ]
+        if exceptions:
+            lines.append("Citation-audit exceptions:")
+            lines.extend(
+                f"- {_single_line(check['source_id'])} in {_single_line(check['scope'])}: "
+                f"{str(check['verdict']).replace('_', ' ')} — "
+                f"{_single_line(check['finding'])}"
+                for check in exceptions
+            )
+            lines.append("")
         for component in SCORE_COMPONENTS:
             score = card["components"][component]
             lines.extend(
@@ -3117,6 +3658,7 @@ def _excluded_candidate_rows(
                 "graph_node_ids": sorted(set(map(str, candidate["graph_node_ids"]))),
                 "pathology_source_ids": sorted(set(map(str, candidate["pathology_source_ids"]))),
                 "mechanism_source_ids": sorted(set(map(str, candidate["mechanism_source_ids"]))),
+                "source_integrity": exclusion["source_integrity"],
             }
         )
     return rows
@@ -3136,7 +3678,12 @@ def _write_output_files(
     _write_once(outputs / "candidate_cards.md", _cards_bytes(card_rows))
     excluded_rows = _excluded_candidate_rows(results, candidates)
     _write_jsonl(outputs / "candidate_exclusions.jsonl", excluded_rows)
-    documents = sorted(_all_documents(results), key=lambda row: row["document_id"])
+    documents = sorted(
+        _canonicalize_documents(
+            run_root, _all_documents(results), verify_titles=False
+        ),
+        key=lambda row: row["document_id"],
+    )
     _write_jsonl(outputs / "citations.jsonl", documents)
     assertions = _rows(graph, "assertions")
     _write_json(

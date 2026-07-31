@@ -15,6 +15,18 @@ import program_core as core  # noqa: E402
 
 
 class DisMechNormalizationTest(unittest.TestCase):
+    def test_source_document_identity_conflict_is_not_silently_merged(self):
+        documents = {}
+        sources._add_document(
+            documents,
+            {"document_id": "PMID:1", "title": "First title", "source": "test"},
+        )
+        with self.assertRaisesRegex(sources.SourceError, "Conflicting source document metadata"):
+            sources._add_document(
+                documents,
+                {"document_id": "PMID:1", "title": "Different title", "source": "test"},
+            )
+
     def test_dismech_receipt_hashes_every_cached_source_artifact(self):
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory) / "sources" / "raw"
@@ -338,6 +350,15 @@ class ALSRegressionTest(unittest.TestCase):
             if row["source"] == "dismech"
         )
         self.assertNotIn("sentence_adjudication", dismech_receipt)
+
+    def test_monarch_documents_retain_inspectable_structured_content(self):
+        monarch_documents = [
+            row
+            for row in self.result["records"]["documents"]
+            if row.get("source") == "Monarch Initiative"
+        ]
+        self.assertTrue(monarch_documents)
+        self.assertTrue(all(core._document_has_inspectable_content(row) for row in monarch_documents))
 
     def test_sod1_label_survives_without_fallback_node(self):
         self.assertEqual(

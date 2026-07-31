@@ -196,7 +196,22 @@ def _add_document(index: dict[str, dict[str, Any]], row: dict[str, Any]) -> None
     if current is None:
         index[key] = row
         return
+    identity_fields = {"title", "year", "canonical_publication_id"}
     for field, value in row.items():
+        same_title = (
+            field == "title"
+            and re.sub(r"\W+", " ", str(current.get(field, "")).casefold()).strip()
+            == re.sub(r"\W+", " ", str(value).casefold()).strip()
+        )
+        if (
+            field in identity_fields
+            and field in current
+            and value not in (None, "", [])
+            and current[field] not in (None, "", [])
+            and current[field] != value
+            and not same_title
+        ):
+            raise SourceError(f"Conflicting source document metadata for {key}: {field}")
         if field not in current or current[field] in (None, "", []):
             current[field] = value
         elif isinstance(value, list) and isinstance(current[field], list):
@@ -275,6 +290,7 @@ def _monarch(
             "source": "Monarch Initiative",
             "citation": mondo_id,
             "url": f"https://monarchinitiative.org/{mondo_id}",
+            "structured_content": _compact_entity(entity),
         },
     )
     _add_node(
@@ -317,6 +333,18 @@ def _monarch(
                 "native_id": native_id,
                 "publications": association.get("publications") or [],
                 "supporting_text": association.get("supporting_text"),
+                "structured_content": {
+                    "category": category,
+                    "subject_id": subject,
+                    "subject_label": association.get("subject_label"),
+                    "predicate": predicate,
+                    "object_id": object_id,
+                    "object_label": association.get("object_label"),
+                    "primary_knowledge_source": association.get(
+                        "primary_knowledge_source"
+                    ),
+                    "evidence": association.get("has_evidence") or [],
+                },
             },
         )
         for side, node_id, node_category in (
