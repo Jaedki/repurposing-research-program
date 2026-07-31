@@ -17,7 +17,10 @@ from repurposing_program import (  # noqa: E402
     evidence,
     graph,
     identity,
+    orchestration,
+    packets,
     pathology,
+    run_state,
     storage,
     validation,
 )
@@ -105,7 +108,10 @@ class StageTwoBoundaryTest(unittest.TestCase):
             evidence,
             graph,
             identity,
+            orchestration,
+            packets,
             pathology,
+            run_state,
             storage,
             validation,
             audit,
@@ -217,6 +223,54 @@ class StageFourBoundaryTest(unittest.TestCase):
             helper = getattr(audit, name)
             self.assertIs(getattr(core, name), helper)
             self.assertEqual(helper.__module__, "repurposing_program.audit")
+
+
+class StageFiveBoundaryTest(unittest.TestCase):
+    def test_run_state_has_one_owner(self):
+        for name in (
+            "_case",
+            "_first_missing",
+            "_item_ids",
+            "_item_results",
+            "_load_results",
+            "_program_status",
+            "_stop_reason",
+            "_verify_outputs",
+            "graph_context",
+            "initialize",
+            "status",
+        ):
+            helper = getattr(run_state, name)
+            self.assertIs(getattr(core, name), helper)
+            self.assertEqual(helper.__module__, "repurposing_program.run_state")
+
+    def test_packet_handling_has_one_owner(self):
+        for name in (
+            "_build_packet",
+            "_packet_context",
+            "_record_contract",
+            "_validate_packet",
+        ):
+            helper = getattr(packets, name)
+            self.assertIs(getattr(core, name), helper)
+            self.assertEqual(helper.__module__, "repurposing_program.packets")
+
+    def test_workflow_orchestration_has_one_owner(self):
+        for name in (
+            "_advance_controller",
+            "_build_graph_result",
+            "_build_review_result",
+            "_build_seed_result",
+            "_item_cited_documents",
+            "_item_collection",
+            "_item_gaps",
+            "_validate_result",
+            "next_action",
+            "submit",
+        ):
+            helper = getattr(orchestration, name)
+            self.assertIs(getattr(core, name), helper)
+            self.assertEqual(helper.__module__, "repurposing_program.orchestration")
 
 
 if __name__ == "__main__":

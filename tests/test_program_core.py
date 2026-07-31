@@ -14,6 +14,7 @@ from repurposing_program import (  # noqa: E402
     bibliography,
     candidates as candidate_rules,
     identity,
+    orchestration,
 )
 
 
@@ -409,8 +410,12 @@ class SourceAdjudicationWorkflowTest(unittest.TestCase):
         }
         with (
             tempfile.TemporaryDirectory() as directory,
-            patch.object(core, "screen_pathology_sources", return_value=screening),
-            patch.object(core, "fetch_pathology_sources", side_effect=source_result) as fetch,
+            patch.object(
+                orchestration, "screen_pathology_sources", return_value=screening
+            ),
+            patch.object(
+                orchestration, "fetch_pathology_sources", side_effect=source_result
+            ) as fetch,
         ):
             root = Path(directory)
             core.initialize(root, "Disease", mondo="MONDO:1")
@@ -482,10 +487,10 @@ class WorkflowTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.screening_patch = patch.object(
-            core, "screen_pathology_sources", source_screening_result
+            orchestration, "screen_pathology_sources", source_screening_result
         )
         self.screening_patch.start()
-        self.patch = patch.object(core, "fetch_pathology_sources", source_result)
+        self.patch = patch.object(orchestration, "fetch_pathology_sources", source_result)
         self.patch.start()
         self.unichem_patch = patch.object(identity, "_post_unichem", unichem_result)
         self.unichem_patch.start()

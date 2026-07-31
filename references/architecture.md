@@ -64,8 +64,8 @@ Final evidence cards contain the canonical candidate ID, the raw score out of 80
 
 ## Module boundaries
 
-The programme remains a linear modular monolith. `program_core.py` currently assembles the
-controller while extraction proceeds, but extracted responsibilities have one owner:
+The programme remains a linear modular monolith. `program_core.py` is the stable public entry
+point while extracted responsibilities have one owner:
 
 - `repurposing_program.contracts` owns static workflow schemas, scientific rules, rubrics, and
   policies;
@@ -87,9 +87,17 @@ controller while extraction proceeds, but extracted responsibilities have one ow
 - `repurposing_program.candidates` owns review-batch partitioning and candidate seed/dossier
   validation, including pathology-versus-mechanism citation separation;
 - `repurposing_program.audit` owns closed-corpus audit partition, component-score, exact source-use,
-  publication-alias, and bounded-exclusion validation.
+  publication-alias, and bounded-exclusion validation;
+- `repurposing_program.run_state` owns case identity and initialization, accepted stage and item
+  loading, derived stop/status state, output-manifest verification, and read-only graph context;
+- `repurposing_program.packets` owns stage-specific context projection, worker result-contract
+  construction, packet validation, content addressing, and packet persistence;
+- `repurposing_program.orchestration` owns deterministic controller advancement, item-result
+  aggregation, controller-built stage results, worker-result validation, and immutable submission.
 
 These extracted modules never import `program_core`. Higher domain modules may depend on evidence,
 validation, and foundation modules; dependency must not point back from an extracted module to
-orchestration. `program_core` retains run-folder access and item-result aggregation, then delegates
-deterministic graph, identity, candidate, and audit decisions to their owning modules.
+orchestration. Orchestration depends on run state and packets, which remain independent of it.
+`program_core` re-exports the controller lifecycle as the stable API and retains only final output
+projection, rendering, and build ownership. That output-generation boundary remains Stage 6 and is
+not part of the Stage 5 extraction.
