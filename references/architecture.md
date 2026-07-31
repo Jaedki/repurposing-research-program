@@ -61,3 +61,55 @@ Final evidence cards contain the canonical candidate ID, the raw score out of 80
 - `stopped`: a scientifically necessary collection is empty, with an explicit reason.
 - `ready_to_build`: all barriers passed and at least one candidate received a scored audit assessment.
 - `complete`: outputs exist and match the manifest hashes.
+
+## Module boundaries
+
+The programme remains a linear modular monolith. `program_core.py` is the stable public entry
+point while extracted responsibilities have one owner:
+
+- `repurposing_program.contracts` owns static workflow schemas, scientific rules, rubrics, and
+  policies;
+- `repurposing_program.errors` owns `ProgramError`;
+- `repurposing_program.storage` owns canonical serialization, hashing, immutable writes, and run
+  artifact paths;
+- `repurposing_program.evidence` owns evidence-record access, document-content checks, citation
+  traversal, source projection, and deterministic evidence merging;
+- `repurposing_program.bibliography` owns publication-ID normalization, cached metadata transport,
+  canonical publication projection, and bibliographic validation;
+- `repurposing_program.validation` owns shared record-schema, reference, secret, and document-ID
+  validation primitives;
+- `repurposing_program.pathology` owns treatment-field rejection, curation projection, pathology
+  source/adjudication validation, and researched-profile validation;
+- `repurposing_program.graph` owns deterministic assertion merging, frozen-graph assembly, graph
+  indexing, support lookup, and bounded node-context projection;
+- `repurposing_program.identity` owns UniChem transport/caching, exact-identity grouping, identity
+  review options, canonical candidate assembly, and identity-result validation;
+- `repurposing_program.candidates` owns review-batch partitioning and candidate seed/dossier
+  validation, including pathology-versus-mechanism citation separation;
+- `repurposing_program.audit` owns closed-corpus audit partition, component-score, exact source-use,
+  publication-alias, and bounded-exclusion validation;
+- `repurposing_program.ranking` owns raw-score calculation, deterministic assessment ordering,
+  dense ranks, and ranked-row projection;
+- `repurposing_program.evidence_cards` owns final evidence-card projection and deterministic
+  Markdown rendering;
+- `repurposing_program.candidate_exports` owns candidate provenance and audited-exclusion output
+  projections;
+- `repurposing_program.manifests` owns artifact metadata and final manifest construction;
+- `repurposing_program.run_state` owns case identity and initialization, accepted stage and item
+  loading, derived stop/status state, output-manifest verification, and read-only graph context;
+- `repurposing_program.packets` owns stage-specific context projection, worker result-contract
+  construction, packet validation, content addressing, and packet persistence;
+- `repurposing_program.orchestration` owns deterministic controller advancement, item-result
+  aggregation, controller-built stage results, worker-result validation, and immutable submission;
+- `repurposing_program.outputs` owns final CSV, JSON, JSONL, Markdown, graph, citation, and summary
+  export plus the public output-build operation.
+
+These extracted modules never import `program_core`. Higher domain modules may depend on evidence,
+validation, and foundation modules; dependency must not point back from an extracted module to
+orchestration. Orchestration depends on run state and packets, which remain independent of it.
+The output modules form a terminal dependency branch: domain, validation, packet, orchestration,
+and run-state modules do not import them; focused output projections do not import run state,
+packets, orchestration, or the output coordinator. `outputs` alone coordinates read-only final
+state with those projections and persistence. `program_core` contains no implementation logic and
+re-exports only the unchanged explicit public API: programme contracts, controller lifecycle, and
+the output build operation.
