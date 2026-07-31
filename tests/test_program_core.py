@@ -10,7 +10,11 @@ from urllib.error import HTTPError
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import program_core as core  # noqa: E402
-from repurposing_program import bibliography  # noqa: E402
+from repurposing_program import (  # noqa: E402
+    bibliography,
+    candidates as candidate_rules,
+    identity,
+)
 
 
 PROGRAM_BASELINE = json.loads(
@@ -129,7 +133,7 @@ class UniChemTransportTest(unittest.TestCase):
             "compounds": [],
             "response": "Not found",
         }).encode()
-        with patch.object(core, "urlopen", return_value=response) as request:
+        with patch.object(identity, "urlopen", return_value=response) as request:
             result = core._post_unichem(
                 "compounds",
                 {"compound": "CHEMBL1201607", "type": "sourceID", "sourceID": 1},
@@ -145,7 +149,7 @@ class UniChemTransportTest(unittest.TestCase):
             "response": "Error",
             "message": "The query could not be processed",
         }).encode()
-        with patch.object(core, "urlopen", return_value=response) as request:
+        with patch.object(identity, "urlopen", return_value=response) as request:
             with self.assertRaisesRegex(
                 core.ProgramError, "UniChem compounds returned an invalid response"
             ):
@@ -164,8 +168,8 @@ class UniChemTransportTest(unittest.TestCase):
         }).encode()
         error = HTTPError("https://example.org", 500, "server error", {}, None)
         with (
-            patch.object(core, "urlopen", side_effect=[error, response]) as request,
-            patch.object(core.time, "sleep") as pause,
+            patch.object(identity, "urlopen", side_effect=[error, response]) as request,
+            patch.object(identity.time, "sleep") as pause,
         ):
             result = core._post_unichem(
                 "compounds", {"compound": "4021", "type": "sourceID", "sourceID": 22}
@@ -483,7 +487,7 @@ class WorkflowTest(unittest.TestCase):
         self.screening_patch.start()
         self.patch = patch.object(core, "fetch_pathology_sources", source_result)
         self.patch.start()
-        self.unichem_patch = patch.object(core, "_post_unichem", unichem_result)
+        self.unichem_patch = patch.object(identity, "_post_unichem", unichem_result)
         self.unichem_patch.start()
         self.bibliographic_patch = patch.object(
             bibliography, "_resolve_bibliographic_metadata", bibliographic_metadata
@@ -1424,7 +1428,7 @@ class WorkflowTest(unittest.TestCase):
                 "notFound": [],
             }
 
-        with patch.object(core, "_post_unichem", response):
+        with patch.object(identity, "_post_unichem", response):
             enriched, receipts = core._resolve_seed_identities(self.root, rows)
         records = {"candidates": enriched}
         groups = core._exact_identity_groups(records)
@@ -1655,10 +1659,10 @@ class WorkflowTest(unittest.TestCase):
         results = {
             "pathology_curation": {"records": {"concepts": concepts}},
         }
-        with patch.object(core, "_canonical_candidates", return_value=candidates):
+        with patch.object(candidate_rules, "_canonical_candidates", return_value=candidates):
             first = core._review_batches(results)
         with patch.object(
-            core, "_canonical_candidates", return_value=list(reversed(candidates))
+            candidate_rules, "_canonical_candidates", return_value=list(reversed(candidates))
         ):
             second = core._review_batches(results)
 
@@ -1679,7 +1683,7 @@ class WorkflowTest(unittest.TestCase):
             "reviews": [self.review("DRUG-A"), self.review("DRUG-B")],
         }
         batch = [{"concept_id": "NODE:A", "candidate_ids": ["DRUG-A", "DRUG-B"]}]
-        with patch.object(core, "_review_batches", return_value=batch):
+        with patch.object(candidate_rules, "_review_batches", return_value=batch):
             core._validate_review_item(records, "NODE:A", {})
             records["reviews"][0]["aliases"] = [{"name": "Drug salt", "source_ids": []}]
             with self.assertRaisesRegex(core.ProgramError, "must be a non-empty list"):

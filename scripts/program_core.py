@@ -6,13 +6,9 @@ from __future__ import annotations
 import csv
 import io
 import json
-import re
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 from pathology_sources import (
     SourceError,
@@ -20,6 +16,13 @@ from pathology_sources import (
     screen_pathology_sources,
 )
 
+from repurposing_program.audit import (
+    _accepted_ids,
+    _assessment_source_uses,
+    _component_score,
+    _validate_candidate_audit,
+    _validate_source_integrity,
+)
 from repurposing_program.bibliography import (
     _batches,
     _bibliographic_get,
@@ -32,6 +35,13 @@ from repurposing_program.bibliography import (
     _resolve_bibliographic_metadata,
     _summary_metadata,
     _validate_bibliographic_documents,
+)
+from repurposing_program.candidates import (
+    _review_batches,
+    _validate_cited_entries,
+    _validate_review_item,
+    _validate_seed_item,
+    _validate_string_list,
 )
 from repurposing_program.contracts import (
     AUDIT_EXCLUSION_POLICY,
@@ -87,6 +97,21 @@ from repurposing_program.graph import (
     _graph_support_ids,
     _merge_assertions,
 )
+from repurposing_program.identity import (
+    _candidate_queries,
+    _canonical_candidates,
+    _empty_identity_result,
+    _exact_identity_groups,
+    _identity_candidate_options,
+    _identity_queue,
+    _merge_candidate_rows,
+    _post_unichem,
+    _query_key,
+    _resolve_seed_identities,
+    _unichem_request,
+    _unichem_requests,
+    _validate_candidate_identity,
+)
 from repurposing_program.pathology import (
     _canonical_source_records,
     _compact_disease_context,
@@ -120,6 +145,7 @@ from repurposing_program.validation import (
     _required,
     _secret_paths,
     _validate_documents,
+    _validate_exact_object,
 )
 
 
@@ -718,352 +744,6 @@ def _build_graph_result(
     )
 
 
-def _review_batches(
-    results: Mapping[str, Mapping[str, Any]],
-) -> list[dict[str, Any]]:
-    concept_ids = {str(row["concept_id"]) for row in _research_concepts(results)}
-    grouped: dict[str, list[str]] = {concept_id: [] for concept_id in concept_ids}
-    candidates = _canonical_candidates(results)
-    candidate_ids = _ids(candidates, "candidate_id", "candidates")
-    for candidate in candidates:
-        candidate_id = str(candidate["candidate_id"])
-        origin_ids = sorted(set(map(str, candidate.get("origin_concept_ids", []))))
-        unknown = set(origin_ids) - concept_ids
-        if not origin_ids or unknown:
-            raise ProgramError(
-                f"Candidate {candidate_id} has invalid origin_concept_ids: {sorted(unknown)}"
-            )
-        node_ids = set(map(str, candidate.get("graph_node_ids", [])))
-        primary = min(origin_ids, key=lambda value: (value not in node_ids, value))
-        if primary not in node_ids:
-            raise ProgramError(f"Candidate {candidate_id} has no node in an origin concept")
-        grouped[primary].append(candidate_id)
-
-    batches = [
-        {"concept_id": concept_id, "candidate_ids": sorted(ids)}
-        for concept_id, ids in sorted(grouped.items())
-        if ids
-    ]
-    assigned = [candidate_id for batch in batches for candidate_id in batch["candidate_ids"]]
-    if len(assigned) != len(set(assigned)) or set(assigned) != candidate_ids:
-        raise ProgramError("Review batches must partition every candidate exactly once")
-    return batches
-
-
-def _candidate_queries(row: Mapping[str, Any]) -> list[dict[str, Any]]:
-    queries: set[tuple[str, int | None, str]] = set()
-    identifiers = row.get("identifiers", {})
-    if isinstance(identifiers, Mapping):
-        for key, raw_value in identifiers.items():
-            values = raw_value if isinstance(raw_value, list) else [raw_value]
-            for value in values:
-                compound = str(value).strip()
-                if key in {"inchi", "inchikey"} and compound:
-                    queries.add((key, None, compound))
-                elif key in _UNICHEM_SOURCE_IDS:
-                    if compound:
-                        queries.add(("sourceID", _UNICHEM_SOURCE_IDS[key], compound))
-    return [
-        {
-            "compound": compound,
-            "type": query_type,
-            **({"sourceID": source_id} if source_id is not None else {}),
-        }
-        for query_type, source_id, compound in sorted(queries, key=str)
-    ]
-
-
-def _post_unichem(endpoint: str, body: Mapping[str, Any]) -> dict[str, Any]:
-    payload = _canonical_bytes(body)
-    request = Request(
-        f"{_UNICHEM_API}/{endpoint}",
-        data=payload,
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "User-Agent": "repurposing-research-program/4",
-        },
-        method="POST",
-    )
-    for attempt in range(3):
-        try:
-            with urlopen(request, timeout=30) as response:
-                result = json.loads(response.read().decode("utf-8-sig"))
-        except HTTPError as exc:
-            if attempt == 2 or (exc.code != 429 and not 500 <= exc.code < 600):
-                raise ProgramError(f"UniChem {endpoint} request failed: {exc}") from exc
-        except (URLError, TimeoutError) as exc:
-            if attempt == 2:
-                raise ProgramError(f"UniChem {endpoint} request failed: {exc}") from exc
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ProgramError(f"UniChem {endpoint} returned invalid JSON: {exc}") from exc
-        else:
-            explicit_no_result = (
-                endpoint == "compounds"
-                and isinstance(result, dict)
-                and result.get("response") == "Not found"
-                and result.get("compounds") == []
-            )
-            if (
-                not isinstance(result, dict)
-                or result.get("response") != "Success"
-            ) and not explicit_no_result:
-                raise ProgramError(f"UniChem {endpoint} returned an invalid response")
-            return result
-        time.sleep(2**attempt)
-    raise AssertionError("unreachable")
-
-
-def _unichem_request(
-    root: Path, endpoint: str, body: Mapping[str, Any]
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    token = _sha256(_canonical_bytes(body))[:24]
-    path = root / "sources" / "raw" / "unichem" / f"{endpoint}-{token}.json"
-    if path.exists():
-        response = _read_json(path)
-    else:
-        response = _post_unichem(endpoint, body)
-        _write_json(path, response)
-    return response, {
-        "source": "UniChem",
-        "api": _UNICHEM_API,
-        "endpoint": endpoint,
-        "query": dict(body),
-        "raw_path": path.relative_to(root).as_posix(),
-        "sha256": _sha256(path.read_bytes()),
-    }
-
-
-def _unichem_requests(
-    root: Path, endpoint: str, bodies: Iterable[Mapping[str, Any]]
-) -> dict[bytes, tuple[dict[str, Any], dict[str, Any]]]:
-    unique = {_canonical_bytes(body): dict(body) for body in bodies}
-    return {
-        key: _unichem_request(root, endpoint, body) for key, body in unique.items()
-    }
-
-
-def _query_key(query: Mapping[str, Any]) -> tuple[int, str] | None:
-    if query.get("type") != "sourceID":
-        return None
-    return int(query["sourceID"]), str(query["compound"]).casefold()
-
-
-def _resolve_seed_identities(
-    root: Path, candidates: list[dict[str, Any]]
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    queries_by_seed = {
-        str(row["seed_id"]): _candidate_queries(row) for row in candidates
-    }
-    exact = _unichem_requests(
-        root, "compounds", (query for queries in queries_by_seed.values() for query in queries)
-    )
-    receipts = [value[1] for _, value in sorted(exact.items())]
-    preliminary: dict[str, dict[str, Any]] = {}
-    query_seeds: dict[tuple[int, str], set[str]] = {}
-    for seed_id, queries in queries_by_seed.items():
-        found: list[dict[str, Any]] = []
-        missed = False
-        for query in queries:
-            response = exact[_canonical_bytes(query)][0]
-            compounds = [row for row in response.get("compounds", []) if isinstance(row, dict)]
-            found.extend(compounds)
-            missed = missed or not compounds
-            key = _query_key(query)
-            if key:
-                query_seeds.setdefault(key, set()).add(seed_id)
-        ucis = {str(row.get("uci")) for row in found if row.get("uci") is not None}
-        if not queries:
-            preliminary[seed_id] = {"status": "not_queryable", "queries": []}
-        elif not ucis:
-            preliminary[seed_id] = {"status": "no_result", "queries": queries}
-        elif len(ucis) != 1 or missed:
-            preliminary[seed_id] = {
-                "status": "conflicting_or_partial_result",
-                "queries": queries,
-                "ucis": sorted(ucis),
-            }
-        else:
-            uci = next(iter(ucis))
-            compound = next(row for row in found if str(row.get("uci")) == uci)
-            preliminary[seed_id] = {
-                "status": "exact",
-                "queries": queries,
-                "uci": uci,
-                "standard_inchikey": compound.get("standardInchiKey"),
-            }
-
-    exact_seeds = {
-        seed_id: row for seed_id, row in preliminary.items() if row["status"] == "exact"
-    }
-    connectivity_bodies = [
-        {"compound": uci, "type": "uci", "searchComponents": True}
-        for uci in sorted({row["uci"] for row in exact_seeds.values()})
-    ]
-    connectivity = _unichem_requests(root, "connectivity", connectivity_bodies)
-    receipts.extend(value[1] for _, value in sorted(connectivity.items()))
-    related: dict[str, set[str]] = {seed_id: set() for seed_id in exact_seeds}
-    for body in connectivity_bodies:
-        uci = str(body["compound"])
-        response = connectivity[_canonical_bytes(body)][0]
-        own = {seed_id for seed_id, row in exact_seeds.items() if row["uci"] == uci}
-        for source in response.get("sources", []):
-            key = (int(source.get("id", -1)), str(source.get("compoundId", "")).casefold())
-            for other in query_seeds.get(key, set()) - own:
-                if other in exact_seeds and exact_seeds[other]["uci"] != uci:
-                    for seed_id in own:
-                        related[seed_id].add(other)
-                        related[other].add(seed_id)
-    by_connectivity: dict[str, set[str]] = {}
-    for seed_id, row in exact_seeds.items():
-        inchikey = str(row.get("standard_inchikey") or "")
-        if len(inchikey) >= 14:
-            by_connectivity.setdefault(inchikey[:14], set()).add(seed_id)
-    for seed_ids in by_connectivity.values():
-        ucis = {exact_seeds[seed_id]["uci"] for seed_id in seed_ids}
-        if len(ucis) > 1:
-            for seed_id in seed_ids:
-                related[seed_id].update(seed_ids - {seed_id})
-
-    for seed_id, seed_related in related.items():
-        if seed_related:
-            preliminary[seed_id]["status"] = "connectivity_match"
-            preliminary[seed_id]["related_seed_ids"] = sorted(seed_related)
-    enriched = [
-        {**row, "identity_resolution": preliminary[str(row["seed_id"])]}
-        for row in candidates
-    ]
-    return enriched, sorted(receipts, key=lambda row: row["raw_path"])
-
-
-def _identity_queue(records: Mapping[str, Any]) -> list[dict[str, Any]]:
-    return [
-        row
-        for row in _rows(records, "candidates")
-        if row.get("identity_resolution", {}).get("status") != "exact"
-    ]
-
-
-def _exact_identity_groups(records: Mapping[str, Any]) -> dict[str, list[str]]:
-    groups: dict[str, list[str]] = {}
-    for seed in _rows(records, "candidates"):
-        resolution = seed.get("identity_resolution", {})
-        if resolution.get("uci") is None:
-            continue
-        candidate_id = f"UNICHEM:{resolution['uci']}"
-        groups.setdefault(candidate_id, []).append(str(seed["seed_id"]))
-    return {candidate_id: sorted(groups[candidate_id]) for candidate_id in sorted(groups)}
-
-
-def _identity_candidate_options(records: Mapping[str, Any]) -> list[dict[str, Any]]:
-    seeds = {str(row["seed_id"]): row for row in _rows(records, "candidates")}
-    queued_ids = {str(row["seed_id"]) for row in _identity_queue(records)}
-    options: list[dict[str, Any]] = []
-    for candidate_id, member_ids in _exact_identity_groups(records).items():
-        rows = [seeds[seed_id] for seed_id in member_ids]
-        queued_block = bool(set(member_ids) & queued_ids)
-        options.append({
-            "candidate_id": candidate_id,
-            "option_type": (
-                "queued_exact_block" if queued_block else "existing_resolved_candidate"
-            ),
-            "candidate_names": sorted(
-                {str(row["name"]) for row in rows},
-                key=lambda value: (value.casefold(), value),
-            ),
-            "asserted_candidate_ids": sorted({
-                str(row["candidate_id"]) for row in rows
-            }),
-            "required_member_seed_ids": member_ids if queued_block else [],
-        })
-    return options
-
-
-def _merge_candidate_rows(
-    rows: list[dict[str, Any]], candidate_id: str, identity: Mapping[str, Any]
-) -> dict[str, Any]:
-    rows = sorted(
-        {str(row["seed_id"]): row for row in rows}.values(),
-        key=lambda row: str(row["seed_id"]),
-    )
-    return {
-        "candidate_id": candidate_id,
-        "name": str(identity["preferred_name"]),
-        "identity": dict(identity),
-        "mechanism_hypothesis": _merge_text(*(row["mechanism_hypothesis"] for row in rows)),
-        "graph_node_ids": sorted({str(value) for row in rows for value in row["graph_node_ids"]}),
-        "pathology_source_ids": sorted({
-            str(value) for row in rows for value in row["pathology_source_ids"]
-        }),
-        "mechanism_source_ids": sorted({
-            str(value) for row in rows for value in row["mechanism_source_ids"]
-        }),
-        "origin_concept_ids": sorted({
-            str(value) for row in rows for value in row["origin_concept_ids"]
-        }),
-        "member_seed_ids": [str(row["seed_id"]) for row in rows],
-        "asserted_candidate_ids": sorted({str(row["candidate_id"]) for row in rows}),
-    }
-
-
-def _canonical_candidates(
-    results: Mapping[str, Mapping[str, Any]],
-    *,
-    reviewed: bool = True,
-) -> list[dict[str, Any]]:
-    seed_records = results["candidate_seed_generation"]["records"]
-    seeds = {str(row["seed_id"]): row for row in _rows(seed_records, "candidates")}
-    queued = {str(row["seed_id"]) for row in _identity_queue(seed_records)}
-    exact_groups = _exact_identity_groups(seed_records)
-    candidates: dict[str, dict[str, Any]] = {}
-    for candidate_id, member_ids in exact_groups.items():
-        member_ids = set(member_ids)
-        if member_ids & queued:
-            continue
-        rows = [seeds[seed_id] for seed_id in sorted(member_ids)]
-        preferred_name = min(
-            (str(row["name"]) for row in rows),
-            key=lambda value: (value.casefold(), value),
-        )
-        identity = {
-            "status": "resolved",
-            "preferred_name": preferred_name,
-            "identifiers": {"unichem_uci": candidate_id.split(":", 1)[1]},
-        }
-        candidates[candidate_id] = _merge_candidate_rows(rows, candidate_id, identity)
-    if not reviewed:
-        return [candidates[key] for key in sorted(candidates)]
-
-    identity_result = results.get("candidate_identity", {"records": {"identity_groups": []}})
-    for group in _rows(identity_result["records"], "identity_groups"):
-        rows = [seeds[str(seed_id)] for seed_id in group["member_seed_ids"]]
-        target = group.get("canonical_candidate_id")
-        if target:
-            exact = exact_groups[str(target)]
-            rows.extend(seeds[seed_id] for seed_id in exact)
-            preferred_name = min(
-                (str(row["name"]) for row in rows),
-                key=lambda value: (value.casefold(), value),
-            )
-            identity = {
-                "status": "resolved",
-                "preferred_name": preferred_name,
-                "identifiers": {"unichem_uci": str(target).split(":", 1)[1]},
-                "source_ids": sorted(set(map(str, group["source_ids"]))),
-            }
-            candidate_id = str(target)
-        else:
-            candidate_id = _stable_id("CANDIDATE", sorted(map(str, group["member_seed_ids"])))
-            identity = {
-                "status": group["status"],
-                "preferred_name": group["preferred_name"],
-                "identifiers": group["identifiers"],
-                "source_ids": sorted(set(map(str, group["source_ids"]))),
-            }
-        candidates[candidate_id] = _merge_candidate_rows(rows, candidate_id, identity)
-    return [candidates[key] for key in sorted(candidates)]
-
-
 def _build_seed_result(
     root: Path, results: Mapping[str, Mapping[str, Any]]
 ) -> dict[str, Any]:
@@ -1120,18 +800,6 @@ def _build_seed_result(
             f"resolved {len(_exact_identity_groups(records))} exact identity group(s) and queued "
             f"{queued_count} seed(s) for identity review."
         ],
-    }
-
-
-def _empty_identity_result(results: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
-    if _identity_queue(results["candidate_seed_generation"]["records"]):
-        raise ProgramError("Candidate identity review is required before controller advancement")
-    return {
-        "stage": "candidate_identity",
-        "status": "complete",
-        "records": {"documents": [], "identity_groups": []},
-        "gaps": [],
-        "notes": ["Every candidate was resolved by exact UniChem identity."],
     }
 
 
@@ -1231,439 +899,6 @@ def _advance_controller(
     else:
         raise ProgramError(f"No controller action exists for stage: {stage}")
     _write_json(_result_path(root, stage), result)
-
-
-def _validate_seed_item(
-    records: Mapping[str, Any], item_id: str, results: Mapping[str, Mapping[str, Any]]
-) -> None:
-    documents = _validate_documents(records, canonical_ids=True)
-    candidates = _contract_rows(records, "candidates", "candidate_id")
-    _contract_rows(records, "exclusions")
-    graph = results["evidence_graph"]["records"]
-    concept = _find(_research_concepts(results), "concept_id", item_id)
-    concept_id = str(concept["concept_id"])
-    support_by_node = _graph_support_ids(graph)
-    allowed_node_ids = set(support_by_node)
-    pathology_source_ids = _ids(_rows(graph, "documents"), "document_id", "documents")
-    new_mechanism_source_ids = {str(row["document_id"]) for row in documents}
-    mechanism_source_ids = {
-        *pathology_source_ids,
-        *new_mechanism_source_ids,
-    }
-    for index, row in enumerate(candidates):
-        label = f"candidates[{index}]"
-        _required(
-            row,
-            ("candidate_id", "name", "mechanism_hypothesis"),
-            label,
-        )
-        if str(row["name"]).strip().casefold() in _COMPARATORS:
-            raise ProgramError(f"{label} is a comparator, not a drug candidate")
-        graph_refs = _references(row, "graph_node_ids", allowed_node_ids, label)
-        if concept_id not in graph_refs:
-            raise ProgramError(f"{label}.graph_node_ids must include the focal item concept")
-        pathology_refs = _references(row, "pathology_source_ids", pathology_source_ids, label)
-        unsupported = sorted(
-            node_id
-            for node_id in graph_refs
-            if not pathology_refs & support_by_node[node_id]
-        )
-        if unsupported:
-            raise ProgramError(
-                f"{label}.pathology_source_ids do not support graph nodes: {unsupported}"
-            )
-        mechanism_refs = _references(row, "mechanism_source_ids", mechanism_source_ids, label)
-        if not mechanism_refs & new_mechanism_source_ids:
-            raise ProgramError(f"{label}.mechanism_source_ids needs a retained drug-MOA source")
-
-
-def _validate_candidate_identity(
-    records: Mapping[str, Any], results: Mapping[str, Mapping[str, Any]]
-) -> None:
-    documents = _validate_documents(records, canonical_ids=True)
-    groups = _contract_rows(records, "identity_groups")
-    seed_records = results["candidate_seed_generation"]["records"]
-    queue_ids = {str(row["seed_id"]) for row in _identity_queue(seed_records)}
-    covered: list[str] = []
-    targets: list[str] = []
-    exact_blocks = {
-        candidate_id: set(member_ids)
-        for candidate_id, member_ids in _exact_identity_groups(seed_records).items()
-    }
-    candidate_options = {
-        str(row["candidate_id"]): row
-        for row in _identity_candidate_options(seed_records)
-    }
-    document_ids = {str(row["document_id"]) for row in documents}
-    for index, group in enumerate(groups):
-        label = f"identity_groups[{index}]"
-        member_ids = group.get("member_seed_ids")
-        if not isinstance(member_ids, list) or not member_ids:
-            raise ProgramError(f"{label}.member_seed_ids must be a non-empty list")
-        members = [str(value) for value in member_ids]
-        if len(members) != len(set(members)) or not set(members) <= queue_ids:
-            raise ProgramError(f"{label}.member_seed_ids must be unique queued seed IDs")
-        member_set = set(members)
-        member_exact_ids = {
-            candidate_id
-            for candidate_id, block in exact_blocks.items()
-            if member_set.intersection(block)
-        }
-        if any(member_set & block and not block <= member_set for block in exact_blocks.values()):
-            raise ProgramError(f"{label} cannot split an exact UniChem identity group")
-        covered.extend(members)
-        if group.get("status") not in {"resolved", "unresolved", "conflicting"}:
-            raise ProgramError(f"{label}.status must be resolved, unresolved, or conflicting")
-        _required(group, ("preferred_name", "reason"), label)
-        if not isinstance(group.get("identifiers"), dict):
-            raise ProgramError(f"{label}.identifiers must be an object")
-        target = group.get("canonical_candidate_id")
-        if target is not None:
-            target = str(target)
-            option = candidate_options.get(target)
-            valid = (
-                option is not None
-                and group["status"] == "resolved"
-                and member_exact_ids <= {target}
-            )
-            if valid and option["required_member_seed_ids"]:
-                valid = set(option["required_member_seed_ids"]) <= member_set
-            if not valid:
-                raise ProgramError(
-                    f"{label}.canonical_candidate_id must be null or copied exactly from "
-                    "context.canonical_candidate_options for a resolved group containing any "
-                    "required queued block and no different exact UCI"
-                )
-            targets.append(target)
-        elif group["status"] == "resolved" and len(member_exact_ids) == 1:
-            raise ProgramError(
-                f"{label}.canonical_candidate_id is required when a resolved group contains "
-                "one exact UniChem identity"
-            )
-        _references(group, "source_ids", document_ids, label)
-    if sorted(covered) != sorted(queue_ids) or len(covered) != len(set(covered)):
-        raise ProgramError("identity_groups must partition every queued seed exactly once")
-    if len(targets) != len(set(targets)):
-        raise ProgramError("Each exact UniChem candidate may be attached at most once")
-
-
-def _component_score(value: Any, label: str) -> int:
-    if type(value) is not int or value not in SCORE_VALUES:
-        raise ProgramError(f"{label} must be one of {sorted(SCORE_VALUES)}")
-    return value
-
-
-def _accepted_ids(
-    results: Mapping[str, Mapping[str, Any]],
-    stage: str,
-    collection: str,
-    field: str,
-) -> set[str]:
-    return _ids(_rows(results[stage]["records"], collection), field, collection)
-
-
-def _validate_cited_entries(
-    value: Any,
-    *,
-    label: str,
-    text_field: str,
-    source_ids: set[str],
-) -> None:
-    if not isinstance(value, list):
-        raise ProgramError(f"{label} must be a list of objects")
-    seen: set[str] = set()
-    required_fields = {text_field, "source_ids"}
-    for index, entry in enumerate(value):
-        entry_label = f"{label}[{index}]"
-        if not isinstance(entry, dict):
-            raise ProgramError(f"{entry_label} must be an object")
-        missing = sorted(required_fields - set(entry))
-        if missing:
-            raise ProgramError(f"{entry_label} is missing fields: {', '.join(missing)}")
-        unexpected = sorted(set(entry) - required_fields)
-        if unexpected:
-            raise ProgramError(f"{entry_label} has unexpected fields: {unexpected}")
-        text = str(entry[text_field]).strip()
-        if not text:
-            raise ProgramError(f"{entry_label}.{text_field} must be non-empty")
-        key = text.casefold()
-        if key in seen:
-            raise ProgramError(f"{label}.{text_field} values must be unique")
-        seen.add(key)
-        _references(entry, "source_ids", source_ids, entry_label)
-
-
-def _validate_string_list(value: Any, label: str) -> None:
-    if not isinstance(value, list) or any(not str(item).strip() for item in value):
-        raise ProgramError(f"{label} must be a list of non-empty strings")
-
-
-def _validate_exact_object(value: Any, fields: set[str], label: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ProgramError(f"{label} must be an object")
-    missing = sorted(fields - set(value))
-    unexpected = sorted(set(value) - fields)
-    if missing:
-        raise ProgramError(f"{label} is missing fields: {', '.join(missing)}")
-    if unexpected:
-        raise ProgramError(f"{label} has unexpected fields: {unexpected}")
-    return value
-
-
-def _validate_review_item(
-    records: Mapping[str, Any], item_id: str, results: Mapping[str, Mapping[str, Any]]
-) -> None:
-    documents = _validate_documents(records, canonical_ids=True)
-    reviews = _contract_rows(records, "reviews", "candidate_id")
-    batch = _find(_review_batches(results), "concept_id", item_id)
-    expected_ids = set(map(str, batch["candidate_ids"]))
-    review_ids = {str(row["candidate_id"]) for row in reviews}
-    if review_ids != expected_ids:
-        raise ProgramError("candidate review must cover exactly the supplied batch candidates")
-    retained_ids = {str(row["document_id"]) for row in documents}
-    source_ids = {
-        *(str(row["document_id"]) for row in _all_documents(results)),
-        *retained_ids,
-    }
-    for index, row in enumerate(reviews):
-        label = f"reviews[{index}]"
-        _required(row, ("candidate_id", "hypothesis", "mechanistic_bridge"), label)
-        _validate_cited_entries(
-            row["supporting_findings"],
-            label=f"{label}.supporting_findings",
-            text_field="finding",
-            source_ids=source_ids,
-        )
-        if not row["supporting_findings"]:
-            raise ProgramError(f"{label}.supporting_findings must not be empty")
-        _validate_string_list(row["assumptions"], f"{label}.assumptions")
-        _validate_string_list(row["limitations"], f"{label}.limitations")
-        _validate_cited_entries(
-            row["aliases"],
-            label=f"{label}.aliases",
-            text_field="name",
-            source_ids=source_ids,
-        )
-        _validate_cited_entries(
-            row["why_not"],
-            label=f"{label}.why_not",
-            text_field="finding",
-            source_ids=source_ids,
-        )
-        prior_art = _validate_exact_object(
-            row["prior_art"], {"status", "summary", "findings"}, f"{label}.prior_art"
-        )
-        if prior_art["status"] not in PRIOR_ART_STATUSES:
-            raise ProgramError(
-                f"{label}.prior_art.status must be one of {sorted(PRIOR_ART_STATUSES)}"
-            )
-        if not str(prior_art["summary"]).strip():
-            raise ProgramError(f"{label}.prior_art.summary must be non-empty")
-        _validate_cited_entries(
-            prior_art["findings"],
-            label=f"{label}.prior_art.findings",
-            text_field="finding",
-            source_ids=source_ids,
-        )
-        if prior_art["status"] in {
-            "preclinical_only", "human_intervention", "established_use"
-        } and not prior_art["findings"]:
-            raise ProgramError(
-                f"{label}.prior_art.findings must not be empty for status {prior_art['status']}"
-            )
-        cited_ids = _cited_ids(row)
-        unknown = cited_ids - source_ids
-        if unknown:
-            raise ProgramError(f"{label} contains unknown source IDs: {sorted(unknown)}")
-        if not cited_ids & retained_ids:
-            raise ProgramError(f"{label} needs a cited document retained by this review")
-
-
-def _assessment_source_uses(row: Mapping[str, Any]) -> set[tuple[str, str]]:
-    uses = {
-        (str(source_id), component)
-        for component in SCORE_COMPONENTS
-        for source_id in row["component_scores"][component]["source_ids"]
-    }
-    uses.update(
-        (str(source_id), "net_assessment")
-        for source_id in row["net_assessment"]["source_ids"]
-    )
-    for collection in ("aliases", "why_not"):
-        uses.update(
-            (str(source_id), f"{collection}[{index}]")
-            for index, entry in enumerate(row[collection])
-            for source_id in entry["source_ids"]
-        )
-    return uses
-
-
-def _validate_source_integrity(
-    value: Any,
-    *,
-    expected_uses: set[tuple[str, str]],
-    documents: Mapping[str, Mapping[str, Any]],
-    label: str,
-) -> None:
-    integrity = _validate_exact_object(value, {"checks"}, label)
-    checks = integrity["checks"]
-    if not isinstance(checks, list):
-        raise ProgramError(f"{label}.checks must be a list")
-    actual_uses: list[tuple[str, str]] = []
-    for index, check in enumerate(checks):
-        check_label = f"{label}.checks[{index}]"
-        check = _validate_exact_object(
-            check, {"source_id", "scope", "verdict", "finding"}, check_label
-        )
-        source_id = str(check["source_id"])
-        scope = str(check["scope"])
-        verdict = str(check["verdict"])
-        finding = str(check["finding"]).strip()
-        if verdict not in _SOURCE_CHECK_VERDICTS:
-            raise ProgramError(
-                f"{check_label}.verdict must be one of {sorted(_SOURCE_CHECK_VERDICTS)}"
-            )
-        if not finding:
-            raise ProgramError(f"{check_label}.finding must be non-empty")
-        if re.search(
-            r"\b(?:re-?verify|unverif(?:ied|iable)|needs? (?:independent )?verification|"
-            r"verify later|requires? verification|(?:cannot|could not|unable to) verify|"
-            r"verification (?:unavailable|pending))\b",
-            finding,
-            flags=re.IGNORECASE,
-        ):
-            raise ProgramError(
-                f"{check_label}.finding must decide the supplied source use now, not defer verification"
-            )
-        document = documents.get(source_id)
-        if document is None:
-            raise ProgramError(f"{check_label}.source_id is not in the retained corpus")
-        if not _document_has_inspectable_content(document):
-            raise ProgramError(
-                f"{check_label}.source_id has no inspectable content in the retained corpus"
-            )
-        actual_uses.append((source_id, scope))
-    if len(actual_uses) != len(set(actual_uses)):
-        raise ProgramError(f"{label}.checks contains duplicate source-use checks")
-    actual = set(actual_uses)
-    if actual != expected_uses:
-        raise ProgramError(
-            f"{label}.checks must cover every cited source use exactly once; "
-            f"missing={sorted(expected_uses - actual)}, unknown={sorted(actual - expected_uses)}"
-        )
-    publication_uses: dict[tuple[str, str], str] = {}
-    for source_id, scope in expected_uses:
-        canonical_id = str(
-            documents[source_id].get("canonical_publication_id") or source_id
-        )
-        key = (scope, canonical_id)
-        prior = publication_uses.setdefault(key, source_id)
-        if prior != source_id:
-            raise ProgramError(
-                f"{label}.checks cites publication {canonical_id} more than once in {scope} "
-                f"through identifier aliases {sorted({prior, source_id})}"
-            )
-
-
-def _validate_candidate_audit(
-    records: Mapping[str, Any],
-    results: Mapping[str, Mapping[str, Any]],
-    source_index: Iterable[Mapping[str, Any]] | None = None,
-) -> None:
-    assessments = _contract_rows(records, "assessments", "candidate_id")
-    exclusions = _contract_rows(records, "excluded_candidates", "candidate_id")
-    candidate_ids = _accepted_ids(
-        results, "candidate_review", "reviews", "candidate_id"
-    )
-    assessment_ids = {str(row["candidate_id"]) for row in assessments}
-    exclusion_ids = {str(row["candidate_id"]) for row in exclusions}
-    if assessment_ids & exclusion_ids or assessment_ids | exclusion_ids != candidate_ids:
-        raise ProgramError(
-            "assessments and excluded_candidates must partition every reviewed candidate exactly once"
-        )
-    corpus = source_index if source_index is not None else _all_documents(results)
-    documents = {str(row["document_id"]): row for row in corpus}
-    source_ids = set(documents)
-    reviews = {
-        str(row["candidate_id"]): row
-        for row in _rows(results["candidate_review"]["records"], "reviews")
-    }
-    for index, row in enumerate(assessments):
-        label = f"assessments[{index}]"
-        prior_status = reviews[str(row["candidate_id"])]["prior_art"]["status"]
-        if prior_status in {"human_intervention", "established_use"}:
-            raise ProgramError(
-                f"{label} cannot assess a candidate with disqualifying prior-art status {prior_status}"
-            )
-        components = _validate_exact_object(
-            row["component_scores"], set(SCORE_COMPONENTS), f"{label}.component_scores"
-        )
-        for component in SCORE_COMPONENTS:
-            score = _validate_exact_object(
-                components[component],
-                {"value", "reason", "source_ids"},
-                f"{label}.component_scores.{component}",
-            )
-            _component_score(score["value"], f"{label}.component_scores.{component}.value")
-            if not str(score["reason"]).strip():
-                raise ProgramError(f"{label}.component_scores.{component}.reason must be non-empty")
-            _references(
-                score,
-                "source_ids",
-                source_ids,
-                f"{label}.component_scores.{component}",
-            )
-
-        net = _validate_exact_object(
-            row["net_assessment"], {"text", "source_ids"}, f"{label}.net_assessment"
-        )
-        if not str(net["text"]).strip():
-            raise ProgramError(f"{label}.net_assessment.text must be non-empty")
-        _references(net, "source_ids", source_ids, f"{label}.net_assessment")
-        _validate_cited_entries(
-            row["aliases"],
-            label=f"{label}.aliases",
-            text_field="name",
-            source_ids=source_ids,
-        )
-        _validate_cited_entries(
-            row["why_not"],
-            label=f"{label}.why_not",
-            text_field="finding",
-            source_ids=source_ids,
-        )
-        _validate_source_integrity(
-            row["source_integrity"],
-            expected_uses=_assessment_source_uses(row),
-            documents=documents,
-            label=f"{label}.source_integrity",
-        )
-
-    expected_prior_reasons = {
-        "established_use": "exact_disease_use",
-        "human_intervention": "human_intervention",
-    }
-    for index, row in enumerate(exclusions):
-        label = f"excluded_candidates[{index}]"
-        if row["reason_code"] not in AUDIT_EXCLUSION_REASONS:
-            raise ProgramError(
-                f"{label}.reason_code must be one of {sorted(AUDIT_EXCLUSION_REASONS)}"
-            )
-        if not str(row["finding"]).strip():
-            raise ProgramError(f"{label}.finding must be non-empty")
-        exclusion_sources = _references(row, "source_ids", source_ids, label)
-        _validate_source_integrity(
-            row["source_integrity"],
-            expected_uses={(source_id, "exclusion") for source_id in exclusion_sources},
-            documents=documents,
-            label=f"{label}.source_integrity",
-        )
-        prior_status = reviews[str(row["candidate_id"])]["prior_art"]["status"]
-        expected_reason = expected_prior_reasons.get(prior_status)
-        if expected_reason and row["reason_code"] != expected_reason:
-            raise ProgramError(
-                f"{label}.reason_code must be {expected_reason} for prior-art status {prior_status}"
-            )
 
 
 def _validate_result(

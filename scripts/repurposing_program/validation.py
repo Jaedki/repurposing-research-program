@@ -74,6 +74,18 @@ def _secret_paths(value: Any, path: str = "$") -> list[str]:
     return found
 
 
+def _validate_exact_object(value: Any, fields: set[str], label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ProgramError(f"{label} must be an object")
+    missing = sorted(fields - set(value))
+    unexpected = sorted(set(value) - fields)
+    if missing:
+        raise ProgramError(f"{label} is missing fields: {', '.join(missing)}")
+    if unexpected:
+        raise ProgramError(f"{label} has unexpected fields: {unexpected}")
+    return value
+
+
 def _validate_documents(
     records: Mapping[str, Any], *, canonical_ids: bool = False
 ) -> list[dict[str, Any]]:

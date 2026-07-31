@@ -9,11 +9,14 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import program_core as core  # noqa: E402
 from repurposing_program import (  # noqa: E402
+    audit,
     bibliography,
+    candidates,
     contracts,
     errors,
     evidence,
     graph,
+    identity,
     pathology,
     storage,
     validation,
@@ -96,13 +99,16 @@ class StageTwoBoundaryTest(unittest.TestCase):
     def test_extracted_modules_do_not_import_program_core(self):
         for module in (
             bibliography,
+            candidates,
             contracts,
             errors,
             evidence,
             graph,
+            identity,
             pathology,
             storage,
             validation,
+            audit,
         ):
             imported = {
                 alias.name
@@ -127,6 +133,7 @@ class StageThreeBoundaryTest(unittest.TestCase):
             "_required",
             "_secret_paths",
             "_validate_documents",
+            "_validate_exact_object",
         ):
             helper = getattr(validation, name)
             self.assertIs(getattr(core, name), helper)
@@ -164,6 +171,52 @@ class StageThreeBoundaryTest(unittest.TestCase):
             helper = getattr(graph, name)
             self.assertIs(getattr(core, name), helper)
             self.assertEqual(helper.__module__, "repurposing_program.graph")
+
+
+class StageFourBoundaryTest(unittest.TestCase):
+    def test_identity_has_one_owner(self):
+        for name in (
+            "_candidate_queries",
+            "_canonical_candidates",
+            "_empty_identity_result",
+            "_exact_identity_groups",
+            "_identity_candidate_options",
+            "_identity_queue",
+            "_merge_candidate_rows",
+            "_post_unichem",
+            "_query_key",
+            "_resolve_seed_identities",
+            "_unichem_request",
+            "_unichem_requests",
+            "_validate_candidate_identity",
+        ):
+            helper = getattr(identity, name)
+            self.assertIs(getattr(core, name), helper)
+            self.assertEqual(helper.__module__, "repurposing_program.identity")
+
+    def test_candidate_rules_have_one_owner(self):
+        for name in (
+            "_review_batches",
+            "_validate_cited_entries",
+            "_validate_review_item",
+            "_validate_seed_item",
+            "_validate_string_list",
+        ):
+            helper = getattr(candidates, name)
+            self.assertIs(getattr(core, name), helper)
+            self.assertEqual(helper.__module__, "repurposing_program.candidates")
+
+    def test_audit_rules_have_one_owner(self):
+        for name in (
+            "_accepted_ids",
+            "_assessment_source_uses",
+            "_component_score",
+            "_validate_candidate_audit",
+            "_validate_source_integrity",
+        ):
+            helper = getattr(audit, name)
+            self.assertIs(getattr(core, name), helper)
+            self.assertEqual(helper.__module__, "repurposing_program.audit")
 
 
 if __name__ == "__main__":

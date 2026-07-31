@@ -81,9 +81,15 @@ controller while extraction proceeds, but extracted responsibilities have one ow
 - `repurposing_program.pathology` owns treatment-field rejection, curation projection, pathology
   source/adjudication validation, and researched-profile validation;
 - `repurposing_program.graph` owns deterministic assertion merging, frozen-graph assembly, graph
-  indexing, support lookup, and bounded node-context projection.
+  indexing, support lookup, and bounded node-context projection;
+- `repurposing_program.identity` owns UniChem transport/caching, exact-identity grouping, identity
+  review options, canonical candidate assembly, and identity-result validation;
+- `repurposing_program.candidates` owns review-batch partitioning and candidate seed/dossier
+  validation, including pathology-versus-mechanism citation separation;
+- `repurposing_program.audit` owns closed-corpus audit partition, component-score, exact source-use,
+  publication-alias, and bounded-exclusion validation.
 
 These extracted modules never import `program_core`. Higher domain modules may depend on evidence,
 validation, and foundation modules; dependency must not point back from an extracted module to
 orchestration. `program_core` retains run-folder access and item-result aggregation, then delegates
-the deterministic graph assembly to the graph module.
+deterministic graph, identity, candidate, and audit decisions to their owning modules.
