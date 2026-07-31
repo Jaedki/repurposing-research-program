@@ -75,7 +75,15 @@ controller while extraction proceeds, but extracted responsibilities have one ow
 - `repurposing_program.evidence` owns evidence-record access, document-content checks, citation
   traversal, source projection, and deterministic evidence merging;
 - `repurposing_program.bibliography` owns publication-ID normalization, cached metadata transport,
-  canonical publication projection, and bibliographic validation.
+  canonical publication projection, and bibliographic validation;
+- `repurposing_program.validation` owns shared record-schema, reference, secret, and document-ID
+  validation primitives;
+- `repurposing_program.pathology` owns treatment-field rejection, curation projection, pathology
+  source/adjudication validation, and researched-profile validation;
+- `repurposing_program.graph` owns deterministic assertion merging, frozen-graph assembly, graph
+  indexing, support lookup, and bounded node-context projection.
 
-These extracted modules never import `program_core`. Bibliography may depend on the pure evidence
-and foundation modules; dependency must not point back from an extracted module to orchestration.
+These extracted modules never import `program_core`. Higher domain modules may depend on evidence,
+validation, and foundation modules; dependency must not point back from an extracted module to
+orchestration. `program_core` retains run-folder access and item-result aggregation, then delegates
+the deterministic graph assembly to the graph module.

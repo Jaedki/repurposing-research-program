@@ -15,7 +15,6 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from pathology_sources import (
-    SENTENCE_DECISIONS,
     SourceError,
     fetch_pathology_sources,
     screen_pathology_sources,
@@ -70,7 +69,9 @@ from repurposing_program.evidence import (
     _cited_documents,
     _cited_ids,
     _document_has_inspectable_content,
+    _find,
     _merge_documents,
+    _merge_text,
     _merge_unique,
     _normalized_title,
     _rows,
@@ -78,6 +79,25 @@ from repurposing_program.evidence import (
     _source_index,
     _validate_research_document_content,
     _year,
+)
+from repurposing_program.graph import (
+    _assemble_graph_result,
+    _graph_index,
+    _graph_node_context,
+    _graph_support_ids,
+    _merge_assertions,
+)
+from repurposing_program.pathology import (
+    _canonical_source_records,
+    _compact_disease_context,
+    _curation_concepts,
+    _forbidden_pathology_paths,
+    _research_concepts,
+    _validate_curation,
+    _validate_pathology_item,
+    _validate_source_adjudication,
+    _validate_source_result,
+    _validate_source_screening,
 )
 from repurposing_program.storage import (
     _canonical_bytes,
@@ -93,85 +113,14 @@ from repurposing_program.storage import (
     _write_jsonl,
     _write_once,
 )
-
-
-def _contract_rows(
-    records: Mapping[str, Any], name: str, id_field: str | None = None
-) -> list[dict[str, Any]]:
-    rows = _rows(records, name)
-    schema = ROW_SCHEMAS[name]
-    required_fields = schema["required_fields"]
-    for index, row in enumerate(rows):
-        missing = [field for field in required_fields if field not in row]
-        if missing:
-            raise ProgramError(f"{name}[{index}] is missing fields: {', '.join(missing)}")
-        if not schema["additional_fields"]:
-            unexpected = sorted(set(row) - set(required_fields))
-            if unexpected:
-                raise ProgramError(f"{name}[{index}] has unexpected fields: {unexpected}")
-        for field, field_type in schema.get("field_types", {}).items():
-            if field_type == "object" and not isinstance(row[field], dict):
-                raise ProgramError(f"{name}[{index}].{field} must be an object")
-    if id_field:
-        _ids(rows, id_field, name)
-    return rows
-
-
-def _ids(rows: list[dict[str, Any]], field: str, label: str) -> set[str]:
-    values: list[str] = []
-    for index, row in enumerate(rows):
-        value = str(row.get(field, "")).strip()
-        if not value:
-            raise ProgramError(f"{label}[{index}].{field} is required")
-        values.append(value)
-    if len(values) != len(set(values)):
-        raise ProgramError(f"{label}.{field} values must be unique")
-    return set(values)
-
-
-def _required(row: Mapping[str, Any], fields: tuple[str, ...], label: str) -> None:
-    missing = [field for field in fields if row.get(field) in (None, "")]
-    if missing:
-        raise ProgramError(f"{label} is missing required fields: {', '.join(missing)}")
-
-
-def _references(row: Mapping[str, Any], field: str, allowed: set[str], label: str) -> set[str]:
-    values = row.get(field)
-    if not isinstance(values, list) or not values:
-        raise ProgramError(f"{label}.{field} must be a non-empty list")
-    refs = {str(value) for value in values}
-    unknown = refs - allowed
-    if unknown:
-        raise ProgramError(f"{label}.{field} contains unknown IDs: {sorted(unknown)}")
-    return refs
-
-
-def _secret_paths(value: Any, path: str = "$") -> list[str]:
-    found: list[str] = []
-    if isinstance(value, dict):
-        for key, item in value.items():
-            child = f"{path}.{key}"
-            if str(key).lower() in _SECRET_KEYS:
-                found.append(child)
-            found.extend(_secret_paths(item, child))
-    elif isinstance(value, list):
-        for index, item in enumerate(value):
-            found.extend(_secret_paths(item, f"{path}[{index}]"))
-    return found
-
-
-def _forbidden_pathology_paths(value: Any, path: str = "$") -> list[str]:
-    found: list[str] = []
-    if isinstance(value, dict):
-        for key, item in value.items():
-            normalized = re.sub(r"[^a-z]+", "_", str(key).casefold()).strip("_")
-            if set(normalized.split("_")) & _PATHOLOGY_FORBIDDEN_KEYS:
-                found.append(f"{path}.{key}")
-            found.extend(_forbidden_pathology_paths(item, f"{path}.{key}"))
-    elif isinstance(value, list):
-        for index, item in enumerate(value):
-            found.extend(_forbidden_pathology_paths(item, f"{path}[{index}]"))
-    return found
+from repurposing_program.validation import (
+    _contract_rows,
+    _ids,
+    _references,
+    _required,
+    _secret_paths,
+    _validate_documents,
+)
 
 
 def _case(root: Path) -> dict[str, Any]:
@@ -378,292 +327,6 @@ def _program_status(
 def status(root: str | Path) -> dict[str, Any]:
     run_root = Path(root).expanduser().resolve()
     return _program_status(run_root, _case(run_root), _load_results(run_root))
-
-
-def _compact_disease_context(records: Mapping[str, Any]) -> list[dict[str, Any]]:
-    return [
-        row for row in _rows(records, "disease_context")
-        if row["section"] in _RESEARCH_CONTEXT_SECTIONS
-    ]
-
-
-def _merge_text(*values: Any) -> str:
-    parts = {
-        part.strip()
-        for value in values
-        for part in str(value).split(" | ")
-        if part.strip()
-    }
-    return " | ".join(sorted(parts))
-
-
-def _merge_assertions(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    merged: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        assertion_id = str(row.get("assertion_id", "")).strip()
-        if not assertion_id:
-            raise ProgramError("assertions.assertion_id is required")
-        current = merged.get(assertion_id)
-        if current is None:
-            merged[assertion_id] = {**row, "assertion_id": assertion_id}
-            continue
-        if any(
-            current[field] != row[field]
-            for field in ("subject_id", "relation", "object_id")
-        ):
-            raise ProgramError(
-                f"Conflicting assertion identities share assertion_id={assertion_id}"
-            )
-        current["source_ids"] = sorted({
-            *map(str, current["source_ids"]),
-            *map(str, row["source_ids"]),
-        })
-        current["evidence_summary"] = _merge_text(
-            current["evidence_summary"], row["evidence_summary"]
-        )
-    return [merged[key] for key in sorted(merged)]
-
-
-def _find(rows: Iterable[dict[str, Any]], field: str, value: str) -> dict[str, Any]:
-    matches = [row for row in rows if str(row.get(field)) == value]
-    if len(matches) != 1:
-        raise ProgramError(f"Expected exactly one {field}={value} record")
-    return matches[0]
-
-
-def _curation_concepts(
-    results: Mapping[str, Mapping[str, Any]],
-) -> list[dict[str, Any]]:
-    result = results.get("pathology_curation")
-    if not isinstance(result, Mapping) or not isinstance(result.get("records"), Mapping):
-        raise ProgramError("Pathology curation result is missing")
-    return _contract_rows(result["records"], "concepts", "concept_id")
-
-
-def _research_concepts(
-    results: Mapping[str, Mapping[str, Any]],
-) -> list[dict[str, Any]]:
-    return sorted(
-        (
-            row
-            for row in _curation_concepts(results)
-            if row.get("disposition") == "research"
-        ),
-        key=lambda row: str(row["concept_id"]),
-    )
-
-
-def _canonical_source_records(
-    results: Mapping[str, Mapping[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Project raw source records through the accepted run-local concept partition."""
-    source = results["pathology_sources"]["records"]
-    raw_nodes = _rows(source, "source_nodes")
-    raw_by_id = {str(row["node_id"]): row for row in raw_nodes}
-    raw_edges = _rows(source, "source_edges")
-    concepts = _curation_concepts(results)
-
-    node_map: dict[str, str] = {}
-    nodes: list[dict[str, Any]] = []
-    for raw in raw_nodes:
-        if raw.get("node_type") != "disease_anchor":
-            continue
-        node_id = str(raw["node_id"])
-        node_map[node_id] = node_id
-        nodes.append(
-            {
-                "node_id": node_id,
-                "label": str(raw["label"]),
-                "node_type": "disease_anchor",
-                "source_ids": sorted(set(map(str, raw["source_ids"]))),
-                "aliases": [],
-                "member_node_ids": [node_id],
-                "disposition": "context_only",
-            }
-        )
-
-    for concept in concepts:
-        if concept["disposition"] == "exclude":
-            continue
-        concept_id = str(concept["concept_id"])
-        members = sorted(set(map(str, concept["member_node_ids"])))
-        for member in members:
-            node_map[member] = concept_id
-        source_ids = sorted(
-            {
-                str(source_id)
-                for member in members
-                for source_id in raw_by_id[member]["source_ids"]
-            }
-        )
-        aliases = sorted(
-            {
-                str(value).strip()
-                for value in [
-                    *concept["aliases"],
-                    *(raw_by_id[member].get("label", "") for member in members),
-                ]
-                if str(value).strip()
-                and str(value).strip().casefold()
-                != str(concept["preferred_label"]).strip().casefold()
-            },
-            key=str.casefold,
-        )
-        nodes.append(
-            {
-                "node_id": concept_id,
-                "label": str(concept["preferred_label"]),
-                "node_type": str(concept["concept_type"]),
-                "source_ids": source_ids,
-                "aliases": aliases,
-                "member_node_ids": members,
-                "disposition": str(concept["disposition"]),
-            }
-        )
-
-    grouped_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for edge in raw_edges:
-        subject = node_map.get(str(edge["subject_id"]))
-        object_id = node_map.get(str(edge["object_id"]))
-        if not subject or not object_id or subject == object_id:
-            continue
-        relation = str(edge["relation"])
-        key = (subject, relation, object_id)
-        current = grouped_edges.setdefault(
-            key,
-            {
-                "edge_id": _stable_id(
-                    "CURATED-EDGE",
-                    {"subject_id": subject, "relation": relation, "object_id": object_id},
-                ),
-                "subject_id": subject,
-                "relation": relation,
-                "object_id": object_id,
-                "evidence_summary": "",
-                "source_ids": [],
-                "original_edge_ids": [],
-            },
-        )
-        current["evidence_summary"] = _merge_text(
-            current["evidence_summary"], edge["evidence_summary"]
-        )
-        current["source_ids"] = sorted(
-            {*map(str, current["source_ids"]), *map(str, edge["source_ids"])}
-        )
-        current["original_edge_ids"] = sorted(
-            {*map(str, current["original_edge_ids"]), str(edge["edge_id"])}
-        )
-
-    node_by_id = {str(row["node_id"]): row for row in nodes}
-    for concept in concepts:
-        if concept["disposition"] != "context_only":
-            continue
-        subject = str(concept["concept_id"])
-        for object_id in map(str, concept["related_concept_ids"]):
-            relation = "contextualizes"
-            key = (subject, relation, object_id)
-            current = grouped_edges.setdefault(
-                key,
-                {
-                    "edge_id": _stable_id(
-                        "CURATED-EDGE",
-                        {
-                            "subject_id": subject,
-                            "relation": relation,
-                            "object_id": object_id,
-                        },
-                    ),
-                    "subject_id": subject,
-                    "relation": relation,
-                    "object_id": object_id,
-                    "evidence_summary": "",
-                    "source_ids": [],
-                    "original_edge_ids": [],
-                },
-            )
-            current["evidence_summary"] = _merge_text(
-                current["evidence_summary"], concept["reason"]
-            )
-            current["source_ids"] = sorted(
-                {
-                    *map(str, current["source_ids"]),
-                    *map(str, node_by_id[subject]["source_ids"]),
-                }
-            )
-
-    return (
-        sorted(nodes, key=lambda row: str(row["node_id"])),
-        sorted(grouped_edges.values(), key=lambda row: str(row["edge_id"])),
-    )
-
-
-def _graph_index(records: Mapping[str, Any]) -> list[dict[str, Any]]:
-    return [
-        {key: row[key] for key in GRAPH_INDEX_FIELDS}
-        for row in sorted(
-            _rows(records, "source_nodes"), key=lambda value: str(value["node_id"])
-        )
-        if row.get("node_type") != "disease_anchor"
-    ]
-
-
-def _graph_support_ids(records: Mapping[str, Any]) -> dict[str, set[str]]:
-    support = {
-        str(row["node_id"]): set(map(str, row["source_ids"]))
-        for row in _rows(records, "source_nodes")
-        if row.get("node_type") != "disease_anchor"
-    }
-    for row in _rows(records, "profiles"):
-        node_id = str(row["node_id"])
-        if node_id in support:
-            support[node_id].update(map(str, row["source_ids"]))
-    for row in [*_rows(records, "source_edges"), *_rows(records, "assertions")]:
-        source_ids = set(map(str, row["source_ids"]))
-        for node_id in map(str, (row["subject_id"], row["object_id"])):
-            if node_id in support:
-                support[node_id].update(source_ids)
-    return support
-
-
-def _graph_node_context(records: Mapping[str, Any], node_id: str) -> dict[str, Any]:
-    nodes = _rows(records, "source_nodes")
-    node_by_id = {str(row["node_id"]): row for row in nodes}
-    node = _find(nodes, "node_id", node_id)
-    if node.get("node_type") == "disease_anchor":
-        raise ProgramError("The disease anchor is not a retrievable pathology concept")
-    profiles = [
-        row for row in _rows(records, "profiles") if str(row["node_id"]) == node_id
-    ]
-    if len(profiles) > 1:
-        raise ProgramError(f"Multiple pathology profiles exist for node_id={node_id}")
-    source_edges = [
-        row
-        for row in _rows(records, "source_edges")
-        if node_id in {str(row["subject_id"]), str(row["object_id"])}
-    ]
-    assertions = [
-        row
-        for row in _rows(records, "assertions")
-        if node_id in {str(row["subject_id"]), str(row["object_id"])}
-    ]
-    related_ids = {
-        str(value)
-        for edge in [*source_edges, *assertions]
-        for value in (edge["subject_id"], edge["object_id"])
-        if str(value) != node_id
-    }
-    return {
-        "node": node,
-        "profile": profiles[0] if profiles else None,
-        "source_edges": sorted(source_edges, key=lambda row: str(row["edge_id"])),
-        "assertions": sorted(assertions, key=lambda row: str(row["assertion_id"])),
-        "related_nodes": [
-            {key: node_by_id[value][key] for key in GRAPH_INDEX_FIELDS}
-            for value in sorted(related_ids)
-            if value in node_by_id
-            and node_by_id[value].get("node_type") != "disease_anchor"
-        ],
-    }
 
 
 def graph_context(root: str | Path, node_id: str) -> dict[str, Any]:
@@ -1040,47 +703,19 @@ def _item_gaps(
 def _build_graph_result(
     root: Path, results: Mapping[str, Mapping[str, Any]]
 ) -> dict[str, Any]:
-    source = results["pathology_sources"]["records"]
-    canonical_nodes, canonical_edges = _canonical_source_records(results)
-    records = {
-        "source_nodes": canonical_nodes,
-        "source_edges": canonical_edges,
-        "source_receipts": _rows(source, "source_receipts"),
-        "disease_context": _rows(source, "disease_context"),
-        "profiles": _merge_unique(
-            _item_collection(
-                root, results, "evidence_graph", "pathology_node_research", "profiles"
-            ),
-            "node_id",
-            "profiles",
+    return _assemble_graph_result(
+        results,
+        _item_collection(
+            root, results, "evidence_graph", "pathology_node_research", "profiles"
         ),
-        "assertions": _merge_assertions(
-            _item_collection(
-                root, results, "evidence_graph", "pathology_node_research", "assertions"
-            )
+        _item_collection(
+            root, results, "evidence_graph", "pathology_node_research", "assertions"
         ),
-    }
-    records["documents"] = _select_cited_documents(
-        _merge_documents(
-            [
-                *_cited_documents(source),
-                *_item_cited_documents(
-                    root, results, "evidence_graph", "pathology_node_research"
-                ),
-            ]
+        _item_cited_documents(
+            root, results, "evidence_graph", "pathology_node_research"
         ),
-        records,
+        _item_gaps(root, results, "evidence_graph", "pathology_node_research"),
     )
-    return {
-        "stage": "evidence_graph",
-        "status": "complete",
-        "snapshot_id": _stable_id("GRAPH", records),
-        "records": records,
-        "gaps": _item_gaps(root, results, "evidence_graph", "pathology_node_research"),
-        "notes": [
-            "Frozen pathology-only graph built from the accepted run-local concept partition."
-        ],
-    }
 
 
 def _review_batches(
@@ -1596,266 +1231,6 @@ def _advance_controller(
     else:
         raise ProgramError(f"No controller action exists for stage: {stage}")
     _write_json(_result_path(root, stage), result)
-
-
-def _validate_documents(
-    records: Mapping[str, Any], *, canonical_ids: bool = False
-) -> list[dict[str, Any]]:
-    documents = _contract_rows(records, "documents", "document_id")
-    for index, row in enumerate(documents):
-        _required(row, ("document_id", "title", "source"), f"documents[{index}]")
-        if canonical_ids and not CANONICAL_DOCUMENT_ID.fullmatch(str(row["document_id"])):
-            raise ProgramError(
-                f"documents[{index}].document_id must be a canonical PMID, PMCID, DOI, "
-                "authoritative accession, or HTTPS URL"
-            )
-    return documents
-
-
-def _validate_source_screening(result: Mapping[str, Any]) -> None:
-    if (
-        result.get("stage") != "pathology_source_screening"
-        or result.get("status") != "complete"
-    ):
-        raise ProgramError("Pathology source screening returned an invalid stage or status")
-    records = result.get("records")
-    if not isinstance(records, dict) or set(records) != {"flagged_sentences"}:
-        raise ProgramError("Pathology source screening requires only flagged_sentences")
-    rows = _contract_rows(records, "flagged_sentences", "sentence_id")
-    allowed_signals = {"named_intervention", "treatment_event", "treatment_language"}
-    for index, row in enumerate(rows):
-        label = f"flagged_sentences[{index}]"
-        sentence = str(row["sentence"]).strip()
-        if not sentence or row["sentence_id"] != _stable_id(
-            "DISMECH-SENTENCE", sentence
-        ):
-            raise ProgramError(f"{label} does not have a stable sentence identity")
-        signals = row["signals"]
-        if (
-            not isinstance(signals, list)
-            or not signals
-            or any(signal not in allowed_signals for signal in signals)
-            or len(signals) != len(set(signals))
-        ):
-            raise ProgramError(f"{label}.signals contains invalid or duplicate values")
-        paths = row["paths"]
-        if (
-            not isinstance(paths, list)
-            or not paths
-            or any(
-                not isinstance(path, str) or not path.startswith("$")
-                for path in paths
-            )
-            or len(paths) != len(set(paths))
-        ):
-            raise ProgramError(f"{label}.paths must contain unique source paths")
-
-
-def _validate_source_adjudication(
-    records: Mapping[str, Any], prior: Mapping[str, Mapping[str, Any]]
-) -> None:
-    decisions = _contract_rows(records, "sentence_decisions", "sentence_id")
-    expected = {
-        str(row["sentence_id"])
-        for row in _rows(
-            prior["pathology_source_screening"]["records"],
-            "flagged_sentences",
-        )
-    }
-    actual = {str(row["sentence_id"]) for row in decisions}
-    if actual != expected:
-        raise ProgramError(
-            "Sentence adjudication must partition every flagged sentence exactly once; "
-            f"missing={sorted(expected - actual)}, unknown={sorted(actual - expected)}"
-        )
-    for index, row in enumerate(decisions):
-        label = f"sentence_decisions[{index}]"
-        if row["decision"] not in SENTENCE_DECISIONS:
-            raise ProgramError(
-                f"{label}.decision must be one of {sorted(SENTENCE_DECISIONS)}"
-            )
-        if not str(row["reason"]).strip():
-            raise ProgramError(f"{label}.reason must be non-empty")
-
-
-def _validate_source_result(result: Mapping[str, Any]) -> None:
-    records = result.get("records")
-    if not isinstance(records, dict):
-        raise ProgramError("Pathology source adapter did not return records")
-    documents = _validate_documents(records)
-    nodes = _contract_rows(records, "source_nodes", "node_id")
-    edges = _contract_rows(records, "source_edges", "edge_id")
-    contexts = _contract_rows(records, "disease_context", "context_id")
-    _contract_rows(records, "source_receipts")
-    document_ids = {str(row["document_id"]) for row in documents}
-    node_ids = {str(row["node_id"]) for row in nodes}
-    for index, row in enumerate(nodes):
-        _references(row, "source_ids", document_ids, f"source_nodes[{index}]")
-    for index, row in enumerate(edges):
-        label = f"source_edges[{index}]"
-        if str(row["subject_id"]) not in node_ids or str(row["object_id"]) not in node_ids:
-            raise ProgramError(f"{label} refers to an unknown source node")
-        _references(row, "source_ids", document_ids, label)
-    for index, row in enumerate(contexts):
-        _references(row, "source_ids", document_ids, f"disease_context[{index}]")
-    forbidden = _forbidden_pathology_paths(records)
-    if forbidden:
-        raise ProgramError(f"Treatment fields reached the pathology source result: {forbidden}")
-
-
-def _validate_curation(
-    records: Mapping[str, Any], results: Mapping[str, Mapping[str, Any]]
-) -> None:
-    concepts = _contract_rows(records, "concepts", "concept_id")
-    source_nodes = _rows(results["pathology_sources"]["records"], "source_nodes")
-    expected = {
-        str(row["node_id"])
-        for row in source_nodes
-        if row.get("node_type") != "disease_anchor"
-    }
-    assigned: list[str] = []
-    retained_labels: dict[tuple[str, str], str] = {}
-    for index, concept in enumerate(concepts):
-        label = f"concepts[{index}]"
-        _required(concept, ("preferred_label", "concept_type", "disposition", "reason"), label)
-        members = concept.get("member_node_ids")
-        aliases = concept.get("aliases")
-        related = concept.get("related_concept_ids")
-        if not isinstance(members, list) or not members:
-            raise ProgramError(f"{label}.member_node_ids must be a non-empty list")
-        if not isinstance(aliases, list) or any(
-            not isinstance(value, str) or not value.strip() for value in aliases
-        ):
-            raise ProgramError(f"{label}.aliases must be a list of non-empty strings")
-        if not isinstance(related, list) or any(
-            not isinstance(value, str) or not value.strip() for value in related
-        ):
-            raise ProgramError(
-                f"{label}.related_concept_ids must be a list of non-empty strings"
-            )
-        if len(related) != len(set(related)):
-            raise ProgramError(f"{label}.related_concept_ids contains duplicates")
-        member_ids = list(map(str, members))
-        if len(member_ids) != len(set(member_ids)):
-            raise ProgramError(f"{label}.member_node_ids contains duplicates")
-        if str(concept["concept_id"]) not in member_ids:
-            raise ProgramError(f"{label}.concept_id must be one of its member_node_ids")
-        if concept["concept_type"] not in {"driver", "mechanism", "phenotype", "context"}:
-            raise ProgramError(
-                f"{label}.concept_type must be driver, mechanism, phenotype, or context"
-            )
-        if concept["disposition"] not in {"research", "context_only", "exclude"}:
-            raise ProgramError(
-                f"{label}.disposition must be research, context_only, or exclude"
-            )
-        if concept["disposition"] == "research" and concept["concept_type"] == "context":
-            raise ProgramError(f"{label} cannot research a context-only concept type")
-        if concept["disposition"] != "exclude":
-            key = (
-                str(concept["concept_type"]),
-                str(concept["preferred_label"]).strip().casefold(),
-            )
-            previous = retained_labels.get(key)
-            if previous:
-                raise ProgramError(
-                    f"{label} duplicates the retained type and label in {previous}; "
-                    "merge equivalent source claims or give distinct claims distinct labels"
-                )
-            retained_labels[key] = label
-        assigned.extend(member_ids)
-    if len(assigned) != len(set(assigned)) or set(assigned) != expected:
-        missing = sorted(expected - set(assigned))
-        unknown = sorted(set(assigned) - expected)
-        raise ProgramError(
-            "Pathology concepts must partition every supplied non-anchor node exactly once; "
-            f"missing={missing}, unknown={unknown}"
-        )
-    research_ids = {
-        str(concept["concept_id"])
-        for concept in concepts
-        if concept["disposition"] == "research"
-    }
-    for index, concept in enumerate(concepts):
-        related = set(map(str, concept["related_concept_ids"]))
-        if concept["disposition"] == "context_only":
-            if not related or not related <= research_ids:
-                raise ProgramError(
-                    f"concepts[{index}].related_concept_ids must contain only retained research concepts"
-                )
-        elif related:
-            raise ProgramError(
-                f"concepts[{index}].related_concept_ids must be empty unless context_only"
-            )
-    forbidden = _forbidden_pathology_paths(records)
-    if forbidden:
-        raise ProgramError(f"Treatment fields are forbidden in pathology curation: {forbidden}")
-
-
-def _validate_pathology_item(
-    records: Mapping[str, Any], item_id: str, results: Mapping[str, Mapping[str, Any]]
-) -> None:
-    documents = _validate_documents(records, canonical_ids=True)
-    source_document_ids = _ids(
-        _rows(results["pathology_sources"]["records"], "documents"),
-        "document_id",
-        "documents",
-    )
-    if not {str(row["document_id"]) for row in documents} - source_document_ids:
-        raise ProgramError("pathology node research must retain newly researched evidence")
-    profiles = _contract_rows(records, "profiles", "node_id")
-    assertions = _contract_rows(records, "assertions", "assertion_id")
-    if len(profiles) != 1 or str(profiles[0]["node_id"]) != item_id:
-        raise ProgramError("pathology node research must return exactly one profile for item_id")
-    source_nodes, _ = _canonical_source_records(results)
-    node = _find(source_nodes, "node_id", item_id)
-    if node.get("disposition") != "research":
-        raise ProgramError("pathology node research item must be a curated research concept")
-    if profiles[0]["node_type"] != node["node_type"]:
-        raise ProgramError("profile.node_type must match the source-derived node")
-    profile = profiles[0]
-    _required(
-        profile,
-        (
-            "summary", "normal_state", "pathological_state", "desired_biological_state",
-            "causal_role", "uncertainty",
-        ),
-        "profiles[0]",
-    )
-    for field in PATHOLOGY_PROFILE_LIST_FIELDS:
-        if not isinstance(profile[field], list):
-            raise ProgramError(f"profiles[0].{field} must be a list")
-    node_ids = {str(row["node_id"]) for row in source_nodes}
-    source_ids = {
-        *source_document_ids,
-        *(str(row["document_id"]) for row in documents),
-    }
-    _references(profiles[0], "source_ids", source_ids, "profiles[0]")
-    observations = profile["established_pathology_observations"]
-    if not isinstance(observations, list) or any(
-        not isinstance(row, dict) for row in observations
-    ):
-        raise ProgramError(
-            "profiles[0].established_pathology_observations must be a list of objects"
-        )
-    for index, observation in enumerate(observations):
-        label = f"profiles[0].established_pathology_observations[{index}]"
-        if set(observation) != {"observation", "source_ids"}:
-            raise ProgramError(f"{label} must contain only observation and source_ids")
-        _required(observation, ("observation",), label)
-        _references(observation, "source_ids", source_ids, label)
-    for index, row in enumerate(assertions):
-        label = f"assertions[{index}]"
-        _required(
-            row,
-            ("assertion_id", "subject_id", "relation", "object_id", "evidence_summary"),
-            label,
-        )
-        if str(row["subject_id"]) not in node_ids or str(row["object_id"]) not in node_ids:
-            raise ProgramError(f"{label} refers to an unknown curated pathology concept")
-        _references(row, "source_ids", source_ids, label)
-    forbidden = _forbidden_pathology_paths(records)
-    if forbidden:
-        raise ProgramError(f"Treatment fields are forbidden in pathology research: {forbidden}")
 
 
 def _validate_seed_item(

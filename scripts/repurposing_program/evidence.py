@@ -31,6 +31,23 @@ def _rows(records: Mapping[str, Any], name: str) -> list[dict[str, Any]]:
     return value
 
 
+def _find(rows: Iterable[dict[str, Any]], field: str, value: str) -> dict[str, Any]:
+    matches = [row for row in rows if str(row.get(field)) == value]
+    if len(matches) != 1:
+        raise ProgramError(f"Expected exactly one {field}={value} record")
+    return matches[0]
+
+
+def _merge_text(*values: Any) -> str:
+    parts = {
+        part.strip()
+        for value in values
+        for part in str(value).split(" | ")
+        if part.strip()
+    }
+    return " | ".join(sorted(parts))
+
+
 def _validate_research_document_content(records: Mapping[str, Any]) -> None:
     for index, row in enumerate(_rows(records, "documents")):
         passages = row.get("evidence_passages")

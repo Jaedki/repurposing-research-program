@@ -13,7 +13,10 @@ from repurposing_program import (  # noqa: E402
     contracts,
     errors,
     evidence,
+    graph,
+    pathology,
     storage,
+    validation,
 )
 
 
@@ -91,7 +94,16 @@ class StageTwoBoundaryTest(unittest.TestCase):
             self.assertEqual(helper.__module__, "repurposing_program.evidence")
 
     def test_extracted_modules_do_not_import_program_core(self):
-        for module in (bibliography, contracts, errors, evidence, storage):
+        for module in (
+            bibliography,
+            contracts,
+            errors,
+            evidence,
+            graph,
+            pathology,
+            storage,
+            validation,
+        ):
             imported = {
                 alias.name
                 for node in ast.walk(ast.parse(inspect.getsource(module)))
@@ -104,6 +116,54 @@ class StageTwoBoundaryTest(unittest.TestCase):
                 if isinstance(node, ast.ImportFrom)
             )
             self.assertNotIn("program_core", imported)
+
+
+class StageThreeBoundaryTest(unittest.TestCase):
+    def test_shared_validation_has_one_owner(self):
+        for name in (
+            "_contract_rows",
+            "_ids",
+            "_references",
+            "_required",
+            "_secret_paths",
+            "_validate_documents",
+        ):
+            helper = getattr(validation, name)
+            self.assertIs(getattr(core, name), helper)
+            self.assertEqual(helper.__module__, "repurposing_program.validation")
+        for name in ("_find", "_merge_text"):
+            helper = getattr(evidence, name)
+            self.assertIs(getattr(core, name), helper)
+            self.assertEqual(helper.__module__, "repurposing_program.evidence")
+
+    def test_pathology_has_one_owner(self):
+        for name in (
+            "_canonical_source_records",
+            "_compact_disease_context",
+            "_curation_concepts",
+            "_forbidden_pathology_paths",
+            "_research_concepts",
+            "_validate_curation",
+            "_validate_pathology_item",
+            "_validate_source_adjudication",
+            "_validate_source_result",
+            "_validate_source_screening",
+        ):
+            helper = getattr(pathology, name)
+            self.assertIs(getattr(core, name), helper)
+            self.assertEqual(helper.__module__, "repurposing_program.pathology")
+
+    def test_graph_has_one_owner(self):
+        for name in (
+            "_assemble_graph_result",
+            "_graph_index",
+            "_graph_node_context",
+            "_graph_support_ids",
+            "_merge_assertions",
+        ):
+            helper = getattr(graph, name)
+            self.assertIs(getattr(core, name), helper)
+            self.assertEqual(helper.__module__, "repurposing_program.graph")
 
 
 if __name__ == "__main__":
