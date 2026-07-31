@@ -10,6 +10,7 @@ from urllib.error import HTTPError
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import program_core as core  # noqa: E402
+from repurposing_program import bibliography  # noqa: E402
 
 
 PROGRAM_BASELINE = json.loads(
@@ -182,8 +183,8 @@ class BibliographicMetadataTest(unittest.TestCase):
         response.__enter__.return_value.read.return_value = b'{"record":"canonical"}'
         error = HTTPError("https://example.org", 503, "unavailable", {}, None)
         with (
-            patch.object(core, "urlopen", side_effect=[error, response]) as request,
-            patch.object(core.time, "sleep") as pause,
+            patch.object(bibliography, "urlopen", side_effect=[error, response]) as request,
+            patch.object(bibliography.time, "sleep") as pause,
         ):
             result = core._bibliographic_get("https://example.org/record")
 
@@ -194,7 +195,7 @@ class BibliographicMetadataTest(unittest.TestCase):
 
     def test_cached_request_fetches_once_and_reuses_immutable_response(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
-            core, "_bibliographic_get", return_value={"record": "canonical"}
+            bibliography, "_bibliographic_get", return_value={"record": "canonical"}
         ) as fetch:
             root = Path(directory)
             first = core._bibliographic_request(root, "test", "https://example.org/record")
@@ -213,7 +214,7 @@ class BibliographicMetadataTest(unittest.TestCase):
             }]
         }
         with tempfile.TemporaryDirectory() as directory, patch.object(
-            core, "_bibliographic_request", return_value=response
+            bibliography, "_bibliographic_request", return_value=response
         ):
             records = core._id_converter_records(
                 Path(directory), ["PMID:11", "PMCID:PMC11", "DOI:10.1000/ELEVEN"]
@@ -226,7 +227,7 @@ class BibliographicMetadataTest(unittest.TestCase):
 
     def test_large_identifier_sets_are_split_into_bounded_requests(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
-            core, "_bibliographic_request", return_value={"records": []}
+            bibliography, "_bibliographic_request", return_value={"records": []}
         ) as request:
             core._id_converter_records(
                 Path(directory), [f"PMID:{identifier}" for identifier in range(1, 202)]
@@ -274,9 +275,9 @@ class BibliographicMetadataTest(unittest.TestCase):
         }
         with (
             tempfile.TemporaryDirectory() as directory,
-            patch.object(core, "_id_converter_records", return_value=converted),
-            patch.object(core, "_ncbi_summaries", side_effect=summaries),
-            patch.object(core, "_doi_metadata", return_value=doi_metadata) as doi,
+            patch.object(bibliography, "_id_converter_records", return_value=converted),
+            patch.object(bibliography, "_ncbi_summaries", side_effect=summaries),
+            patch.object(bibliography, "_doi_metadata", return_value=doi_metadata) as doi,
         ):
             resolved = core._resolve_bibliographic_metadata(Path(directory), documents)
 
@@ -296,8 +297,8 @@ class BibliographicMetadataTest(unittest.TestCase):
     def test_missing_canonical_publication_metadata_stops_validation(self):
         with (
             tempfile.TemporaryDirectory() as directory,
-            patch.object(core, "_id_converter_records", return_value={}),
-            patch.object(core, "_ncbi_summaries", return_value={}),
+            patch.object(bibliography, "_id_converter_records", return_value={}),
+            patch.object(bibliography, "_ncbi_summaries", return_value={}),
         ):
             with self.assertRaisesRegex(core.ProgramError, "Canonical metadata was not found"):
                 core._resolve_bibliographic_metadata(
@@ -318,7 +319,7 @@ class BibliographicMetadataTest(unittest.TestCase):
             for document in documents
         }
         with tempfile.TemporaryDirectory() as directory, patch.object(
-            core, "_resolve_bibliographic_metadata", return_value=metadata
+            bibliography, "_resolve_bibliographic_metadata", return_value=metadata
         ):
             with self.assertRaisesRegex(core.ProgramError, "identify the same publication"):
                 core._validate_bibliographic_documents(
@@ -333,7 +334,7 @@ class BibliographicMetadataTest(unittest.TestCase):
             "issued": {"date-parts": [[2024, 2, 1]]},
         }
         with tempfile.TemporaryDirectory() as directory, patch.object(
-            core, "_bibliographic_request", return_value=response
+            bibliography, "_bibliographic_request", return_value=response
         ):
             metadata = core._doi_metadata(Path(directory), "10.1000/example")
 
@@ -485,7 +486,7 @@ class WorkflowTest(unittest.TestCase):
         self.unichem_patch = patch.object(core, "_post_unichem", unichem_result)
         self.unichem_patch.start()
         self.bibliographic_patch = patch.object(
-            core, "_resolve_bibliographic_metadata", bibliographic_metadata
+            bibliography, "_resolve_bibliographic_metadata", bibliographic_metadata
         )
         self.bibliographic_patch.start()
         core.initialize(self.root, "Disease", mondo="MONDO:1")
@@ -1314,7 +1315,7 @@ class WorkflowTest(unittest.TestCase):
         }
         with (
             tempfile.TemporaryDirectory() as directory,
-            patch.object(core, "_resolve_bibliographic_metadata", return_value=canonical),
+            patch.object(bibliography, "_resolve_bibliographic_metadata", return_value=canonical),
         ):
             root = Path(directory)
             with self.assertRaisesRegex(core.ProgramError, "metadata mismatch"):

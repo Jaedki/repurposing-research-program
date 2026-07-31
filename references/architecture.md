@@ -65,13 +65,17 @@ Final evidence cards contain the canonical candidate ID, the raw score out of 80
 ## Module boundaries
 
 The programme remains a linear modular monolith. `program_core.py` currently assembles the
-controller while extraction proceeds, but foundational definitions have one owner:
+controller while extraction proceeds, but extracted responsibilities have one owner:
 
 - `repurposing_program.contracts` owns static workflow schemas, scientific rules, rubrics, and
   policies;
 - `repurposing_program.errors` owns `ProgramError`;
 - `repurposing_program.storage` owns canonical serialization, hashing, immutable writes, and run
-  artifact paths.
+  artifact paths;
+- `repurposing_program.evidence` owns evidence-record access, document-content checks, citation
+  traversal, source projection, and deterministic evidence merging;
+- `repurposing_program.bibliography` owns publication-ID normalization, cached metadata transport,
+  canonical publication projection, and bibliographic validation.
 
-These foundational modules never import `program_core`. Later domain modules may depend on them;
-dependency must not point back from a foundation module to orchestration.
+These extracted modules never import `program_core`. Bibliography may depend on the pure evidence
+and foundation modules; dependency must not point back from an extracted module to orchestration.
