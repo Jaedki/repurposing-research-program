@@ -257,6 +257,8 @@ def _merge_candidate_rows(
         "identity": dict(identity),
         "mechanism_hypothesis": _merge_text(*(row["mechanism_hypothesis"] for row in rows)),
         "graph_node_ids": sorted({str(value) for row in rows for value in row["graph_node_ids"]}),
+        "assertion_ids": sorted({str(value) for row in rows for value in row["assertion_ids"]}),
+        "graph_rationale": _merge_text(*(row["graph_rationale"] for row in rows)),
         "pathology_source_ids": sorted({
             str(value) for row in rows for value in row["pathology_source_ids"]
         }),

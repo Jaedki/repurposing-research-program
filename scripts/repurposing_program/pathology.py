@@ -8,6 +8,8 @@ from typing import Any, Mapping
 from pathology_sources import SENTENCE_DECISIONS
 
 from .contracts import (
+    ASSERTION_EVIDENCE_TYPES,
+    ASSERTION_POLARITIES,
     PATHOLOGY_PROFILE_LIST_FIELDS,
     _PATHOLOGY_FORBIDDEN_KEYS,
     _RESEARCH_CONTEXT_SECTIONS,
@@ -15,7 +17,14 @@ from .contracts import (
 from .errors import ProgramError
 from .evidence import _find, _merge_text, _rows
 from .storage import _stable_id
-from .validation import _contract_rows, _ids, _references, _required, _validate_documents
+from .validation import (
+    _contract_rows,
+    _ids,
+    _references,
+    _required,
+    _validate_documents,
+    _validate_exact_object,
+)
 
 def _forbidden_pathology_paths(value: Any, path: str = "$") -> list[str]:
     found: list[str] = []
@@ -395,7 +404,7 @@ def _validate_pathology_item(
     if not {str(row["document_id"]) for row in documents} - source_document_ids:
         raise ProgramError("pathology node research must retain newly researched evidence")
     profiles = _contract_rows(records, "profiles", "node_id")
-    assertions = _contract_rows(records, "assertions", "assertion_id")
+    assertions = _contract_rows(records, "assertions")
     if len(profiles) != 1 or str(profiles[0]["node_id"]) != item_id:
         raise ProgramError("pathology node research must return exactly one profile for item_id")
     source_nodes, _ = _canonical_source_records(results)
@@ -409,13 +418,33 @@ def _validate_pathology_item(
         profile,
         (
             "summary", "normal_state", "pathological_state", "desired_biological_state",
-            "causal_role", "uncertainty",
+            "phenotype_objective", "causal_role", "uncertainty",
         ),
         "profiles[0]",
     )
+    for field in ("desired_biological_state", "phenotype_objective"):
+        if not isinstance(profile[field], str) or not profile[field].strip():
+            raise ProgramError(f"profiles[0].{field} must be non-empty text")
     for field in PATHOLOGY_PROFILE_LIST_FIELDS:
         if not isinstance(profile[field], list):
             raise ProgramError(f"profiles[0].{field} must be a list")
+    secondary_states = profile["secondary_desired_states"]
+    if any(not isinstance(value, str) or not value.strip() for value in secondary_states):
+        raise ProgramError(
+            "profiles[0].secondary_desired_states must contain only non-empty strings"
+        )
+    normalized_secondary_states = [
+        " ".join(value.split()).casefold() for value in secondary_states
+    ]
+    if len(normalized_secondary_states) != len(set(normalized_secondary_states)):
+        raise ProgramError("profiles[0].secondary_desired_states must be unique")
+    normalized_primary_state = " ".join(
+        profile["desired_biological_state"].split()
+    ).casefold()
+    if normalized_primary_state in normalized_secondary_states:
+        raise ProgramError(
+            "profiles[0].secondary_desired_states must not repeat desired_biological_state"
+        )
     node_ids = {str(row["node_id"]) for row in source_nodes}
     source_ids = {
         *source_document_ids,
@@ -439,12 +468,55 @@ def _validate_pathology_item(
         label = f"assertions[{index}]"
         _required(
             row,
-            ("assertion_id", "subject_id", "relation", "object_id", "evidence_summary"),
+            ("subject_id", "relation", "object_id"),
             label,
         )
-        if str(row["subject_id"]) not in node_ids or str(row["object_id"]) not in node_ids:
-            raise ProgramError(f"{label} refers to an unknown curated pathology concept")
-        _references(row, "source_ids", source_ids, label)
+        unknown_endpoints = sorted(
+            {str(row["subject_id"]), str(row["object_id"])} - node_ids
+        )
+        if unknown_endpoints:
+            raise ProgramError(
+                f"{label} contains endpoint IDs not listed in "
+                f"context.allowed_assertion_nodes: {unknown_endpoints}"
+            )
+        contexts = row["evidence_context"]
+        if not isinstance(contexts, list) or not contexts:
+            raise ProgramError(f"{label}.evidence_context must be a non-empty list")
+        seen_contexts: set[tuple[str, str, str, str, str]] = set()
+        for context_index, context in enumerate(contexts):
+            context_label = f"{label}.evidence_context[{context_index}]"
+            context = _validate_exact_object(
+                context,
+                {"source_ids", "evidence_type", "model", "stage", "polarity", "summary"},
+                context_label,
+            )
+            _required(
+                context,
+                ("evidence_type", "model", "stage", "polarity", "summary"),
+                context_label,
+            )
+            for field in ("evidence_type", "model", "stage", "polarity", "summary"):
+                if not isinstance(context[field], str) or not context[field].strip():
+                    raise ProgramError(f"{context_label}.{field} must be non-empty text")
+            if context["evidence_type"] not in ASSERTION_EVIDENCE_TYPES:
+                raise ProgramError(
+                    f"{context_label}.evidence_type must be one of "
+                    f"{sorted(ASSERTION_EVIDENCE_TYPES)}"
+                )
+            if context["polarity"] not in ASSERTION_POLARITIES:
+                raise ProgramError(
+                    f"{context_label}.polarity must be one of {sorted(ASSERTION_POLARITIES)}"
+                )
+            context_key = tuple(
+                " ".join(str(context[field]).split()).casefold()
+                for field in ("evidence_type", "model", "stage", "polarity", "summary")
+            )
+            if context_key in seen_contexts:
+                raise ProgramError(f"{label}.evidence_context entries must be unique")
+            seen_contexts.add(context_key)
+            context_sources = _references(context, "source_ids", source_ids, context_label)
+            if len(context_sources) != len(context["source_ids"]):
+                raise ProgramError(f"{context_label}.source_ids must be unique")
     forbidden = _forbidden_pathology_paths(records)
     if forbidden:
         raise ProgramError(f"Treatment fields are forbidden in pathology research: {forbidden}")

@@ -10,7 +10,6 @@ from .evidence import _rows
 def _provenance_rows(
     rows: list[dict[str, Any]],
     candidates: Mapping[str, Mapping[str, Any]],
-    assertions: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for row in rows:
@@ -20,12 +19,8 @@ def _provenance_rows(
             {
                 "candidate_id": row["candidate_id"],
                 "graph_node_ids": sorted(node_ids),
-                "assertion_ids": sorted(
-                    assertion["assertion_id"]
-                    for assertion in assertions
-                    if str(assertion["subject_id"]) in node_ids
-                    or str(assertion["object_id"]) in node_ids
-                ),
+                "assertion_ids": sorted(map(str, candidate["assertion_ids"])),
+                "graph_rationale": candidate["graph_rationale"],
                 "pathology_source_ids": sorted(
                     map(str, candidate["pathology_source_ids"])
                 ),

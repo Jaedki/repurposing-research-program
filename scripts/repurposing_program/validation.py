@@ -60,6 +60,37 @@ def _references(row: Mapping[str, Any], field: str, allowed: set[str], label: st
     return refs
 
 
+def _validate_cited_entries(
+    value: Any,
+    *,
+    label: str,
+    text_field: str,
+    source_ids: set[str],
+) -> None:
+    if not isinstance(value, list):
+        raise ProgramError(f"{label} must be a list of objects")
+    seen: set[str] = set()
+    required_fields = {text_field, "source_ids"}
+    for index, entry in enumerate(value):
+        entry_label = f"{label}[{index}]"
+        if not isinstance(entry, dict):
+            raise ProgramError(f"{entry_label} must be an object")
+        missing = sorted(required_fields - set(entry))
+        if missing:
+            raise ProgramError(f"{entry_label} is missing fields: {', '.join(missing)}")
+        unexpected = sorted(set(entry) - required_fields)
+        if unexpected:
+            raise ProgramError(f"{entry_label} has unexpected fields: {unexpected}")
+        text = str(entry[text_field]).strip()
+        if not text:
+            raise ProgramError(f"{entry_label}.{text_field} must be non-empty")
+        key = text.casefold()
+        if key in seen:
+            raise ProgramError(f"{label}.{text_field} values must be unique")
+        seen.add(key)
+        _references(entry, "source_ids", source_ids, entry_label)
+
+
 def _secret_paths(value: Any, path: str = "$") -> list[str]:
     found: list[str] = []
     if isinstance(value, dict):

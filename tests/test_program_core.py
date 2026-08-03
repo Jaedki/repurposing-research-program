@@ -360,6 +360,16 @@ class BibliographicMetadataTest(unittest.TestCase):
 
 
 class ArtifactPersistenceTest(unittest.TestCase):
+    def test_rows_returns_defensive_record_copies(self):
+        records = {"items": [{"item_id": "ITEM:1", "values": ["original"]}]}
+
+        rows = evidence._rows(records, "items")
+        rows[0]["item_id"] = "ITEM:CHANGED"
+
+        self.assertIsNot(rows, records["items"])
+        self.assertIsNot(rows[0], records["items"][0])
+        self.assertEqual(records["items"][0]["item_id"], "ITEM:1")
+
     def test_write_once_rejects_conflicting_accepted_result(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "results" / "items" / "accepted.json"
@@ -626,6 +636,14 @@ class WorkflowTest(unittest.TestCase):
         contract = research_packet["result_contract"]
         self.assertEqual(contract["records"]["profiles"]["type"], "list of objects")
         self.assertIsInstance(contract["records"]["profiles"]["required_fields"], list)
+        profile_fields = contract["records"]["profiles"]["required_fields"]
+        self.assertIn("secondary_desired_states", profile_fields)
+        self.assertIn("phenotype_objective", profile_fields)
+        for excluded_field in (
+            "applicable_stage_population", "measurable_readouts", "causal_prerequisites",
+            "invalidating_conditions",
+        ):
+            self.assertNotIn(excluded_field, profile_fields)
         self.assertTrue(any("temporal_context" in rule for rule in contract["field_rules"]))
         self.assertIn(action["packet_id"], action["worker_prompt"])
         self.assertIn(action["suggested_result_path"], action["worker_prompt"])
@@ -641,7 +659,22 @@ class WorkflowTest(unittest.TestCase):
             research_packet["context"]["disease_context"][0]["section"],
             "description",
         )
+        self.assertEqual(
+            [row["node_id"] for row in research_packet["context"]["allowed_assertion_nodes"]],
+            ["MONDO:1", "NODE:1"],
+        )
+        research_rules = " ".join(contract["field_rules"])
+        endpoint_rule = contracts.PATHOLOGY_ASSERTION_ENDPOINT_RULE
+        self.assertIn(endpoint_rule, research_packet["task"])
+        self.assertIn(endpoint_rule, contract["field_rules"])
+        self.assertEqual(research_packet["task"].count(endpoint_rule), 1)
+        self.assertEqual(contract["field_rules"].count(endpoint_rule), 1)
+        self.assertIn("context.allowed_assertion_nodes", research_rules)
         pathology_records = self.profile(first_item, node_type)
+        pathology_records["assertions"] = [
+            self.assertion(first_item, "MONDO:1", relation="contributes_to"),
+            self.assertion(first_item, "MONDO:1", relation="precedes"),
+        ]
         pathology_records["documents"].append(
             {"document_id": "PMID:90", "title": "Unused pathology search hit", "source": "test"}
         )
@@ -672,9 +705,16 @@ class WorkflowTest(unittest.TestCase):
             {"type": "list of objects", **contracts.ROW_SCHEMAS["candidates"]},
         )
         self.assertIn("identifiers", candidate_contract["required_fields"])
+        self.assertIn("assertion_ids", candidate_contract["required_fields"])
+        self.assertIn("graph_rationale", candidate_contract["required_fields"])
         self.assertNotIn("identity", candidate_contract["required_fields"])
         self.assertEqual(packet["context"]["focal_context"]["node"]["node_id"], "NODE:1")
         self.assertEqual(packet["context"]["focal_context"]["profile"]["node_id"], "NODE:1")
+        assertions_by_relation = {
+            row["relation"]: row["assertion_id"]
+            for row in packet["context"]["focal_context"]["assertions"]
+        }
+        selected_assertion_id = assertions_by_relation["contributes_to"]
         self.assertEqual(
             [row["node_id"] for row in packet["context"]["graph_index"]], ["NODE:1"]
         )
@@ -697,6 +737,10 @@ class WorkflowTest(unittest.TestCase):
                     "identifiers": {"chembl": "CHEMBL1"},
                     "mechanism_hypothesis": "inhibits the process",
                     "graph_node_ids": ["NODE:1"],
+                    "assertion_ids": [selected_assertion_id],
+                    "graph_rationale": (
+                        "The selected contributes_to assertion establishes the focal disease link."
+                    ),
                     "pathology_source_ids": ["SRC:1"],
                     "mechanism_source_ids": ["PMID:1", "PMID:2"],
                 },
@@ -706,6 +750,10 @@ class WorkflowTest(unittest.TestCase):
                     "identifiers": {"chembl": "CHEMBL2"},
                     "mechanism_hypothesis": "modulates the process",
                     "graph_node_ids": ["NODE:1"],
+                    "assertion_ids": [],
+                    "graph_rationale": (
+                        "The focal pathology profile alone establishes the disease context."
+                    ),
                     "pathology_source_ids": ["SRC:1"],
                     "mechanism_source_ids": ["PMID:2"],
                 },
@@ -893,6 +941,21 @@ class WorkflowTest(unittest.TestCase):
         summary = (self.root / "outputs" / "summary.md").read_text(encoding="utf-8")
         self.assertIn("raw candidate seeds: 2; deduplicated candidates: 2", summary)
         self.assertIn("4 20-point components out of 80", summary)
+        self.assertIn("## Graph coverage", summary)
+        self.assertIn("Candidates per graph node: NODE:1 (Process): 2", summary)
+        self.assertIn("Nodes with no candidate: none", summary)
+        self.assertIn("Candidates using more than one node: none", summary)
+        self.assertIn("Candidates using context-only nodes: none", summary)
+        provenance = [
+            json.loads(line)
+            for line in (self.root / "outputs" / "candidate_provenance.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        self.assertEqual(len(provenance), 1)
+        self.assertEqual(provenance[0]["assertion_ids"], [selected_assertion_id])
+        self.assertNotIn(assertions_by_relation["precedes"], provenance[0]["assertion_ids"])
+        self.assertIn("contributes_to assertion", provenance[0]["graph_rationale"])
         cards = (self.root / "outputs" / "candidate_cards.md").read_text(encoding="utf-8")
         self.assertIn("## UNICHEM:1", cards)
         self.assertIn(
@@ -1021,10 +1084,22 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("context_only even when measurable", guidance)
         self.assertIn("bare entity or observational readout", guidance)
         self.assertIn("uncertainty never upgrades", guidance)
+        self.assertIn("different causal levels", guidance)
         pathology_guidance = contracts.STAGE_GUIDANCE["pathology_node_research"]["task"]
         self.assertIn("Keep discovery pathology-led", pathology_guidance)
         self.assertIn("directional evidence", pathology_guidance)
+        self.assertIn("one biological variable and one desired direction", pathology_guidance)
+        self.assertIn("secondary_desired_states", pathology_guidance)
+        self.assertIn("phenotype_objective", pathology_guidance)
+        self.assertIn("do not create additional graph nodes", pathology_guidance)
+        self.assertIn("evidence_context", pathology_guidance)
+        self.assertIn("Python assigns the final assertion ID", pathology_guidance)
         seed_guidance = contracts.STAGE_GUIDANCE["candidate_seed_research"]["task"]
+        self.assertIn("primary desired_biological_state", seed_guidance)
+        self.assertIn("do not create additional discovery routes", seed_guidance)
+        self.assertIn("assertion_ids", seed_guidance)
+        self.assertIn("graph_rationale", seed_guidance)
+        self.assertIn("cross-node use is never mandatory", seed_guidance)
         self.assertIn("symptomatic or compensatory benefit", seed_guidance)
         self.assertIn("linked context nodes", seed_guidance)
         self.assertIn("do not use disease-specific drug literature", seed_guidance)
@@ -1211,6 +1286,10 @@ class WorkflowTest(unittest.TestCase):
             *source["records"]["documents"],
             *self.profile("NODE:1", "mechanism")["documents"],
         ]
+        selected_assertion = graph_rules._merge_assertions([
+            self.assertion("NODE:1", "NODE:2", source_id="SRC:2")
+        ])[0]
+        graph["assertions"] = [selected_assertion]
         results["evidence_graph"] = {"records": graph}
         seed_records = {
             "documents": [
@@ -1223,6 +1302,10 @@ class WorkflowTest(unittest.TestCase):
                     "identifiers": {"chembl": "CHEMBL1"},
                     "mechanism_hypothesis": "Mechanism using both contexts",
                     "graph_node_ids": ["NODE:1", "NODE:2"],
+                    "assertion_ids": [],
+                    "graph_rationale": (
+                        "The focal profile and linked context node support the hypothesis."
+                    ),
                     "pathology_source_ids": ["SRC:1"],
                     "mechanism_source_ids": ["PMID:2"],
                 }
@@ -1232,6 +1315,24 @@ class WorkflowTest(unittest.TestCase):
         with self.assertRaisesRegex(core.ProgramError, "do not support graph nodes"):
             candidate_rules._validate_seed_item(seed_records, "NODE:1", results)
         seed_records["candidates"][0]["pathology_source_ids"].append("SRC:2")
+        candidate_rules._validate_seed_item(seed_records, "NODE:1", results)
+
+        invalid_records = json.loads(json.dumps(seed_records))
+        invalid_records["candidates"][0]["assertion_ids"] = ["ASSERTION:UNKNOWN"]
+        with self.assertRaisesRegex(core.ProgramError, "assertion_ids contains unknown IDs"):
+            candidate_rules._validate_seed_item(invalid_records, "NODE:1", results)
+
+        invalid_records = json.loads(json.dumps(seed_records))
+        invalid_records["candidates"][0]["assertion_ids"] = [
+            selected_assertion["assertion_id"]
+        ]
+        invalid_records["candidates"][0]["graph_node_ids"] = ["NODE:1"]
+        with self.assertRaisesRegex(core.ProgramError, "include selected assertion nodes"):
+            candidate_rules._validate_seed_item(invalid_records, "NODE:1", results)
+
+        seed_records["candidates"][0]["assertion_ids"] = [
+            selected_assertion["assertion_id"]
+        ]
         candidate_rules._validate_seed_item(seed_records, "NODE:1", results)
 
     def test_pathology_research_requires_retained_evidence(self):
@@ -1264,11 +1365,73 @@ class WorkflowTest(unittest.TestCase):
             self.submit(action, records)
 
         records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
+        records["profiles"][0]["phenotype_objective"] = ""
+        with self.assertRaisesRegex(core.ProgramError, "phenotype_objective"):
+            self.submit(action, records)
+
+        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
+        records["profiles"][0]["secondary_desired_states"] = "increase resilience"
+        with self.assertRaisesRegex(core.ProgramError, "secondary_desired_states must be a list"):
+            self.submit(action, records)
+
+        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
+        records["profiles"][0]["secondary_desired_states"] = [" "]
+        with self.assertRaisesRegex(core.ProgramError, "only non-empty strings"):
+            self.submit(action, records)
+
+        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
+        records["profiles"][0]["secondary_desired_states"] = [
+            "increase cellular resilience", " Increase  cellular resilience ",
+        ]
+        with self.assertRaisesRegex(core.ProgramError, "secondary_desired_states must be unique"):
+            self.submit(action, records)
+
+        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
+        records["profiles"][0]["secondary_desired_states"] = [
+            " Restore  the normal process ",
+        ]
+        with self.assertRaisesRegex(core.ProgramError, "must not repeat desired_biological_state"):
+            self.submit(action, records)
+
+        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
         records["profiles"][0]["established_pathology_observations"] = [
             {"observation": "unsupported", "source_ids": ["PMID:999"]}
         ]
         with self.assertRaisesRegex(core.ProgramError, "unknown IDs"):
             self.submit(action, records)
+
+        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
+        records["assertions"] = [self.assertion(action["next_item_id"], "MONDO:1")]
+        records["assertions"][0]["assertion_id"] = "ASSERTION:WORKER"
+        with self.assertRaisesRegex(core.ProgramError, "unexpected fields"):
+            self.submit(action, records)
+
+        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
+        records["assertions"] = [self.assertion(action["next_item_id"], "MONDO:1")]
+        records["assertions"][0]["evidence_context"][0]["evidence_type"] = "generic"
+        with self.assertRaisesRegex(core.ProgramError, "evidence_type must be one of"):
+            self.submit(action, records)
+
+        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
+        records["assertions"] = [
+            self.assertion(action["next_item_id"], "NCBIGene:785")
+        ]
+        with self.assertRaisesRegex(
+            core.ProgramError,
+            "context.allowed_assertion_nodes.*NCBIGene:785",
+        ):
+            self.submit(action, records)
+        rejected_status = core.status(self.root)
+        self.assertEqual(rejected_status["state"], "needs_agent")
+        self.assertEqual(rejected_status["next_task"], "pathology_node_research")
+        self.assertEqual(rejected_status["next_item_id"], action["next_item_id"])
+
+        self.submit(
+            action,
+            self.profile(action["next_item_id"], packet["context"]["node"]["node_type"]),
+        )
+        resumed_action = core.next_action(self.root)
+        self.assertEqual(resumed_action["next_task"], "candidate_seed_research")
 
     def test_canonical_document_identifier_families(self):
         for document_id in (
@@ -1565,6 +1728,10 @@ class WorkflowTest(unittest.TestCase):
                 ("SEED-B", "PUBCHEM:121892", "NODE:B"),
             )
         ]
+        seeds[0]["assertion_ids"] = ["ASSERTION:A"]
+        seeds[0]["graph_rationale"] = "Assertion A supports the first origin concept."
+        seeds[1]["assertion_ids"] = ["ASSERTION:B"]
+        seeds[1]["graph_rationale"] = "Assertion B supports the second origin concept."
         prior = {
             "candidate_seed_generation": {
                 "records": {
@@ -1595,6 +1762,9 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0]["candidate_id"], "UNICHEM:121892")
         self.assertEqual(candidates[0]["member_seed_ids"], ["SEED-A", "SEED-B"])
+        self.assertEqual(candidates[0]["assertion_ids"], ["ASSERTION:A", "ASSERTION:B"])
+        self.assertIn("first origin concept", candidates[0]["graph_rationale"])
+        self.assertIn("second origin concept", candidates[0]["graph_rationale"])
         records["identity_groups"][0]["member_seed_ids"] = ["SEED-A"]
         with self.assertRaisesRegex(core.ProgramError, "cannot split an exact UniChem"):
             identity._validate_candidate_identity(records, prior)
@@ -2021,33 +2191,66 @@ class WorkflowTest(unittest.TestCase):
         self.assertNotIn("Aliases:", payload)
         self.assertNotIn("### Why not", payload)
 
-    def test_assertion_evidence_merges_but_identity_collision_fails(self):
+    def test_assertions_merge_by_triple_with_context_and_controller_id(self):
         assertion = {
-            "assertion_id": "ASSERTION:1",
             "subject_id": "NODE:1",
             "relation": "contributes_to",
             "object_id": "NODE:2",
-            "evidence_summary": "first finding",
-            "source_ids": ["PMID:1"],
+            "evidence_context": [{
+                "source_ids": ["PMID:1"],
+                "evidence_type": "human",
+                "model": "affected individuals",
+                "stage": "established disease",
+                "polarity": "supports",
+                "summary": "first finding",
+            }],
         }
         merged = graph_rules._merge_assertions([
             assertion,
             {
                 **assertion,
-                "evidence_summary": "second finding",
-                "source_ids": ["PMID:2"],
+                "evidence_context": [{
+                    **assertion["evidence_context"][0],
+                    "source_ids": ["PMID:2"],
+                }],
+            },
+            {
+                **assertion,
+                "evidence_context": [{
+                    "source_ids": ["PMID:3"],
+                    "evidence_type": "animal",
+                    "model": "disease model",
+                    "stage": "presymptomatic",
+                    "polarity": "contradicts",
+                    "summary": "opposite model finding",
+                }],
             },
         ])
 
         self.assertEqual(len(merged), 1)
-        self.assertEqual(merged[0]["source_ids"], ["PMID:1", "PMID:2"])
         self.assertEqual(
-            merged[0]["evidence_summary"], "first finding | second finding"
+            merged[0]["assertion_id"],
+            storage._stable_id("ASSERTION", {
+                "subject_id": "NODE:1",
+                "relation": "contributes_to",
+                "object_id": "NODE:2",
+            }),
         )
-        with self.assertRaisesRegex(core.ProgramError, "Conflicting assertion identities"):
-            graph_rules._merge_assertions(
-                [assertion, {**assertion, "object_id": "NODE:3"}]
-            )
+        self.assertNotIn("source_ids", merged[0])
+        self.assertNotIn("evidence_summary", merged[0])
+        contexts = merged[0]["evidence_context"]
+        self.assertEqual(len(contexts), 2)
+        self.assertEqual(
+            next(row for row in contexts if row["polarity"] == "supports")["source_ids"],
+            ["PMID:1", "PMID:2"],
+        )
+        self.assertEqual(
+            {row["polarity"] for row in contexts}, {"supports", "contradicts"}
+        )
+        distinct = graph_rules._merge_assertions(
+            [assertion, {**assertion, "object_id": "NODE:3"}]
+        )
+        self.assertEqual(len(distinct), 2)
 
     @staticmethod
     def profile(item_id, node_type):
@@ -2063,6 +2266,8 @@ class WorkflowTest(unittest.TestCase):
                     "normal_state": "normal",
                     "pathological_state": "abnormal",
                     "desired_biological_state": "restore the normal process",
+                    "secondary_desired_states": [],
+                    "phenotype_objective": "reduce the disease-defining functional impairment",
                     "established_pathology_observations": [],
                     "causal_role": "causal",
                     "mechanisms": ["mechanism"],
@@ -2088,6 +2293,8 @@ class WorkflowTest(unittest.TestCase):
             "identity": identity,
             "mechanism_hypothesis": f"mechanism {node_id}",
             "graph_node_ids": [node_id],
+            "assertion_ids": [],
+            "graph_rationale": f"The focal profile for {node_id} is sufficient.",
             "pathology_source_ids": [f"PATH:{node_id}"],
             "mechanism_source_ids": [f"MOA:{node_id}"],
             "origin_concept_ids": [concept_id],
@@ -2104,6 +2311,8 @@ class WorkflowTest(unittest.TestCase):
             "identifiers": identifiers or {},
             "mechanism_hypothesis": f"mechanism {concept_id}",
             "graph_node_ids": [concept_id],
+            "assertion_ids": [],
+            "graph_rationale": f"The focal profile for {concept_id} is sufficient.",
             "pathology_source_ids": [f"PATH:{concept_id}"],
             "mechanism_source_ids": [f"MOA:{concept_id}"],
             "origin_concept_ids": [concept_id],
@@ -2112,6 +2321,24 @@ class WorkflowTest(unittest.TestCase):
         if resolution is not None:
             row["identity_resolution"] = resolution
         return row
+
+    @staticmethod
+    def assertion(
+        subject_id, object_id, *, relation="contributes_to", source_id="PMID:1"
+    ):
+        return {
+            "subject_id": subject_id,
+            "relation": relation,
+            "object_id": object_id,
+            "evidence_context": [{
+                "source_ids": [source_id],
+                "evidence_type": "human",
+                "model": "affected individuals",
+                "stage": "established disease",
+                "polarity": "supports",
+                "summary": "The source supports this disease-pathology relationship.",
+            }],
+        }
 
     @staticmethod
     def review(candidate_id, source_id="PMID:1"):

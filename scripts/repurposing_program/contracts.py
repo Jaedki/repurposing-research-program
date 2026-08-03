@@ -39,6 +39,15 @@ STAGES = (
     "candidate_audit",
 )
 GRAPH_INDEX_FIELDS = ("node_id", "label", "node_type", "disposition", "aliases")
+ASSERTION_EVIDENCE_TYPES = frozenset({
+    "human", "animal", "cell", "biochemical", "inferred",
+})
+ASSERTION_POLARITIES = frozenset({"supports", "contradicts"})
+PATHOLOGY_ASSERTION_ENDPOINT_RULE = (
+    "Assertions are optional and may use only node_id values listed in "
+    "context.allowed_assertion_nodes; never use aliases, cross-references, or newly researched "
+    "entities as endpoints, and keep mechanisms without two allowed endpoints in the profile."
+)
 _CITATION_FIELDS = frozenset({"source_ids", "pathology_source_ids", "mechanism_source_ids"})
 _SOURCE_CHECK_VERDICTS = frozenset({
     "supports", "partly_supports", "does_not_support", "contradicts",
@@ -164,7 +173,9 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "supplied source-derived pathology nodes into coherent run-local concepts "
             "before research; do not minimize concept count. Merge only when one disease-specific "
             "biological profile and one desired biological state accurately describe every "
-            "member at the same causal level. Shared genes, ontology IDs, pathways, anatomy, or "
+            "member at the same causal level. Keep source-supported claims at different causal "
+            "levels separate even when one causes another; do not bundle them to reduce work. "
+            "Shared genes, ontology IDs, pathways, anatomy, or "
             "causal relationships do not establish equivalence; keep bare entities, disease "
             "drivers, mechanisms, and phenotypes separate unless they express the same claim. "
             "Input node_type values are provisional source-adapter categories, not curated "
@@ -198,10 +209,21 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "Research this one curated pathology concept in exceptional disease-specific "
             "depth. Explain its normal state, pathological change, causal role, mechanisms, "
             "biological context, uncertainty, contradictions, and gaps. Define one concise, "
-            "evidence-grounded desired biological state that would reverse the focal pathology "
-            "or compensate for an irreversible driver. Label synthesis as inference and cite the "
-            "directional evidence it follows from. Retain only established pathology "
-            "observations of movement toward that state; an empty list is valid. Keep discovery "
+            "evidence-grounded primary desired biological state containing one biological "
+            "variable and one desired direction. For an irreversible driver, define the specific "
+            "compensatory state rather than generic improvement. Put other atomic biological "
+            "states in secondary_desired_states and keep phenotype outcomes out of both state "
+            "fields. Define phenotype_objective separately as the disease-relevant phenotype "
+            "change sought, not an assay, stage, population, or treatment. Label synthesis as "
+            "inference and cite the directional evidence it follows from. Record important "
+            "bundled or missing submechanisms as explicit gaps; do not create additional graph "
+            "nodes. "
+            f"{PATHOLOGY_ASSERTION_ENDPOINT_RULE} Express each "
+            "researched graph assertion as a biological triple with one or "
+            "more evidence_context entries that preserve evidence type, model, stage, polarity, "
+            "summary, and citations; Python assigns the final assertion ID. Retain only "
+            "established pathology observations of movement toward that state; an empty list is "
+            "valid. Keep discovery "
             "pathology-led: do not search for candidates, therapies, repurposing, or disease-drug "
             "associations. When an intervention appears in a source, retain only directly supported "
             "causal biology and pathology; do not use its therapeutic interpretation, efficacy, "
@@ -214,7 +236,14 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
         "task": (
             "For this frozen researched pathology concept and its linked context, generate a "
             "focused set of diverse existing-drug seeds whose established mode of action could "
-            "produce its desired biological state. Do not pad the "
+            "produce its primary desired_biological_state. Secondary desired states and the "
+            "phenotype objective are context only and do not create additional discovery routes. "
+            "List only graph assertion IDs actually used and explain the selected graph support "
+            "once in graph_rationale without repeating the drug mechanism hypothesis. An empty "
+            "assertion_ids list is valid when the focal profile alone supports the hypothesis, "
+            "but graph_rationale must say so. Include only materially used graph nodes. "
+            "Inspect related graph context when relevant, but cross-node use is never mandatory. "
+            "Do not pad the "
             "list. Consider both disease-modifying changes to the assigned concept and symptomatic "
             "or compensatory benefit for linked context nodes where mechanistically plausible. "
             "Retain a less-plausible seed only when it offers a discriminating, mechanism-relevant "
@@ -327,24 +356,24 @@ ROW_SCHEMAS = {
     "profiles": {
         "required_fields": [
             "node_id", "node_type", "summary", "normal_state", "pathological_state",
-            "desired_biological_state", "established_pathology_observations", "causal_role",
-            "mechanisms", "cell_types", "anatomical_context", "temporal_context",
-            "upstream_causes", "downstream_consequences", "contradictions", "gaps",
-            "uncertainty", "source_ids",
+            "desired_biological_state", "secondary_desired_states", "phenotype_objective",
+            "established_pathology_observations", "causal_role", "mechanisms", "cell_types",
+            "anatomical_context", "temporal_context", "upstream_causes",
+            "downstream_consequences", "contradictions", "gaps", "uncertainty", "source_ids",
         ],
         "additional_fields": False,
     },
     "assertions": {
         "required_fields": [
-            "assertion_id", "subject_id", "relation", "object_id",
-            "evidence_summary", "source_ids",
+            "subject_id", "relation", "object_id", "evidence_context",
         ],
         "additional_fields": False,
     },
     "candidates": {
         "required_fields": [
             "candidate_id", "name", "identifiers", "mechanism_hypothesis",
-            "graph_node_ids", "pathology_source_ids", "mechanism_source_ids",
+            "graph_node_ids", "assertion_ids", "graph_rationale", "pathology_source_ids",
+            "mechanism_source_ids",
         ],
         "additional_fields": False,
         "field_types": {"identifiers": "object"},
@@ -384,8 +413,9 @@ ROW_SCHEMAS = {
 }
 
 PATHOLOGY_PROFILE_LIST_FIELDS = (
-    "mechanisms", "cell_types", "anatomical_context", "temporal_context",
-    "upstream_causes", "downstream_consequences", "contradictions", "gaps", "source_ids",
+    "secondary_desired_states", "mechanisms", "cell_types", "anatomical_context",
+    "temporal_context", "upstream_causes", "downstream_consequences", "contradictions",
+    "gaps", "source_ids",
 )
 
 FIELD_RULES = {
@@ -401,6 +431,7 @@ FIELD_RULES = {
         "partition every supplied non-anchor source node exactly once across concepts",
         "concept_id is one member_node_id; choose an authoritative member ID only after same-level "
         "equivalence is established and the ID denotes the curated concept",
+        "keep source-supported claims at different causal levels separate even when causally linked",
         "shared identifiers, genes, pathways, anatomy, or causal adjacency are not equivalence; "
         "one biological profile and desired biological state must fit every merged member",
         "same-label gene-level source claims may merge across sources; mutation-, variant-, "
@@ -416,14 +447,25 @@ FIELD_RULES = {
         "return exactly one profile whose node_id and node_type match the supplied curated concept",
         "retain at least one independently researched document",
         f"profile fields {', '.join(PATHOLOGY_PROFILE_LIST_FIELDS)} are JSON lists",
-        "desired_biological_state is one concise biological state, not a treatment, assay, "
-        "control, candidate, or generic clinical improvement",
+        "desired_biological_state contains one biological variable and one desired direction; "
+        "it is not a treatment, assay, control, candidate, phenotype outcome, or generic clinical "
+        "improvement, and an irreversible driver uses a specific compensatory state",
+        "secondary_desired_states contains only distinct atomic biological states and may be "
+        "empty; phenotype_objective is a separate disease-phenotype change, not a biological "
+        "state, assay, stage, population, or treatment",
+        "record important bundled or missing submechanisms in gaps; do not invent graph nodes",
+        PATHOLOGY_ASSERTION_ENDPOINT_RULE,
         "established_pathology_observations is a list of observation and source_ids objects; "
         "use an empty list rather than inventing an assay, threshold, or biomarker",
-        "assertions link only supplied source-derived node IDs; all claims cite retained sources; "
-        "no treatment content",
+        "assertions contain subject_id, relation, object_id, and evidence_context only; Python "
+        "assigns assertion_id from the biological triple",
+        "each evidence_context cites retained sources and records evidence_type as human, animal, "
+        "cell, biochemical, or inferred; model; stage; polarity as supports or contradicts; and "
+        "one context-specific summary; no treatment content",
     ],
     "candidate_seed_research": [
+        "candidate discovery is anchored to desired_biological_state; secondary desired states "
+        "and phenotype_objective are context only and do not create discovery routes",
         "include every authoritative candidate identifier found because Python submits all "
         "supported identifiers to UniChem; identity resolution belongs to Python and the later "
         "identity-review stage",
@@ -434,7 +476,13 @@ FIELD_RULES = {
         "combination, mixture, formulation, or biologic product",
         "candidates are repurposing hypotheses, not controls or comparators; do not pad the set",
         "graph_node_ids includes the supplied researched concept and may include other indexed "
-        "non-anchor concepts used by the hypothesis; pathology_source_ids support those concepts",
+        "non-anchor concepts materially used by the hypothesis; pathology_source_ids support "
+        "those concepts",
+        "assertion_ids lists only graph assertions materially used; it may be empty when the focal "
+        "profile is sufficient, and graph_rationale explains the selected graph support once "
+        "without repeating mechanism_hypothesis",
+        "inspect related graph context when relevant; cross-node use is optional and must never be "
+        "added for coverage",
         "each graph_node_id has at least one attached source in pathology_source_ids; state the "
         "supported relationship because graph proximity or label similarity is not evidence",
         "mechanism_source_ids support the drug mode of action and exclude disease-specific drug evidence",
