@@ -28,7 +28,7 @@ def _rows(records: Mapping[str, Any], name: str) -> list[dict[str, Any]]:
     value = records.get(name)
     if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
         raise ProgramError(f"records.{name} must be a list of objects")
-    return value
+    return [dict(row) for row in value]
 
 
 def _find(rows: Iterable[dict[str, Any]], field: str, value: str) -> dict[str, Any]:

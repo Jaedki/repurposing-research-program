@@ -7,10 +7,10 @@ from typing import Any, Iterable, Mapping
 from .contracts import GRAPH_INDEX_FIELDS
 from .errors import ProgramError
 from .evidence import (
+    _cited_ids,
     _cited_documents,
     _find,
     _merge_documents,
-    _merge_text,
     _merge_unique,
     _rows,
     _select_cited_documents,
@@ -19,30 +19,53 @@ from .pathology import _canonical_source_records
 from .storage import _stable_id
 
 def _merge_assertions(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    merged: dict[str, dict[str, Any]] = {}
+    merged: dict[
+        tuple[str, str, str],
+        dict[tuple[str, str, str, str, str], dict[str, Any]],
+    ] = {}
     for row in rows:
-        assertion_id = str(row.get("assertion_id", "")).strip()
-        if not assertion_id:
-            raise ProgramError("assertions.assertion_id is required")
-        current = merged.get(assertion_id)
-        if current is None:
-            merged[assertion_id] = {**row, "assertion_id": assertion_id}
-            continue
-        if any(
-            current[field] != row[field]
+        triple = tuple(
+            str(row.get(field, "")).strip()
             for field in ("subject_id", "relation", "object_id")
-        ):
-            raise ProgramError(
-                f"Conflicting assertion identities share assertion_id={assertion_id}"
-            )
-        current["source_ids"] = sorted({
-            *map(str, current["source_ids"]),
-            *map(str, row["source_ids"]),
-        })
-        current["evidence_summary"] = _merge_text(
-            current["evidence_summary"], row["evidence_summary"]
         )
-    return [merged[key] for key in sorted(merged)]
+        if not all(triple):
+            raise ProgramError("assertions require subject_id, relation, and object_id")
+        contexts = row.get("evidence_context")
+        if not isinstance(contexts, list) or not contexts:
+            raise ProgramError("assertions.evidence_context must be a non-empty list")
+        grouped_contexts = merged.setdefault(triple, {})
+        for context in contexts:
+            context_key = tuple(
+                str(context[field])
+                for field in ("evidence_type", "model", "stage", "polarity", "summary")
+            )
+            current = grouped_contexts.setdefault(
+                context_key,
+                {
+                    "evidence_type": context_key[0],
+                    "model": context_key[1],
+                    "stage": context_key[2],
+                    "polarity": context_key[3],
+                    "summary": context_key[4],
+                    "source_ids": [],
+                },
+            )
+            current["source_ids"] = sorted({
+                *map(str, current["source_ids"]),
+                *map(str, context["source_ids"]),
+            })
+    assertions: list[dict[str, Any]] = []
+    for triple in sorted(merged):
+        triple_record = dict(zip(("subject_id", "relation", "object_id"), triple))
+        assertions.append({
+            "assertion_id": _stable_id("ASSERTION", triple_record),
+            **triple_record,
+            "evidence_context": [
+                merged[triple][context_key]
+                for context_key in sorted(merged[triple])
+            ],
+        })
+    return assertions
 
 
 def _graph_index(records: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -65,8 +88,13 @@ def _graph_support_ids(records: Mapping[str, Any]) -> dict[str, set[str]]:
         node_id = str(row["node_id"])
         if node_id in support:
             support[node_id].update(map(str, row["source_ids"]))
-    for row in [*_rows(records, "source_edges"), *_rows(records, "assertions")]:
+    for row in _rows(records, "source_edges"):
         source_ids = set(map(str, row["source_ids"]))
+        for node_id in map(str, (row["subject_id"], row["object_id"])):
+            if node_id in support:
+                support[node_id].update(source_ids)
+    for row in _rows(records, "assertions"):
+        source_ids = _cited_ids(row)
         for node_id in map(str, (row["subject_id"], row["object_id"])):
             if node_id in support:
                 support[node_id].update(source_ids)

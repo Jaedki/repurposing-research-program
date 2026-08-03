@@ -61,12 +61,55 @@ def _write_output_files(
     )
     _write_jsonl(
         outputs / "candidate_provenance.jsonl",
-        _provenance_rows(rows, candidates, assertions),
+        _provenance_rows(rows, candidates),
     )
     gap_count = sum(len(results[stage].get("gaps", [])) for stage in STAGES)
     raw_candidate_count = len(
         _rows(results["candidate_seed_generation"]["records"], "candidates")
     )
+    coverage_nodes = [
+        node for node in _rows(graph, "source_nodes")
+        if node.get("node_type") != "disease_anchor"
+    ]
+    candidate_node_ids = {
+        str(candidate_id): set(map(str, candidate["graph_node_ids"]))
+        for candidate_id, candidate in candidates.items()
+    }
+    candidate_ids_by_node = {
+        str(node["node_id"]): sorted(
+            candidate_id
+            for candidate_id, node_ids in candidate_node_ids.items()
+            if str(node["node_id"]) in node_ids
+        )
+        for node in coverage_nodes
+    }
+    candidates_using_multiple_nodes = sorted(
+        candidate_id
+        for candidate_id, node_ids in candidate_node_ids.items()
+        if len(node_ids) > 1
+    )
+    context_only_ids = {
+        str(node["node_id"])
+        for node in coverage_nodes
+        if node.get("disposition") == "context_only"
+    }
+    candidates_using_context_only_nodes = sorted(
+        candidate_id
+        for candidate_id, node_ids in candidate_node_ids.items()
+        if node_ids & context_only_ids
+    )
+    node_coverage = "; ".join(
+        f"{node['node_id']} ({node['label']}): "
+        f"{len(candidate_ids_by_node[str(node['node_id'])])}"
+        for node in coverage_nodes
+    ) or "none"
+    uncovered_nodes = ", ".join(
+        f"{node['node_id']} ({node['label']})"
+        for node in coverage_nodes
+        if not candidate_ids_by_node[str(node["node_id"])]
+    ) or "none"
+    multiple_node_candidates = ", ".join(candidates_using_multiple_nodes) or "none"
+    context_only_candidates = ", ".join(candidates_using_context_only_nodes) or "none"
     summary = (
         "# Repurposing programme summary\n\n"
         f"Disease: {case['disease']}\n\n"
@@ -78,6 +121,11 @@ def _write_output_files(
         f"assertions: {len(graph['assertions'])}; raw candidate seeds: "
         f"{raw_candidate_count}; deduplicated candidates: {len(candidates)}; "
         f"reported gaps: {gap_count}.\n\n"
+        "## Graph coverage\n\n"
+        f"Candidates per graph node: {node_coverage}.\n\n"
+        f"Nodes with no candidate: {uncovered_nodes}.\n\n"
+        f"Candidates using more than one node: {multiple_node_candidates}.\n\n"
+        f"Candidates using context-only nodes: {context_only_candidates}.\n\n"
         "Candidate nomination did not require a prior disease-drug literature association. "
         f"Audited candidates were ranked by an unweighted sum of "
         f"{len(SCORE_COMPONENTS)} 20-point components out of {MAX_SCORE}; "

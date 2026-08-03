@@ -196,22 +196,7 @@ def _add_document(index: dict[str, dict[str, Any]], row: dict[str, Any]) -> None
     if current is None:
         index[key] = row
         return
-    identity_fields = {"title", "year", "canonical_publication_id"}
     for field, value in row.items():
-        same_title = (
-            field == "title"
-            and re.sub(r"\W+", " ", str(current.get(field, "")).casefold()).strip()
-            == re.sub(r"\W+", " ", str(value).casefold()).strip()
-        )
-        if (
-            field in identity_fields
-            and field in current
-            and value not in (None, "", [])
-            and current[field] not in (None, "", [])
-            and current[field] != value
-            and not same_title
-        ):
-            raise SourceError(f"Conflicting source document metadata for {key}: {field}")
         if field not in current or current[field] in (None, "", []):
             current[field] = value
         elif isinstance(value, list) and isinstance(current[field], list):
@@ -595,7 +580,11 @@ def _evidence_items(value: Any) -> list[dict[str, Any]]:
             found.append(
                 {
                     "reference": reference.strip(),
-                    "reference_title": value.get("reference_title"),
+                    # DisMech uses reference_title in evidence rows and title in
+                    # its top-level references collection.
+                    "reference_title": (
+                        value.get("reference_title") or value.get("title")
+                    ),
                     "snippet": value.get("snippet"),
                     "supports": value.get("supports"),
                     "explanation": value.get("explanation"),

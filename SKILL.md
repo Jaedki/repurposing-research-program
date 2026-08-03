@@ -15,7 +15,7 @@ Run commands from this skill folder, or use absolute script paths.
 
 Install the pinned runtime dependencies once with `python -m pip install -r requirements.txt`.
 
-1. Initialize a run. Supply the exact MONDO ID if available; if not, indicate that the ID is unknown and proceed without it:
+1. Start a fresh run unless the user explicitly asks to resume an existing one. Choose its run-folder path before `init` and reuse that exact path in every controller command. Supply the exact MONDO ID if available; if not, indicate that the ID is unknown and proceed without it:
 
    ```powershell
    python scripts/orchestrate_program.py init <run-folder> --disease "<disease>" [--gene <gene>] [--mondo MONDO:...]
@@ -29,8 +29,11 @@ Install the pinned runtime dependencies once with `python -m pip install -r requ
    python scripts/orchestrate_program.py submit <run-folder> <result.json>
    ```
 
-   If validation rejects the result, stop and report the exact validation error. Do not retry
-   automatically and do not repair research JSON in the controller.
+   If validation rejects the result, stop and report the exact validation error. A rejected result
+   is noncanonical and does not invalidate the run. Do not retry automatically or repair research
+   JSON in the controller. If the user explicitly asks to continue, call `status` and start a new
+   isolated worker for the same ready packet; do not start a fresh run unless the case or source
+   inputs changed or the user requests one.
 
 4. Repeat `next -> new agent -> submit` in the visible controller chat. Do not replace this loop with a persistent or background supervisor. The controller progresses through:
 
@@ -55,7 +58,7 @@ Install the pinned runtime dependencies once with `python -m pip install -r requ
    python scripts/orchestrate_program.py build <run-folder>
    ```
 
-Use `status` at any time. Resume means calling `next`; accepted results are immutable and content-addressed. Lean orchestration is not a limit on research depth: workers should investigate each packet as deeply as the evidence permits.
+Use `status` at any time. To resume an existing run, call `next` on its run folder. Accepted results are immutable and content-addressed. Lean orchestration is not a limit on research depth: workers should investigate each packet as deeply as the evidence permits.
 
 ## Hard boundaries
 
@@ -64,7 +67,7 @@ Use `status` at any time. Resume means calling `next`; accepted results are immu
   into pathology context. All subsequent pathology packets must not contain drug, compound,
   treatment, therapeutic, or candidate fields or interpretations.
 - Candidate generation starts only after curation and every required pathology-concept result are accepted and Python freezes the graph snapshot.
-- Candidate eligibility follows `pathology element -> desired biological state -> established drug mode of action`.
+- Candidate eligibility follows `pathology element -> primary desired biological state -> established drug mode of action`. Secondary desired states and the phenotype objective remain context and do not create additional discovery routes.
 - Monarch associations are pathology-category allowlisted. DisMech treatment-oriented sections
   and fields are excluded unconditionally. Flagged free text is batched once, classified without
   search or rewriting, and retained only when the complete sentence is adjudicated pathology-only.
@@ -74,7 +77,9 @@ Use `status` at any time. Resume means calling `next`; accepted results are immu
 
 - Preserve source IDs, exact identity, contradictions, negative results, unresolved identity, exclusions, and explicit gaps.
 - Search results and snippets are transient. When using [Asta](https://allenai.org/asta/resources/mcp), search narrowly, inspect snippets, select and verify the underlying paper, cite its canonical ID, and return only that paper; do not propagate search output.
-- Every graph assertion cites retained pathology sources.
+- Pathology research assertions are optional and may use only exact `node_id` values in the packet's `allowed_assertion_nodes`; keep newly researched mechanisms in the profile when they do not connect two allowed nodes.
+- Every graph assertion is keyed by its biological triple and retains cited evidence contexts for evidence type, model, stage, polarity, and summary; Python assigns the stable assertion ID.
+- Candidate graph provenance contains only graph nodes and assertion IDs explicitly selected by the seed worker, with one non-duplicative graph rationale. Focal-profile-only hypotheses may select no assertion.
 - Candidate evidence reviews use the frozen graph as disease context, retrieve primary or authoritative drug facts, and build cited dossiers without scoring, ranking, or excluding candidates.
 - The independent audit receives the frozen graph, candidate-identity result, dossiers, and retained source content. It reads and weighs that evidence rather than restating a review and may not search, add evidence, or send a candidate for re-review.
 - Audit source integrity is decided at the exact point of use. Every source cited by a score component, net assessment, indexed alias, indexed reservation, or exclusion receives one concrete `supports`, `partly_supports`, `does_not_support`, or `contradicts` finding based on retained content. A generic integrity status or a direction to re-verify later is invalid; Python checks complete non-overlapping coverage, prevents publication aliases from being counted as independent support in one scope, and summarizes the results.

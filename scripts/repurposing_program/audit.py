@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable, Mapping
 
-from .candidates import _validate_cited_entries
 from .contracts import (
     AUDIT_EXCLUSION_REASONS,
     SCORE_COMPONENTS,
@@ -18,6 +17,7 @@ from .validation import (
     _contract_rows,
     _ids,
     _references,
+    _validate_cited_entries,
     _validate_exact_object,
 )
 

@@ -112,6 +112,14 @@ def _packet_context(
         related_nodes = [
             row for row in canonical_nodes if str(row["node_id"]) in related_ids
         ]
+        allowed_assertion_nodes = [
+            {
+                key: row[key]
+                for key in ("node_id", "label", "node_type", "disposition", "aliases")
+                if key in row
+            }
+            for row in sorted(canonical_nodes, key=lambda value: str(value["node_id"]))
+        ]
         disease_context = _compact_disease_context(source)
         return {
             "concept": concept,
@@ -119,6 +127,7 @@ def _packet_context(
             "member_source_nodes": member_nodes,
             "related_nodes": related_nodes,
             "adjacent_edges": edges,
+            "allowed_assertion_nodes": allowed_assertion_nodes,
             "disease_context": disease_context,
             "source_index": _source_index(
                 documents,

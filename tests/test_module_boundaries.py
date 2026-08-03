@@ -104,6 +104,7 @@ FUNCTION_OWNERS = {
         "_references",
         "_required",
         "_secret_paths",
+        "_validate_cited_entries",
         "_validate_documents",
         "_validate_exact_object",
     ),
@@ -143,7 +144,6 @@ FUNCTION_OWNERS = {
     ),
     candidates: (
         "_review_batches",
-        "_validate_cited_entries",
         "_validate_review_item",
         "_validate_seed_item",
         "_validate_string_list",

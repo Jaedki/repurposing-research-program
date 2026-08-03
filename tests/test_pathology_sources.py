@@ -15,17 +15,66 @@ from repurposing_program import evidence, pathology  # noqa: E402
 
 
 class DisMechNormalizationTest(unittest.TestCase):
-    def test_source_document_identity_conflict_is_not_silently_merged(self):
+    def test_reference_collection_title_is_normalized_before_identity_validation(self):
+        documents = {}
+
+        self.assertEqual(
+            sources._evidence_documents(
+                documents,
+                {
+                    "evidence": [
+                        {
+                            "reference": "PMID:20301491",
+                            "reference_title": "X-Linked Adrenoleukodystrophy.",
+                            "supports": "SUPPORT",
+                        }
+                    ]
+                },
+            ),
+            ["PMID:20301491"],
+        )
+        self.assertEqual(
+            sources._evidence_documents(
+                documents,
+                {
+                    "references": [
+                        {
+                            "reference": "PMID:20301491",
+                            "title": "X-Linked Adrenoleukodystrophy.",
+                        }
+                    ]
+                },
+            ),
+            ["PMID:20301491"],
+        )
+        self.assertEqual(
+            documents["PMID:20301491"]["title"],
+            "X-Linked Adrenoleukodystrophy.",
+        )
+
+    def test_source_document_merge_keeps_first_scalar_and_unions_lists(self):
         documents = {}
         sources._add_document(
             documents,
-            {"document_id": "PMID:1", "title": "First title", "source": "test"},
+            {
+                "document_id": "PMID:1",
+                "title": "First title",
+                "source": "test",
+                "snippets": ["first"],
+            },
         )
-        with self.assertRaisesRegex(sources.SourceError, "Conflicting source document metadata"):
-            sources._add_document(
-                documents,
-                {"document_id": "PMID:1", "title": "Different title", "source": "test"},
-            )
+        sources._add_document(
+            documents,
+            {
+                "document_id": "PMID:1",
+                "title": "Different title",
+                "source": "test",
+                "snippets": ["second"],
+            },
+        )
+
+        self.assertEqual(documents["PMID:1"]["title"], "First title")
+        self.assertEqual(documents["PMID:1"]["snippets"], ["first", "second"])
 
     def test_dismech_receipt_hashes_every_cached_source_artifact(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -15,6 +15,7 @@ from .validation import (
     _ids,
     _references,
     _required,
+    _validate_cited_entries,
     _validate_documents,
     _validate_exact_object,
 )
@@ -62,6 +63,9 @@ def _validate_seed_item(
     concept_id = str(concept["concept_id"])
     support_by_node = _graph_support_ids(graph)
     allowed_node_ids = set(support_by_node)
+    assertions_by_id = {
+        str(row["assertion_id"]): row for row in _rows(graph, "assertions")
+    }
     pathology_source_ids = _ids(_rows(graph, "documents"), "document_id", "documents")
     new_mechanism_source_ids = {str(row["document_id"]) for row in documents}
     mechanism_source_ids = {
@@ -72,14 +76,48 @@ def _validate_seed_item(
         label = f"candidates[{index}]"
         _required(
             row,
-            ("candidate_id", "name", "mechanism_hypothesis"),
+            ("candidate_id", "name", "mechanism_hypothesis", "graph_rationale"),
             label,
         )
+        if not isinstance(row["graph_rationale"], str) or not row["graph_rationale"].strip():
+            raise ProgramError(f"{label}.graph_rationale must be non-empty text")
         if str(row["name"]).strip().casefold() in _COMPARATORS:
             raise ProgramError(f"{label} is a comparator, not a drug candidate")
         graph_refs = _references(row, "graph_node_ids", allowed_node_ids, label)
+        if len(graph_refs) != len(row["graph_node_ids"]):
+            raise ProgramError(f"{label}.graph_node_ids must be unique")
         if concept_id not in graph_refs:
             raise ProgramError(f"{label}.graph_node_ids must include the focal item concept")
+        assertion_values = row["assertion_ids"]
+        if not isinstance(assertion_values, list) or any(
+            not isinstance(value, str) or not value.strip() for value in assertion_values
+        ):
+            raise ProgramError(f"{label}.assertion_ids must be a list of non-empty IDs")
+        assertion_refs = set(map(str, assertion_values))
+        if len(assertion_refs) != len(assertion_values):
+            raise ProgramError(f"{label}.assertion_ids must be unique")
+        unknown_assertions = assertion_refs - set(assertions_by_id)
+        if unknown_assertions:
+            raise ProgramError(
+                f"{label}.assertion_ids contains unknown IDs: {sorted(unknown_assertions)}"
+            )
+        missing_assertion_nodes = sorted({
+            node_id
+            for assertion_id in assertion_refs
+            for node_id in map(
+                str,
+                (
+                    assertions_by_id[assertion_id]["subject_id"],
+                    assertions_by_id[assertion_id]["object_id"],
+                ),
+            )
+            if node_id in allowed_node_ids and node_id not in graph_refs
+        })
+        if missing_assertion_nodes:
+            raise ProgramError(
+                f"{label}.graph_node_ids must include selected assertion nodes: "
+                f"{missing_assertion_nodes}"
+            )
         pathology_refs = _references(row, "pathology_source_ids", pathology_source_ids, label)
         unsupported = sorted(
             node_id
@@ -93,37 +131,6 @@ def _validate_seed_item(
         mechanism_refs = _references(row, "mechanism_source_ids", mechanism_source_ids, label)
         if not mechanism_refs & new_mechanism_source_ids:
             raise ProgramError(f"{label}.mechanism_source_ids needs a retained drug-MOA source")
-
-
-def _validate_cited_entries(
-    value: Any,
-    *,
-    label: str,
-    text_field: str,
-    source_ids: set[str],
-) -> None:
-    if not isinstance(value, list):
-        raise ProgramError(f"{label} must be a list of objects")
-    seen: set[str] = set()
-    required_fields = {text_field, "source_ids"}
-    for index, entry in enumerate(value):
-        entry_label = f"{label}[{index}]"
-        if not isinstance(entry, dict):
-            raise ProgramError(f"{entry_label} must be an object")
-        missing = sorted(required_fields - set(entry))
-        if missing:
-            raise ProgramError(f"{entry_label} is missing fields: {', '.join(missing)}")
-        unexpected = sorted(set(entry) - required_fields)
-        if unexpected:
-            raise ProgramError(f"{entry_label} has unexpected fields: {unexpected}")
-        text = str(entry[text_field]).strip()
-        if not text:
-            raise ProgramError(f"{entry_label}.{text_field} must be non-empty")
-        key = text.casefold()
-        if key in seen:
-            raise ProgramError(f"{label}.{text_field} values must be unique")
-        seen.add(key)
-        _references(entry, "source_ids", source_ids, entry_label)
 
 
 def _validate_string_list(value: Any, label: str) -> None:
