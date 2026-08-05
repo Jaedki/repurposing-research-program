@@ -137,6 +137,73 @@ def bibliographic_metadata(_root, documents):
     return resolved
 
 
+def asta_receipt(
+    operation_id,
+    tool,
+    *,
+    paper_id=None,
+    attempt=1,
+    request_profile="standard",
+    outcome="completed",
+    elapsed_seconds=1.0,
+    result_count=0,
+    error_type=None,
+):
+    return {
+        "operation_id": operation_id,
+        "tool": tool,
+        "paper_id": paper_id,
+        "attempt": attempt,
+        "request_profile": request_profile,
+        "outcome": outcome,
+        "elapsed_seconds": elapsed_seconds,
+        "result_count": result_count,
+        "error_type": error_type,
+    }
+
+
+def completed_asta_receipts(result_count=0):
+    receipts = [asta_receipt(
+        "ASTA-OP-SEARCH-1",
+        "search_papers_by_relevance",
+        result_count=result_count,
+    )]
+    if result_count:
+        paper_id = "3fabad2e28b0d9b09b98194d68f8c63862ede98a"
+        receipts.extend([
+            asta_receipt(
+                "ASTA-OP-CITATIONS-1", "get_citations", paper_id=paper_id, result_count=1
+            ),
+            asta_receipt(
+                "ASTA-OP-SNIPPET-1", "snippet_search", paper_id=paper_id, result_count=1
+            ),
+        ])
+    return receipts
+
+
+def unavailable_asta_receipts():
+    return [
+        asta_receipt(
+            "ASTA-OP-SEARCH-1",
+            "search_papers_by_relevance",
+            outcome="no_response",
+            elapsed_seconds=180,
+            result_count=None,
+            error_type="timeout",
+        ),
+        asta_receipt(
+            "ASTA-OP-SEARCH-1",
+            "search_papers_by_relevance",
+            attempt=2,
+            request_profile="minimal",
+            outcome="no_response",
+            elapsed_seconds=180,
+            result_count=None,
+            error_type="timeout",
+        ),
+    ]
+
+
 class UniChemTransportTest(unittest.TestCase):
     def test_accepts_explicit_compound_not_found_response(self):
         response = MagicMock()
@@ -519,6 +586,7 @@ class SourceAdjudicationWorkflowTest(unittest.TestCase):
                 "records": {
                     "documents": [],
                     "landscape_proposals": [],
+                    "asta_call_receipts": unavailable_asta_receipts(),
                 },
                 "gaps": ["Asta was unavailable in this test fixture."],
             }
@@ -573,6 +641,13 @@ class WorkflowTest(unittest.TestCase):
 
     def submit(self, action, records, *, add_evidence_passages=True):
         records = json.loads(json.dumps(records))
+        if action["next_task"] == "pathology_landscape_scan":
+            records.setdefault(
+                "asta_call_receipts",
+                completed_asta_receipts(
+                    1 if records.get("documents") or records.get("landscape_proposals") else 0
+                ),
+            )
         if add_evidence_passages:
             for document in records.get("documents", []):
                 document.setdefault("evidence_passages", [{
@@ -752,6 +827,13 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("assertion_ids", candidate_contract["required_fields"])
         self.assertIn("graph_rationale", candidate_contract["required_fields"])
         self.assertNotIn("identity", candidate_contract["required_fields"])
+        self.assertEqual(
+            candidate_contract["field_contracts"]["identifiers"]["type"], "object"
+        )
+        self.assertIn(
+            "non-empty list of non-empty strings",
+            candidate_contract["field_contracts"]["identifiers"]["value_rule"],
+        )
         self.assertEqual(packet["context"]["focal_context"]["node"]["node_id"], "NODE:1")
         self.assertEqual(packet["context"]["focal_context"]["profile"]["node_id"], "NODE:1")
         assertions_by_relation = {
@@ -770,7 +852,15 @@ class WorkflowTest(unittest.TestCase):
             core.graph_context(self.root, "MONDO:1")
         seed_records = {
             "documents": [
-                {"document_id": "PMID:1", "title": "Re-emitted pathology evidence", "source": "test"},
+                {
+                    "document_id": "PMID:1",
+                    "title": "Research evidence",
+                    "source": "test",
+                    "evidence_passages": [{
+                        "text": "Seed-specific evidence from the same paper.",
+                        "locator": "seed results",
+                    }],
+                },
                 {"document_id": "PMID:2", "title": "Drug MOA", "source": "test"},
                 {"document_id": "PMID:80", "title": "Unused seed search hit", "source": "test"},
             ],
@@ -816,6 +906,22 @@ class WorkflowTest(unittest.TestCase):
         invalid_records["candidates"][0]["identifiers"] = "CHEMBL1"
         with self.assertRaisesRegex(core.ProgramError, "identifiers must be an object"):
             self.submit(action, invalid_records)
+        for malformed_identifiers in (
+            {"chembl": {"id": "CHEMBL25"}},
+            {"chembl": ""},
+            {"chembl": []},
+            {"chembl": ["CHEMBL25", ""]},
+            {"chembl": [["CHEMBL25"]]},
+            {"chembl": 25},
+            {"chembl": None},
+        ):
+            invalid_records = json.loads(json.dumps(seed_records))
+            invalid_records["candidates"][0]["identifiers"] = malformed_identifiers
+            with self.subTest(identifiers=malformed_identifiers), self.assertRaisesRegex(
+                core.ProgramError,
+                "must be a non-empty string or a non-empty list of non-empty strings",
+            ):
+                self.submit(action, invalid_records)
         self.submit(
             action,
             seed_records,
@@ -866,7 +972,7 @@ class WorkflowTest(unittest.TestCase):
         )
         self.assertEqual(
             [row["document_id"] for row in seeds["records"]["documents"]],
-            ["PMID:2"],
+            ["PMID:1", "PMID:2"],
         )
         self.assertEqual(
             seeds["records"]["candidates"][0]["origin_concept_ids"],
@@ -876,7 +982,15 @@ class WorkflowTest(unittest.TestCase):
             action,
             {
                 "documents": [
-                    {"document_id": "PMID:2", "title": "Re-emitted seed evidence", "source": "test"},
+                    {
+                        "document_id": "PMID:2",
+                        "title": "Drug MOA",
+                        "source": "test",
+                        "evidence_passages": [{
+                            "text": "Review-specific evidence from the same paper.",
+                            "locator": "review results",
+                        }],
+                    },
                     {"document_id": "PMID:3", "title": "Drug review", "source": "test"},
                     {"document_id": "PMID:70", "title": "Unused review search hit", "source": "test"},
                 ],
@@ -932,6 +1046,24 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(
             audit_packet["context"]["source_index"][0]["year"], 2026
         )
+        source_by_id = {
+            row["document_id"]: row
+            for row in audit_packet["context"]["source_index"]
+        }
+        self.assertEqual(
+            {row["text"] for row in source_by_id["PMID:1"]["evidence_passages"]},
+            {
+                "Inspectable evidence from Research evidence",
+                "Seed-specific evidence from the same paper.",
+            },
+        )
+        self.assertEqual(
+            {row["text"] for row in source_by_id["PMID:2"]["evidence_passages"]},
+            {
+                "Inspectable evidence from Drug MOA",
+                "Review-specific evidence from the same paper.",
+            },
+        )
         rubric = audit_packet["result_contract"]["score_rubric"]
         self.assertIn("without weighting", rubric["method"])
         self.assertIn("not a probability", rubric["method"])
@@ -955,7 +1087,7 @@ class WorkflowTest(unittest.TestCase):
         )
         self.assertEqual(
             [row["document_id"] for row in review_result["records"]["documents"]],
-            ["PMID:3"],
+            ["PMID:2", "PMID:3"],
         )
         first_assessment = {
             **self.assessment(
@@ -1000,6 +1132,15 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(manifest["raw_candidate_count"], 2)
         self.assertEqual(manifest["deduplicated_candidate_count"], 2)
         self.assertEqual(manifest["excluded_candidate_count"], 1)
+        accepted_result_paths = {
+            path.relative_to(self.root).as_posix()
+            for path in (self.root / "results").rglob("*.json")
+        }
+        self.assertEqual(set(manifest["accepted_results"]), accepted_result_paths)
+        self.assertTrue(any(
+            path.startswith("results/items/") for path in accepted_result_paths
+        ))
+        self.assertNotIn("stage_results", manifest)
         summary = (self.root / "outputs" / "summary.md").read_text(encoding="utf-8")
         self.assertIn("raw candidate seeds: 2; deduplicated candidates: 2", summary)
         self.assertIn("4 20-point components out of 80", summary)
@@ -1076,6 +1217,14 @@ class WorkflowTest(unittest.TestCase):
             },
         }
         self.assertEqual(baseline, PROGRAM_BASELINE)
+
+        item_result = next((self.root / "results" / "items").rglob("*.json"))
+        accepted_bytes = item_result.read_bytes()
+        item_result.write_bytes(accepted_bytes + b"\n")
+        with self.assertRaisesRegex(core.ProgramError, "Accepted result changed"):
+            core.status(self.root)
+        item_result.write_bytes(accepted_bytes)
+        self.assertEqual(core.status(self.root)["state"], "complete")
 
     def test_curation_guidance_and_input_order_preserve_semantic_granularity(self):
         source = source_result()
@@ -1501,7 +1650,8 @@ class WorkflowTest(unittest.TestCase):
         for document_id in (
             "PMID:10195180", "PMCID:PMC10338806", "DOI:10.1002/ana.21147",
             "MONARCH-ASSOC-" + "A" * 24, "CLINGEN:CCID004621",
-            "UNIPROT:P09651", "NCBI:NBK551641", "https://example.org/report",
+            "UNIPROT:P09651", "NCBI:NBK551641", "S2:" + "a" * 40,
+            "https://example.org/report",
         ):
             self.assertIsNotNone(contracts.CANONICAL_DOCUMENT_ID.fullmatch(document_id))
         self.assertIsNone(contracts.CANONICAL_DOCUMENT_ID.fullmatch("DOC-AUTHOR-2026-TOPIC"))
@@ -1691,6 +1841,20 @@ class WorkflowTest(unittest.TestCase):
                 "SEED-NO-RESULT": "no_result",
             },
         )
+
+    def test_malformed_identifier_does_not_reach_unichem(self):
+        row = self.seed(
+            "CHEMBL:25",
+            "SEED-MALFORMED",
+            identifiers={"chembl": {"id": "CHEMBL25"}},
+        )
+
+        with patch.object(identity, "_post_unichem") as request, self.assertRaisesRegex(
+            core.ProgramError, "candidate.identifiers.chembl"
+        ):
+            identity._resolve_seed_identities(self.root, [row])
+
+        request.assert_not_called()
 
     def test_identity_packet_exposes_one_explicit_set_of_canonical_options(self):
         records = {"candidates": [
@@ -2151,6 +2315,15 @@ class WorkflowTest(unittest.TestCase):
         with self.assertRaisesRegex(core.ProgramError, "no inspectable content"):
             audit._validate_candidate_audit(
                 {"assessments": [assessment], "excluded_candidates": []}, no_content
+            )
+
+        null_content = json.loads(json.dumps(results))
+        null_content["candidate_review"]["records"]["documents"][0][
+            "evidence_passages"
+        ] = [{"text": None, "locator": None}]
+        with self.assertRaisesRegex(core.ProgramError, "no inspectable content"):
+            audit._validate_candidate_audit(
+                {"assessments": [assessment], "excluded_candidates": []}, null_content
             )
 
         duplicate_publication = json.loads(json.dumps(assessment))

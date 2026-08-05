@@ -18,18 +18,29 @@ papers, and runs paper-restricted snippet search on every paper retained for eva
 through citations, pathways, or authors.
 
 The worker makes Asta calls sequentially, awaiting every `get_citations` and paper-restricted
-`snippet_search` response before making the next call. A response taking about 30 seconds is
-normal and is not an outage. An outage is recorded only after a completed tool error or after
-waiting at least 45 seconds for a response.
+`snippet_search` response before making the next call. Slow responses are not outages. A pending
+call is not terminated before 180 seconds. A completed retryable error or a 180-second no-response
+receives exactly one retry of the same logical operation using a minimal payload, followed by
+another full wait. Minimal search and citation retries request only title, year, and URL with the
+smallest useful limit; a minimal snippet retry uses a concise query and limit 1. Authentication and
+invalid-request errors are blocking defects, not outages. A terminal `get_citations` failure is
+endpoint-specific: the worker still performs paper-restricted `snippet_search` on the original
+relevance paper and records a partial gap. Asta is unavailable only if relevance search itself
+fails both attempts.
 
 The worker returns only canonical papers cited by an actual missing or more-specific pathology
 proposal, with inspectable evidence passages from the underlying paper. Search results, citation
-results, snippets, raw MCP responses, and authentication data are transient. Python validates the
+results, snippets, raw MCP responses, query text, error messages, and authentication data are
+transient. The worker returns one non-secret receipt per call containing only its logical operation,
+tool, paper ID when applicable, attempt and request profile, outcome category, elapsed time, result
+count, and bounded error type. Python validates the
 papers and proposals and assigns stable `ASTA-NODE` identities; the existing curator then treats
 the projected proposals on equal terms with Monarch and DisMech claims and decides whether each is
 truly distinct. Only documents attached to proposals surviving curation can enter the frozen graph.
-An Asta outage produces empty collections and an explicit gap, leaving source-derived curation
-available.
+Receipt validation rejects early no-response claims, missing retries, citation abandonment without
+snippet evaluation, blocking request/authentication defects mislabeled as outages, and terminal
+failures without an explicit gap. Verified relevance-search unavailability produces empty
+scientific collections and an explicit gap, leaving source-derived curation available.
 
 Configure `ASTA_AI2_API_KEY` in the MCP host. The controller never reads it, constructs Asta
 requests, writes authentication headers, or caches raw MCP exchanges.

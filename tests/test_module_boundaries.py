@@ -56,11 +56,13 @@ MODULES = (
 FUNCTION_OWNERS = {
     errors: ("ProgramError",),
     storage: (
+        "_accepted_result_files",
         "_canonical_bytes",
         "_item_result_path",
         "_item_token",
         "_packet_path",
         "_read_json",
+        "_replace_packet",
         "_result_path",
         "_sha256",
         "_stable_id",
@@ -233,8 +235,11 @@ class FinishedArchitectureBoundaryTest(unittest.TestCase):
         for name in (
             "AUDIT_EXCLUSION_POLICY",
             "CANONICAL_DOCUMENT_ID",
+            "EVIDENCE_PASSAGE_FIELDS",
             "FIELD_RULES",
             "OBJECTIVE",
+            "RESEARCH_DOCUMENT_CONTRACT",
+            "RESEARCH_DOCUMENT_REQUIRED_FIELDS",
             "ROW_SCHEMAS",
             "SCORE_RUBRIC",
             "STAGES",

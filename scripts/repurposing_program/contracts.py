@@ -21,11 +21,50 @@ _PUBLICATION_ID_PATTERN = r"(?:PMID:\d+|PMCID:PMC\d+|DOI:10\.\d{4,9}/\S+)"
 _PUBLICATION_ID = re.compile(rf"^{_PUBLICATION_ID_PATTERN}$", re.IGNORECASE)
 CANONICAL_DOCUMENT_ID = re.compile(
     rf"^(?:{_PUBLICATION_ID_PATTERN}|"
+    r"S2:[A-F0-9]{40}|"
     r"(?:MONARCH-ASSOC|DISMECH-FILE)-[A-F0-9]{24}|"
     r"(?:ORPHA|CGGV|CLINGEN|GENCC|CLINVAR|UNIPROT(?:KB)?|HPA|"
     r"NCBI(?:-BOOKSHELF|-GENE)?|CHEMBL|PUBCHEM|DRUGBANK|DAILYMED|FDA|EMA|"
     r"WHO|ISBN|NCT):\S+|NCT\d{8}|https://\S+)$",
     re.IGNORECASE,
+)
+RESEARCH_DOCUMENT_BASE_FIELDS = ("document_id", "title", "source")
+RESEARCH_DOCUMENT_PASSAGES_FIELD = "evidence_passages"
+RESEARCH_DOCUMENT_REQUIRED_FIELDS = (
+    *RESEARCH_DOCUMENT_BASE_FIELDS,
+    RESEARCH_DOCUMENT_PASSAGES_FIELD,
+)
+EVIDENCE_PASSAGE_FIELDS = ("text", "locator")
+RESEARCH_DOCUMENT_ID_FORMATS = (
+    "PMID:<digits>",
+    "PMCID:PMC<digits>",
+    "DOI:10.<4-9 digits>/<non-whitespace suffix>",
+    "S2:<40 hexadecimal characters> (namespaced Semantic Scholar paper ID)",
+    "MONARCH-ASSOC-<24 hexadecimal characters>",
+    "DISMECH-FILE-<24 hexadecimal characters>",
+    "<namespace>:<non-whitespace identifier>, where namespace is ORPHA, CGGV, CLINGEN, "
+    "GENCC, CLINVAR, UNIPROT, UNIPROTKB, HPA, NCBI, NCBI-BOOKSHELF, NCBI-GENE, "
+    "CHEMBL, PUBCHEM, DRUGBANK, DAILYMED, FDA, EMA, WHO, ISBN, or NCT",
+    "NCT<8 digits>",
+    "https://<non-whitespace URL>",
+)
+RESEARCH_DOCUMENT_CONTRACT = {
+    "required_fields": list(RESEARCH_DOCUMENT_REQUIRED_FIELDS),
+    "additional_fields": True,
+    "document_id_formats": list(RESEARCH_DOCUMENT_ID_FORMATS),
+    "field_contracts": {
+        RESEARCH_DOCUMENT_PASSAGES_FIELD: {
+            "type": "non-empty list of objects",
+            "required_fields": list(EVIDENCE_PASSAGE_FIELDS),
+            "additional_fields": False,
+            "value_rule": "text and locator must both be non-empty strings",
+        }
+    },
+}
+RESEARCH_DOCUMENT_EXAMPLE = (
+    '{"document_id":"PMID:12345678","title":"Example paper",'
+    '"source":"PubMed","evidence_passages":'
+    '[{"text":"Exact inspectable evidence.","locator":"Results, paragraph 2"}]}'
 )
 STAGES = (
     "pathology_source_screening",
@@ -154,6 +193,21 @@ AUDIT_EXCLUSION_REASONS = frozenset(AUDIT_EXCLUSION_POLICY)
 LANDSCAPE_PROPOSAL_TYPES = frozenset({
     "driver", "mechanism", "phenotype", "biomarker", "context",
 })
+ASTA_CALL_TOOLS = frozenset({
+    "search_papers_by_relevance", "get_citations", "snippet_search",
+})
+ASTA_OPERATION_ID_PATTERN = r"(?i)^ASTA-OP-[A-Z0-9][A-Z0-9_-]*$"
+ASTA_PAPER_ID_PATTERN = (
+    r"(?i)^(?:[A-F0-9]{40}|CorpusId:\d+|DOI:\S+|ARXIV:\S+|MAG:\d+|ACL:\S+|"
+    r"PMID:\d+|PMCID:(?:PMC)?\d+|URL:https://\S+)$"
+)
+ASTA_CALL_OUTCOMES = frozenset({"completed", "tool_error", "no_response"})
+ASTA_CALL_PROFILES = frozenset({"standard", "minimal"})
+ASTA_CALL_ERROR_TYPES = frozenset({
+    "authentication", "invalid_request", "network", "rate_limit", "server",
+    "timeout", "unknown",
+})
+ASTA_NO_RESPONSE_SECONDS = 180
 
 STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
     "pathology_source_adjudication": {
@@ -173,28 +227,16 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
     "pathology_landscape_scan": {
         "role": "treatment-blind disease pathology landscape researcher",
         "task": (
-            "Use the official Asta MCP tools described at "
-            "https://allenai.org/asta/resources/mcp for one shallow, treatment-blind landscape "
-            "scan. Search for disease-pathology papers with search_papers_by_relevance. For each "
-            "result retained as potentially informative, use get_citations to inspect related "
-            "citing papers. Use snippet_search, restricted by paper ID, on every relevance result "
-            "and related citation retained for evaluation. Make Asta calls sequentially: wait for "
-            "each get_citations or paper-restricted snippet_search response before starting the "
-            "next. A response taking about 30 seconds is normal; do not record an outage solely "
-            "because a call is slow. Record an outage only after a completed tool error or after "
-            "waiting at least 45 seconds for a response. Compare the supported claims with the "
-            "supplied source_node_index "
-            "and propose only specific pathological states or processes that appear missing or "
-            "materially more specific. Return one atomic proposal per claim and cite only the "
-            "canonical underlying papers that directly support it, each with an inspectable "
-            "evidence passage. Do not decide whether a proposal is truly distinct or assign a node "
-            "ID; the following curation agent makes that judgment in the context of all source "
-            "nodes. Do not perform deep node research, candidate research, recursive citation "
-            "traversal, or treatment interpretation. Search results, snippets, and raw MCP "
-            "responses are transient. Zero proposals are valid; if Asta is unavailable, return "
-            "empty documents and landscape_proposals and record the limitation as a gap."
+            "Perform one shallow, treatment-blind Asta landscape scan. Search for disease-"
+            "pathology papers with search_papers_by_relevance. For each relevance result retained "
+            "for evaluation, inspect related citing papers with get_citations and run paper-"
+            "restricted snippet_search on that result and every related citation retained for "
+            "evaluation. Use directly supported claims to identify coverage gaps in the supplied "
+            "source_node_index for the following curation agent; that agent decides whether a "
+            "proposal is distinct, and Python assigns node IDs. Do not perform deep node research, "
+            "candidate research, or recursive citation traversal."
         ),
-        "collections": ["documents", "landscape_proposals"],
+        "collections": ["documents", "landscape_proposals", "asta_call_receipts"],
     },
     "pathology_curation": {
         "role": "disease pathology concept curator",
@@ -373,7 +415,7 @@ ROW_SCHEMAS = {
         "additional_fields": False,
     },
     "documents": {
-        "required_fields": ["document_id", "title", "source"],
+        "required_fields": list(RESEARCH_DOCUMENT_BASE_FIELDS),
         "additional_fields": True,
     },
     "landscape_proposals": {
@@ -381,6 +423,64 @@ ROW_SCHEMAS = {
             "label", "provisional_type", "claim", "index_comparison", "source_ids",
         ],
         "additional_fields": False,
+    },
+    "asta_call_receipts": {
+        "required_fields": [
+            "operation_id", "tool", "paper_id", "attempt", "request_profile",
+            "outcome", "elapsed_seconds", "result_count", "error_type",
+        ],
+        "additional_fields": False,
+        "field_contracts": {
+            "operation_id": {
+                "type": "string",
+                "pattern": ASTA_OPERATION_ID_PATTERN,
+            },
+            "tool": {
+                "type": "string",
+                "allowed_values": sorted(ASTA_CALL_TOOLS),
+                "value_rule": (
+                    "use the bare logical operation name, not an MCP-qualified tool name"
+                ),
+            },
+            "paper_id": {
+                "type": "string or null",
+                "pattern": ASTA_PAPER_ID_PATTERN,
+                "value_rule": (
+                    "must be null for search_papers_by_relevance and a matching string for "
+                    "get_citations or snippet_search"
+                ),
+            },
+            "attempt": {
+                "type": "integer (not boolean)",
+                "allowed_values": [1, 2],
+            },
+            "request_profile": {
+                "type": "string",
+                "allowed_values": sorted(ASTA_CALL_PROFILES),
+                "value_rule": "standard for attempt 1; minimal for attempt 2",
+            },
+            "outcome": {
+                "type": "string",
+                "allowed_values": sorted(ASTA_CALL_OUTCOMES),
+                "value_rule": "use completed, not success, for a successful call",
+            },
+            "elapsed_seconds": {
+                "type": "non-negative number (not boolean)",
+            },
+            "result_count": {
+                "type": "non-negative integer (not boolean) or null",
+                "value_rule": "required for completed; null for tool_error or no_response",
+            },
+            "error_type": {
+                "type": "string or null",
+                "allowed_values": [None, *sorted(ASTA_CALL_ERROR_TYPES)],
+                "value_rule": (
+                    "null for completed; required for tool_error or no_response; "
+                    "authentication and invalid_request are blocking defects and cannot be "
+                    "submitted as outages"
+                ),
+            },
+        },
     },
     "source_nodes": {
         "required_fields": ["node_id", "label", "node_type", "source_ids"],
@@ -430,7 +530,15 @@ ROW_SCHEMAS = {
             "mechanism_source_ids",
         ],
         "additional_fields": False,
-        "field_types": {"identifiers": "object"},
+        "field_contracts": {
+            "identifiers": {
+                "type": "object",
+                "value_rule": (
+                    "may be empty; each value is a non-empty string or non-empty list of "
+                    "non-empty strings"
+                ),
+            },
+        },
     },
     "exclusions": {
         "required_fields": ["name", "reason"],
@@ -482,32 +590,27 @@ FIELD_RULES = {
         "do not search, cite sources, create nodes, or introduce new text",
     ],
     "pathology_landscape_scan": [
-        "use the documented Asta search_papers_by_relevance, get_citations, and snippet_search "
-        "tools for one shallow scan; do not recursively traverse citations, authors, or pathways",
-        "run paper-restricted snippet_search on every relevance result and related citation "
-        "retained for evaluation",
-        "make Asta calls sequentially; wait for each get_citations or paper-restricted "
-        "snippet_search response before starting the next, treat responses of about 30 seconds "
-        "as normal, and record an outage only after a completed tool error or after waiting at "
-        "least 45 seconds for a response",
+        "asta_call_receipts contains exactly one row per actual Asta call and at least one "
+        "search_papers_by_relevance operation",
+        "rows sharing operation_id keep the same tool and paper_id; a completed attempt 1 has no "
+        "retry, while a failed attempt 1 requires exactly one attempt 2 with request_profile=minimal",
+        "no_response uses error_type=timeout, result_count=null, and elapsed_seconds of at least 180",
+        "every paper passed to get_citations also receives paper-restricted snippet_search, "
+        "including after a terminal citation failure",
+        "a positive completed relevance search includes get_citations and snippet_search operations; "
+        "documents or proposals require a completed snippet_search with a positive result_count",
+        "if no relevance search completes, documents and landscape_proposals are empty; every "
+        "terminal call failure has a non-empty gap",
         "provisional_type is driver, mechanism, phenotype, biomarker, or context",
         "each proposal is a specific disease-linked abnormal biological claim that is missing from "
         "or more specific than the supplied index",
         "each proposal contains one pathological state or process at one causal level; one paper may "
         "support multiple separate proposals",
-        "do not return node IDs; Python assigns ASTA-NODE IDs deterministically after validation",
         "each source_id cites a document returned in this result, and every returned document is "
         "cited by at least one proposal",
-        "search snippets are transient; each retained canonical paper has an evidence_passages entry "
-        "copied from the underlying paper",
         "retain only directly supported causal pathology from experimental perturbations; do not "
         "frame a proposal as a drug, treatment, therapeutic, or candidate response",
-        "do not decide whether a proposal is truly distinct; the curation agent judges every "
-        "projected proposal together with the existing source nodes",
-        "never return raw MCP response payloads, search results, snippets, credentials, headers, "
-        "or authentication data",
-        "if Asta is unavailable, return empty documents and landscape_proposals and record an "
-        "explicit gap",
+        "zero proposals are valid after a receipt-verified scan",
     ],
     "pathology_curation": [
         "partition every supplied non-anchor Monarch, DisMech, and Asta node exactly once across concepts",
@@ -652,6 +755,7 @@ _SECRET_KEYS = {
     "client_secret",
     "refresh_token",
     "secret",
+    "x_api_key",
 }
 _COMPARATORS = {"placebo", "vehicle", "sham"}
 _PATHOLOGY_FORBIDDEN_KEYS = {"candidate", "compound", "drug", "treatment", "therapeutic"}

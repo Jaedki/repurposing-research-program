@@ -17,17 +17,24 @@ from .validation import _contract_rows, _references, _required, _validate_docume
 
 def _candidate_queries(row: Mapping[str, Any]) -> list[dict[str, Any]]:
     queries: set[tuple[str, int | None, str]] = set()
-    identifiers = row.get("identifiers", {})
-    if isinstance(identifiers, Mapping):
-        for key, raw_value in identifiers.items():
-            values = raw_value if isinstance(raw_value, list) else [raw_value]
-            for value in values:
-                compound = str(value).strip()
-                if key in {"inchi", "inchikey"} and compound:
-                    queries.add((key, None, compound))
-                elif key in _UNICHEM_SOURCE_IDS:
-                    if compound:
-                        queries.add(("sourceID", _UNICHEM_SOURCE_IDS[key], compound))
+    identifiers = row.get("identifiers")
+    if not isinstance(identifiers, Mapping):
+        raise ProgramError("candidate.identifiers must be an object")
+    for key, raw_value in identifiers.items():
+        values = raw_value if isinstance(raw_value, list) else [raw_value]
+        if not values or any(
+            not isinstance(value, str) or not value.strip() for value in values
+        ):
+            raise ProgramError(
+                f"candidate.identifiers.{key} must be a non-empty string or a non-empty "
+                "list of non-empty strings"
+            )
+        for value in values:
+            compound = value.strip()
+            if key in {"inchi", "inchikey"}:
+                queries.add((key, None, compound))
+            elif key in _UNICHEM_SOURCE_IDS:
+                queries.add(("sourceID", _UNICHEM_SOURCE_IDS[key], compound))
     return [
         {
             "compound": compound,

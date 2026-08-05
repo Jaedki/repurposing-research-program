@@ -121,6 +121,79 @@ def proposal(label, claim, source_id, provisional_type="mechanism"):
     }
 
 
+ASTA_TEST_PAPER_ID = "3fabad2e28b0d9b09b98194d68f8c63862ede98a"
+
+
+def asta_receipt(
+    operation_id,
+    tool,
+    *,
+    paper_id=None,
+    attempt=1,
+    request_profile="standard",
+    outcome="completed",
+    elapsed_seconds=1.0,
+    result_count=1,
+    error_type=None,
+):
+    return {
+        "operation_id": operation_id,
+        "tool": tool,
+        "paper_id": paper_id,
+        "attempt": attempt,
+        "request_profile": request_profile,
+        "outcome": outcome,
+        "elapsed_seconds": elapsed_seconds,
+        "result_count": result_count,
+        "error_type": error_type,
+    }
+
+
+def completed_asta_receipts(result_count=1):
+    receipts = [asta_receipt(
+        "ASTA-OP-SEARCH-1",
+        "search_papers_by_relevance",
+        result_count=result_count,
+    )]
+    if result_count:
+        receipts.extend([
+            asta_receipt(
+                "ASTA-OP-CITATIONS-1",
+                "get_citations",
+                paper_id=ASTA_TEST_PAPER_ID,
+            ),
+            asta_receipt(
+                "ASTA-OP-SNIPPET-1",
+                "snippet_search",
+                paper_id=ASTA_TEST_PAPER_ID,
+            ),
+        ])
+    return receipts
+
+
+def unavailable_asta_receipts():
+    return [
+        asta_receipt(
+            "ASTA-OP-SEARCH-1",
+            "search_papers_by_relevance",
+            outcome="no_response",
+            elapsed_seconds=180,
+            result_count=None,
+            error_type="timeout",
+        ),
+        asta_receipt(
+            "ASTA-OP-SEARCH-1",
+            "search_papers_by_relevance",
+            attempt=2,
+            request_profile="minimal",
+            outcome="no_response",
+            elapsed_seconds=180,
+            result_count=None,
+            error_type="timeout",
+        ),
+    ]
+
+
 class LandscapeWorkflowTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -143,7 +216,14 @@ class LandscapeWorkflowTest(unittest.TestCase):
             patcher.stop()
         self.temp.cleanup()
 
-    def submit(self, records, gaps=None):
+    def submit(self, records, gaps=None, extra_result=None):
+        records = json.loads(json.dumps(records))
+        records.setdefault(
+            "asta_call_receipts",
+            completed_asta_receipts(
+                1 if records.get("documents") or records.get("landscape_proposals") else 0
+            ),
+        )
         result_gaps = [] if gaps is None else gaps
         result = {
             "stage": "pathology_landscape_scan",
@@ -153,6 +233,8 @@ class LandscapeWorkflowTest(unittest.TestCase):
             "records": records,
             "gaps": result_gaps,
         }
+        if extra_result:
+            result.update(extra_result)
         path = self.root / f"landscape-{len(list(self.root.glob('landscape-*')))}.json"
         path.write_text(json.dumps(result), encoding="utf-8")
         return core.submit(self.root, path)
@@ -177,24 +259,94 @@ class LandscapeWorkflowTest(unittest.TestCase):
         )
         self.assertEqual(
             set(packet["result_contract"]["records"]),
-            {"documents", "landscape_proposals"},
+            {"documents", "landscape_proposals", "asta_call_receipts"},
+        )
+        self.assertEqual(
+            packet["result_contract"]["allowed_top_level_fields"],
+            ["stage", "item_id", "packet_id", "status", "records", "gaps", "notes"],
+        )
+        receipt_contract = packet["result_contract"]["records"]["asta_call_receipts"]
+        receipt_fields = receipt_contract["field_contracts"]
+        self.assertEqual(
+            receipt_fields["tool"]["allowed_values"],
+            sorted(contracts.ASTA_CALL_TOOLS),
+        )
+        self.assertIn("bare logical", receipt_fields["tool"]["value_rule"])
+        self.assertEqual(
+            receipt_fields["outcome"]["allowed_values"],
+            sorted(contracts.ASTA_CALL_OUTCOMES),
+        )
+        self.assertIn("not success", receipt_fields["outcome"]["value_rule"])
+        self.assertEqual(
+            receipt_fields["operation_id"]["pattern"],
+            contracts.ASTA_OPERATION_ID_PATTERN,
+        )
+        self.assertTrue(any(
+            "same tool and paper_id" in rule
+            for rule in packet["result_contract"]["field_rules"]
+        ))
+        document_contract = packet["result_contract"]["records"]["documents"]
+        self.assertEqual(
+            document_contract,
+            {"type": "list of objects", **contracts.RESEARCH_DOCUMENT_CONTRACT},
+        )
+        self.assertEqual(
+            document_contract["required_fields"],
+            ["document_id", "title", "source", "evidence_passages"],
+        )
+        self.assertEqual(
+            document_contract["field_contracts"]["evidence_passages"],
+            {
+                "type": "non-empty list of objects",
+                "required_fields": ["text", "locator"],
+                "additional_fields": False,
+                "value_rule": "text and locator must both be non-empty strings",
+            },
         )
         self.assertIn("coverage_checklist", packet["context"])
         self.assertTrue(any("embedded" in rule for rule in packet["rules"]))
+        self.assertTrue(any(
+            "Literal research-document example" in rule for rule in packet["rules"]
+        ))
 
     def test_packet_describes_the_simple_asta_discovery_and_curation_flow(self):
         packet = json.loads(Path(self.action["packet_path"]).read_text(encoding="utf-8"))
-        self.assertIn("search_papers_by_relevance", packet["task"])
-        self.assertIn("get_citations", packet["task"])
-        self.assertIn("snippet_search", packet["task"])
-        self.assertIn(
-            "on every relevance result and related citation retained for evaluation",
-            packet["task"],
-        )
-        self.assertIn("following curation agent makes that judgment", packet["task"])
-        self.assertIn("https://allenai.org/asta/resources/mcp", packet["task"])
+        task = packet["task"]
+        field_rules = " ".join(packet["result_contract"]["field_rules"])
+        runtime_rules = " ".join(packet["rules"])
+
+        self.assertIn("search_papers_by_relevance", task)
+        self.assertIn("get_citations", task)
+        self.assertIn("snippet_search", task)
+        self.assertIn("every related citation retained for evaluation", task)
+        self.assertIn("following curation agent", task)
+        self.assertNotIn("180 seconds", task)
+        self.assertNotIn("request_profile", task)
+        self.assertNotIn("asta_call_receipts", task)
+        self.assertNotIn("provisional_type", task)
+
+        self.assertIn("https://allenai.org/asta/resources/mcp", runtime_rules)
+        self.assertIn("calls sequentially", runtime_rules)
+        self.assertIn("180 seconds", runtime_rules)
+        self.assertIn("smallest useful limit", runtime_rules)
+        self.assertIn("untrusted evidence", runtime_rules)
+        self.assertIn("block submission", runtime_rules)
+        self.assertIn("raw MCP responses are transient", runtime_rules)
+        self.assertNotIn("source_node_index", runtime_rules)
+
+        self.assertIn("exactly one row per actual Asta call", field_rules)
+        self.assertIn("same tool and paper_id", field_rules)
+        self.assertIn("no_response", field_rules)
+        self.assertIn("every paper passed to get_citations", field_rules)
+        self.assertIn("positive completed relevance search", field_rules)
+        self.assertIn("if no relevance search completes", field_rules)
+        self.assertIn("terminal call failure", field_rules)
+        self.assertNotIn("calls sequentially", field_rules)
+        self.assertNotIn("smallest useful limit", field_rules)
+        self.assertNotIn("untrusted evidence", field_rules)
         self.assertFalse(any("asta_operations" in rule for rule in packet["rules"]))
         self.assertNotIn("asta_operations", packet["result_contract"]["records"])
+        self.assertIn("asta_call_receipts", packet["result_contract"]["records"])
 
     def test_valid_proposal_gets_a_normalized_deterministic_node_id(self):
         records = {
@@ -224,6 +376,93 @@ class LandscapeWorkflowTest(unittest.TestCase):
 
         self.assertRegex(first["node_id"], r"^ASTA-NODE-[A-F0-9]{24}$")
         self.assertEqual(first["node_id"], second["node_id"])
+
+    def test_document_evidence_shape_and_supported_asta_identifiers_validate(self):
+        semantic_scholar_id = "S2:" + "a" * 40
+        status = self.submit({
+            "documents": [
+                document(semantic_scholar_id, "Semantic Scholar paper"),
+                document("https://example.org/pathology-paper", "HTTPS paper"),
+            ],
+            "landscape_proposals": [
+                proposal(
+                    "Specific molecular process",
+                    "A specific molecular process is abnormal in disease.",
+                    semantic_scholar_id,
+                ),
+                proposal(
+                    "Specific cellular process",
+                    "A specific cellular process is abnormal in disease.",
+                    "https://example.org/pathology-paper",
+                ),
+            ],
+        })
+        self.assertEqual(status["next_task"], "pathology_curation")
+
+    def test_passage_alias_has_a_clear_validation_error(self):
+        invalid = document("PMID:101", "Specific mechanism")
+        invalid["evidence_passages"] = [
+            {"passage": "Inspectable evidence.", "locator": "abstract"}
+        ]
+        with self.assertRaisesRegex(
+            core.ProgramError, "must contain exactly text and locator"
+        ):
+            self.submit({
+                "documents": [invalid],
+                "landscape_proposals": [
+                    proposal(
+                        "Specific process",
+                        "A disease-linked process is abnormal.",
+                        "PMID:101",
+                    )
+                ],
+            })
+
+    def test_null_passage_values_are_not_stringified_into_evidence(self):
+        invalid = document("PMID:101", "Specific mechanism")
+        invalid["evidence_passages"] = [{"text": None, "locator": "abstract"}]
+        with self.assertRaisesRegex(core.ProgramError, "must be non-empty strings"):
+            self.submit({
+                "documents": [invalid],
+                "landscape_proposals": [
+                    proposal(
+                        "Specific process",
+                        "A disease-linked process is abnormal.",
+                        "PMID:101",
+                    )
+                ],
+            })
+
+    def test_unaccepted_landscape_packet_regenerates_without_touching_results(self):
+        packet_path = Path(self.action["packet_path"])
+        stale = json.loads(packet_path.read_text(encoding="utf-8"))
+        stale["result_contract"]["records"]["documents"] = {
+            "type": "list of objects",
+            **contracts.ROW_SCHEMAS["documents"],
+        }
+        stale_unsigned = {
+            key: value for key, value in stale.items() if key != "packet_id"
+        }
+        stale["packet_id"] = storage._stable_id("PACKET", stale_unsigned)
+        packet_path.write_text(json.dumps(stale), encoding="utf-8")
+        accepted_before = {
+            path.relative_to(self.root): path.read_bytes()
+            for path in (self.root / "results").rglob("*.json")
+        }
+
+        regenerated_action = core.next_action(self.root)
+        regenerated = json.loads(packet_path.read_text(encoding="utf-8"))
+        accepted_after = {
+            path.relative_to(self.root): path.read_bytes()
+            for path in (self.root / "results").rglob("*.json")
+        }
+
+        self.assertNotEqual(regenerated_action["packet_id"], stale["packet_id"])
+        self.assertEqual(
+            regenerated["result_contract"]["records"]["documents"],
+            {"type": "list of objects", **contracts.RESEARCH_DOCUMENT_CONTRACT},
+        )
+        self.assertEqual(accepted_after, accepted_before)
 
     def test_duplicate_and_uncited_proposals_are_rejected(self):
         duplicate = proposal(
@@ -275,11 +514,146 @@ class LandscapeWorkflowTest(unittest.TestCase):
 
     def test_empty_scan_continues_existing_source_workflow(self):
         status = self.submit(
-            {"documents": [], "landscape_proposals": []},
+            {
+                "documents": [],
+                "landscape_proposals": [],
+                "asta_call_receipts": unavailable_asta_receipts(),
+            },
             gaps=["Asta was unavailable; Monarch and DisMech remain available."],
         )
         self.assertEqual(status["state"], "needs_agent")
         self.assertEqual(status["next_task"], "pathology_curation")
+
+    def test_positive_search_cannot_abandon_citation_and_snippet_work(self):
+        with self.assertRaisesRegex(
+            core.ProgramError, "requires citation and snippet operations"
+        ):
+            self.submit({
+                "documents": [],
+                "landscape_proposals": [],
+                "asta_call_receipts": completed_asta_receipts(1)[:1],
+            })
+
+    def test_no_response_requires_full_wait_and_one_minimal_retry(self):
+        too_early = unavailable_asta_receipts()
+        too_early[0]["elapsed_seconds"] = 45
+        with self.assertRaisesRegex(core.ProgramError, "at least 180 elapsed seconds"):
+            self.submit({
+                "documents": [],
+                "landscape_proposals": [],
+                "asta_call_receipts": too_early,
+            }, gaps=["Search did not respond."])
+
+        no_retry = unavailable_asta_receipts()[:1]
+        with self.assertRaisesRegex(core.ProgramError, "retry a failed call exactly once"):
+            self.submit({
+                "documents": [],
+                "landscape_proposals": [],
+                "asta_call_receipts": no_retry,
+            }, gaps=["Search did not respond."])
+
+    def test_terminal_citation_failure_still_requires_snippet_and_gap(self):
+        receipts = completed_asta_receipts(1)[:1]
+        receipts.extend([
+            asta_receipt(
+                "ASTA-OP-CITATIONS-1",
+                "get_citations",
+                paper_id=ASTA_TEST_PAPER_ID,
+                outcome="no_response",
+                elapsed_seconds=180,
+                result_count=None,
+                error_type="timeout",
+            ),
+            asta_receipt(
+                "ASTA-OP-CITATIONS-1",
+                "get_citations",
+                paper_id=ASTA_TEST_PAPER_ID,
+                attempt=2,
+                request_profile="minimal",
+                outcome="no_response",
+                elapsed_seconds=180,
+                result_count=None,
+                error_type="timeout",
+            ),
+        ])
+        with self.assertRaisesRegex(core.ProgramError, "followed by snippet_search"):
+            self.submit({
+                "documents": [],
+                "landscape_proposals": [],
+                "asta_call_receipts": receipts,
+            }, gaps=["Citation expansion failed."])
+
+        receipts.append(asta_receipt(
+            "ASTA-OP-SNIPPET-1",
+            "snippet_search",
+            paper_id=ASTA_TEST_PAPER_ID,
+        ))
+        with self.assertRaisesRegex(core.ProgramError, "require an explicit gap"):
+            self.submit({
+                "documents": [],
+                "landscape_proposals": [],
+                "asta_call_receipts": receipts,
+            })
+
+        status = self.submit({
+            "documents": [],
+            "landscape_proposals": [],
+            "asta_call_receipts": receipts,
+        }, gaps=["Citation expansion failed after its minimal retry; snippet evaluation continued."])
+        self.assertEqual(status["next_task"], "pathology_curation")
+
+    def test_authentication_and_invalid_request_are_not_outages(self):
+        for error_type in ("authentication", "invalid_request"):
+            receipt = asta_receipt(
+                "ASTA-OP-SEARCH-1",
+                "search_papers_by_relevance",
+                outcome="tool_error",
+                result_count=None,
+                error_type=error_type,
+            )
+            with self.subTest(error_type=error_type), self.assertRaisesRegex(
+                core.ProgramError, "blocking .* defect"
+            ):
+                self.submit({
+                    "documents": [],
+                    "landscape_proposals": [],
+                    "asta_call_receipts": [receipt],
+                }, gaps=["Asta failed."])
+
+    def test_receipts_reject_malformed_paper_ids(self):
+        receipts = completed_asta_receipts(1)
+        receipts[1]["paper_id"] = "not-an-asta-paper-id"
+        with self.assertRaisesRegex(core.ProgramError, "documented Asta paper identifier"):
+            self.submit({
+                "documents": [],
+                "landscape_proposals": [],
+                "asta_call_receipts": receipts,
+            })
+
+    def test_result_rejects_secret_header_names_and_extra_top_level_payloads(self):
+        secret_document = document("PMID:101", "Specific mechanism")
+        secret_document["headers"] = {"x-api-key": "TEST-SECRET"}
+        with self.assertRaisesRegex(core.ProgramError, "Credentials must never be persisted"):
+            self.submit({
+                "documents": [secret_document],
+                "landscape_proposals": [
+                    proposal(
+                        "Specific process",
+                        "A disease-linked process is abnormal.",
+                        "PMID:101",
+                    )
+                ],
+            })
+
+        with self.assertRaisesRegex(core.ProgramError, "unexpected top-level fields"):
+            self.submit(
+                {
+                    "documents": [],
+                    "landscape_proposals": [],
+                    "asta_call_receipts": completed_asta_receipts(0),
+                },
+                extra_result={"raw_mcp_response": {"results": []}},
+            )
 
     def test_curation_partitions_original_and_asta_nodes_and_can_merge_equivalents(self):
         self.submit({
@@ -673,28 +1047,29 @@ class LandscapeWorkflowTest(unittest.TestCase):
         return core.submit(self.root, path)
 
 
-class EvolvingWorkflowTest(unittest.TestCase):
-    def test_legacy_workflow_marker_does_not_invalidate_an_existing_run(self):
+class CurrentWorkflowContractTest(unittest.TestCase):
+    def test_incompatible_objective_or_stage_sequence_requires_a_fresh_run(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            case_basis = {
-                "disease": "Disease",
-                "gene": None,
-                "mondo": "MONDO:1",
-                "objective": core.OBJECTIVE,
-                "workflow_revision": "legacy-work-in-progress-marker",
-            }
-            root.mkdir(exist_ok=True)
-            (root / "case.json").write_text(
-                json.dumps({
-                    "case_id": storage._stable_id("CASE", case_basis),
-                    **case_basis,
-                }),
-                encoding="utf-8",
-            )
-            status = core.status(root)
-            self.assertEqual(status["state"], "needs_controller")
-            self.assertEqual(status["next_task"], "pathology_source_screening")
+            core.initialize(root, "Disease", mondo="MONDO:1")
+            case = json.loads((root / "case.json").read_text(encoding="utf-8"))
+            case["objective"] = "A different objective"
+            case["case_id"] = storage._stable_id("CASE", {
+                "disease": case["disease"],
+                "gene": case["gene"],
+                "mondo": case["mondo"],
+                "objective": case["objective"],
+            })
+            (root / "case.json").write_text(json.dumps(case), encoding="utf-8")
+            with self.assertRaisesRegex(core.ProgramError, "start a fresh run"):
+                core.status(root)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            core.initialize(root, "Disease", mondo="MONDO:1")
+            storage._result_path(root, core.STAGES[1]).write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(core.ProgramError, "start a fresh run"):
+                core.status(root)
 
 
 class DocumentationContractTest(unittest.TestCase):
@@ -728,6 +1103,7 @@ class DocumentationContractTest(unittest.TestCase):
             architecture.index("`pathology_curation`"),
         )
         self.assertIn("Zero proposals are valid", packet_contract)
+        self.assertIn("S2:` followed by 40 hexadecimal characters", packet_contract)
         self.assertIn("Asta is not a Python source adapter", adapters)
         self.assertIn("ASTA_AI2_API_KEY", skill)
         self.assertIn("ASTA_AI2_API_KEY", adapters)
@@ -767,6 +1143,7 @@ class SparseSourceWorkflowTest(unittest.TestCase):
                             "PMID:101",
                         )
                     ],
+                    "asta_call_receipts": completed_asta_receipts(1),
                 },
                 "gaps": [],
             }

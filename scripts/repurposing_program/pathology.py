@@ -11,6 +11,13 @@ from pathology_sources import SENTENCE_DECISIONS
 from .contracts import (
     ASSERTION_EVIDENCE_TYPES,
     ASSERTION_POLARITIES,
+    ASTA_CALL_ERROR_TYPES,
+    ASTA_CALL_OUTCOMES,
+    ASTA_CALL_PROFILES,
+    ASTA_CALL_TOOLS,
+    ASTA_NO_RESPONSE_SECONDS,
+    ASTA_OPERATION_ID_PATTERN,
+    ASTA_PAPER_ID_PATTERN,
     LANDSCAPE_PROPOSAL_TYPES,
     PATHOLOGY_PROFILE_LIST_FIELDS,
     _PATHOLOGY_FORBIDDEN_KEYS,
@@ -349,10 +356,207 @@ _LANDSCAPE_TREATMENT_PATTERN = re.compile(
     r"therap(?:y|ies|eutic\w*)|treat(?:ment|ed|ing|s)?)\b",
     re.IGNORECASE,
 )
+def _validate_asta_call_receipts(
+    records: Mapping[str, Any],
+    gaps: list[Any],
+    *,
+    has_documents: bool,
+    has_proposals: bool,
+) -> None:
+    receipts = _contract_rows(records, "asta_call_receipts")
+    if not receipts:
+        raise ProgramError(
+            "pathology_landscape_scan requires non-secret asta_call_receipts"
+        )
 
-def _validate_landscape_scan(records: Mapping[str, Any]) -> None:
+    operations: dict[str, list[dict[str, Any]]] = {}
+    for index, receipt in enumerate(receipts):
+        label = f"asta_call_receipts[{index}]"
+        operation_id = receipt["operation_id"]
+        if not isinstance(operation_id, str) or not re.fullmatch(
+            ASTA_OPERATION_ID_PATTERN, operation_id
+        ):
+            raise ProgramError(
+                f"{label}.operation_id must match ASTA-OP-<letters, digits, _ or ->"
+            )
+        tool = receipt["tool"]
+        if tool not in ASTA_CALL_TOOLS:
+            raise ProgramError(f"{label}.tool must be one of {sorted(ASTA_CALL_TOOLS)}")
+
+        paper_id = receipt["paper_id"]
+        if tool == "search_papers_by_relevance":
+            if paper_id is not None:
+                raise ProgramError(f"{label}.paper_id must be null for relevance search")
+        elif not isinstance(paper_id, str) or not re.fullmatch(
+            ASTA_PAPER_ID_PATTERN, paper_id
+        ):
+            raise ProgramError(
+                f"{label}.paper_id must use a documented Asta paper identifier"
+            )
+
+        attempt = receipt["attempt"]
+        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt not in {1, 2}:
+            raise ProgramError(f"{label}.attempt must be 1 or 2")
+        request_profile = receipt["request_profile"]
+        if request_profile not in ASTA_CALL_PROFILES:
+            raise ProgramError(
+                f"{label}.request_profile must be one of {sorted(ASTA_CALL_PROFILES)}"
+            )
+        expected_profile = "standard" if attempt == 1 else "minimal"
+        if request_profile != expected_profile:
+            raise ProgramError(
+                f"{label}.request_profile must be {expected_profile} for attempt {attempt}"
+            )
+
+        outcome = receipt["outcome"]
+        if outcome not in ASTA_CALL_OUTCOMES:
+            raise ProgramError(
+                f"{label}.outcome must be one of {sorted(ASTA_CALL_OUTCOMES)}"
+            )
+        elapsed = receipt["elapsed_seconds"]
+        if (
+            isinstance(elapsed, bool)
+            or not isinstance(elapsed, (int, float))
+            or elapsed < 0
+        ):
+            raise ProgramError(f"{label}.elapsed_seconds must be a non-negative number")
+        result_count = receipt["result_count"]
+        error_type = receipt["error_type"]
+        if outcome == "completed":
+            if (
+                isinstance(result_count, bool)
+                or not isinstance(result_count, int)
+                or result_count < 0
+            ):
+                raise ProgramError(
+                    f"{label}.result_count must be a non-negative integer when completed"
+                )
+            if error_type is not None:
+                raise ProgramError(f"{label}.error_type must be null when completed")
+        else:
+            if result_count is not None:
+                raise ProgramError(f"{label}.result_count must be null after a failed call")
+            if error_type not in ASTA_CALL_ERROR_TYPES:
+                raise ProgramError(
+                    f"{label}.error_type must be one of {sorted(ASTA_CALL_ERROR_TYPES)}"
+                )
+            if error_type in {"authentication", "invalid_request"}:
+                raise ProgramError(
+                    f"{label} records a blocking {error_type} defect, not a scientific outage"
+                )
+            if outcome == "no_response" and (
+                error_type != "timeout" or elapsed < ASTA_NO_RESPONSE_SECONDS
+            ):
+                raise ProgramError(
+                    f"{label}.no_response requires error_type=timeout and at least "
+                    f"{ASTA_NO_RESPONSE_SECONDS} elapsed seconds"
+                )
+        operations.setdefault(operation_id, []).append(receipt)
+
+    terminal_failures: list[dict[str, Any]] = []
+    operation_summaries: list[tuple[str, str | None, dict[str, Any]]] = []
+    for operation_id, attempts in operations.items():
+        ordered = sorted(attempts, key=lambda row: row["attempt"])
+        attempt_numbers = [row["attempt"] for row in ordered]
+        if len(attempt_numbers) != len(set(attempt_numbers)):
+            raise ProgramError(f"{operation_id} contains duplicate attempt receipts")
+        if attempt_numbers not in ([1], [1, 2]):
+            raise ProgramError(f"{operation_id} attempts must be [1] or [1, 2]")
+        tools = {str(row["tool"]) for row in ordered}
+        paper_ids = {row["paper_id"] for row in ordered}
+        if len(tools) != 1 or len(paper_ids) != 1:
+            raise ProgramError(
+                f"{operation_id} must retain one tool and paper_id across its retry"
+            )
+        first = ordered[0]
+        if first["outcome"] == "completed" and len(ordered) != 1:
+            raise ProgramError(f"{operation_id} must not retry a completed call")
+        if first["outcome"] != "completed" and attempt_numbers != [1, 2]:
+            raise ProgramError(
+                f"{operation_id} must retry a failed call exactly once with a minimal payload"
+            )
+        terminal = ordered[-1]
+        if terminal["outcome"] != "completed":
+            terminal_failures.append(terminal)
+        operation_summaries.append((first["tool"], first["paper_id"], terminal))
+
+    search_operations = [
+        terminal
+        for tool, _paper_id, terminal in operation_summaries
+        if tool == "search_papers_by_relevance"
+    ]
+    if not search_operations:
+        raise ProgramError("Asta receipts require at least one relevance-search operation")
+    completed_searches = [
+        row for row in search_operations if row["outcome"] == "completed"
+    ]
+    snippet_operations = [
+        (paper_id, terminal)
+        for tool, paper_id, terminal in operation_summaries
+        if tool == "snippet_search"
+    ]
+    snippet_targets = {paper_id for paper_id, _terminal in snippet_operations}
+    failed_citation_targets = {
+        paper_id
+        for tool, paper_id, terminal in operation_summaries
+        if tool == "get_citations" and terminal["outcome"] != "completed"
+    }
+    missing_snippets = failed_citation_targets - snippet_targets
+    if missing_snippets:
+        raise ProgramError(
+            "A terminal get_citations failure must still be followed by snippet_search on the "
+            f"original paper; missing={sorted(missing_snippets)}"
+        )
+    citation_targets = {
+        paper_id
+        for tool, paper_id, _terminal in operation_summaries
+        if tool == "get_citations"
+    }
+    unevaluated_citation_targets = citation_targets - snippet_targets
+    if unevaluated_citation_targets:
+        raise ProgramError(
+            "Every paper passed to get_citations must also receive paper-restricted "
+            f"snippet_search; missing={sorted(unevaluated_citation_targets)}"
+        )
+    if not completed_searches:
+        if has_documents or has_proposals:
+            raise ProgramError(
+                "An unavailable relevance search cannot produce landscape documents or proposals"
+            )
+    elif any(row["result_count"] > 0 for row in completed_searches):
+        tools_attempted = {tool for tool, _paper_id, _terminal in operation_summaries}
+        missing = {"get_citations", "snippet_search"} - tools_attempted
+        if missing:
+            raise ProgramError(
+                "A positive Asta relevance search requires citation and snippet operations; "
+                f"missing={sorted(missing)}"
+            )
+
+    completed_snippets = [
+        row
+        for _paper_id, row in snippet_operations
+        if row["outcome"] == "completed" and row["result_count"] > 0
+    ]
+    if (has_documents or has_proposals) and not completed_snippets:
+        raise ProgramError(
+            "Landscape documents and proposals require a completed paper-restricted snippet call"
+        )
+
+    if terminal_failures and not any(
+        isinstance(gap, str) and gap.strip() for gap in gaps
+    ):
+        raise ProgramError("Terminal Asta call failures require an explicit gap")
+
+
+def _validate_landscape_scan(records: Mapping[str, Any], gaps: list[Any]) -> None:
     documents = _validate_documents(records, canonical_ids=True)
     proposals = _contract_rows(records, "landscape_proposals")
+    _validate_asta_call_receipts(
+        records,
+        gaps,
+        has_documents=bool(documents),
+        has_proposals=bool(proposals),
+    )
     document_ids = {str(row["document_id"]) for row in documents}
     cited_ids: set[str] = set()
     normalized_proposals: set[tuple[str, str, str]] = set()

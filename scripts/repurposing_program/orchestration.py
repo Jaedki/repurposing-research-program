@@ -187,7 +187,6 @@ def _build_seed_result(
     queued_count = sum(
         row["identity_resolution"]["status"] != "exact" for row in candidates
     )
-    upstream_document_ids = {str(row["document_id"]) for row in _all_documents(results)}
     records = {
         "candidates": candidates,
         "identity_receipts": receipts,
@@ -202,7 +201,6 @@ def _build_seed_result(
             row
             for item_id in item_ids
             for row in _cited_documents(accepted[item_id]["records"])
-            if str(row["document_id"]) not in upstream_document_ids
         ),
         records,
     )
@@ -236,7 +234,6 @@ def _build_review_result(
         "candidate_id",
         "reviews",
     )
-    upstream_document_ids = {str(row["document_id"]) for row in _all_documents(results)}
     return {
         "stage": "candidate_review",
         "status": "complete",
@@ -250,7 +247,6 @@ def _build_review_result(
                         "candidate_review",
                         "candidate_evidence_review",
                     )
-                    if str(row["document_id"]) not in upstream_document_ids
                 ),
                 reviews,
             ),
@@ -334,6 +330,14 @@ def _validate_result(
     packet: Mapping[str, Any],
     prior: Mapping[str, Mapping[str, Any]],
 ) -> None:
+    allowed_fields = set(
+        packet["result_contract"]["allowed_top_level_fields"]
+    )
+    unexpected_fields = sorted(set(result) - allowed_fields)
+    if unexpected_fields:
+        raise ProgramError(
+            f"Result has unexpected top-level fields: {unexpected_fields}"
+        )
     if (
         result.get("stage") != task
         or result.get("item_id") != item_id
@@ -366,7 +370,9 @@ def _validate_result(
         "pathology_source_adjudication": lambda: _validate_source_adjudication(
             result["records"], prior
         ),
-        "pathology_landscape_scan": lambda: _validate_landscape_scan(result["records"]),
+        "pathology_landscape_scan": lambda: _validate_landscape_scan(
+            result["records"], result["gaps"]
+        ),
         "pathology_curation": lambda: _validate_curation(result["records"], prior),
         "pathology_node_research": lambda: _validate_pathology_item(
             result["records"], str(item_id), prior

@@ -8,7 +8,7 @@ from .contracts import PRIOR_ART_STATUSES, _COMPARATORS
 from .errors import ProgramError
 from .evidence import _all_documents, _cited_ids, _find, _rows
 from .graph import _graph_support_ids
-from .identity import _canonical_candidates
+from .identity import _candidate_queries, _canonical_candidates
 from .pathology import _research_concepts
 from .validation import (
     _contract_rows,
@@ -74,6 +74,7 @@ def _validate_seed_item(
     }
     for index, row in enumerate(candidates):
         label = f"candidates[{index}]"
+        _candidate_queries(row)
         _required(
             row,
             ("candidate_id", "name", "mechanism_hypothesis", "graph_rationale"),

@@ -14,6 +14,7 @@ from .graph import _graph_node_context
 from .identity import _identity_queue
 from .pathology import _research_concepts
 from .storage import (
+    _accepted_result_files,
     _item_result_path,
     _read_json,
     _result_path,
@@ -28,19 +29,14 @@ def _case(root: Path) -> dict[str, Any]:
     if not str(case.get("disease", "")).strip():
         raise ProgramError("case.json is not a valid lean repurposing case")
     if case.get("objective") != OBJECTIVE:
-        raise ProgramError("case.json does not contain the built-in repurposing objective")
+        raise ProgramError("Run objective differs from the current contract; start a fresh run")
     basis = {
         "disease": case["disease"],
         "gene": case.get("gene"),
         "mondo": case.get("mondo"),
         "objective": OBJECTIVE,
     }
-    identity_basis = (
-        {**basis, "workflow_revision": case["workflow_revision"]}
-        if "workflow_revision" in case
-        else basis
-    )
-    if case.get("case_id") != _stable_id("CASE", identity_basis):
+    if case.get("case_id") != _stable_id("CASE", basis):
         raise ProgramError("case.json content no longer matches its case_id")
     return case
 
@@ -104,7 +100,9 @@ def _load_results(root: Path) -> dict[str, dict[str, Any]]:
             missing_seen = True
             continue
         if missing_seen:
-            raise ProgramError(f"Result exists out of stage order: {path}")
+            raise ProgramError(
+                f"Result does not match the current stage sequence; start a fresh run: {path}"
+            )
         results[stage] = _read_json(path)
     return results
 
@@ -181,12 +179,13 @@ def _verify_outputs(root: Path, manifest: Mapping[str, Any]) -> None:
         raise ProgramError("Output manifest is not complete")
     if manifest.get("case_sha256") != _sha256((root / "case.json").read_bytes()):
         raise ProgramError("case.json changed after outputs were built")
-    stage_results = manifest.get("stage_results")
-    if not isinstance(stage_results, dict) or set(stage_results) != set(STAGES):
-        raise ProgramError("Output manifest does not cover every stage result")
-    for stage, expected in stage_results.items():
-        if _sha256(_result_path(root, stage).read_bytes()) != expected:
-            raise ProgramError(f"Accepted result changed after outputs were built: {stage}")
+    accepted_results = manifest.get("accepted_results")
+    result_files = _accepted_result_files(root)
+    if not isinstance(accepted_results, dict) or set(accepted_results) != set(result_files):
+        raise ProgramError("Output manifest does not cover every accepted result")
+    for name, path in result_files.items():
+        if _sha256(path.read_bytes()) != accepted_results[name]:
+            raise ProgramError(f"Accepted result changed after outputs were built: {name}")
     for artifact in manifest.get("artifacts", []):
         path = root / "outputs" / str(artifact.get("filename", ""))
         if not path.is_file() or _sha256(path.read_bytes()) != artifact.get("sha256"):

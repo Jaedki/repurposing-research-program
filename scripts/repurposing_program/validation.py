@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping
 
-from .contracts import CANONICAL_DOCUMENT_ID, ROW_SCHEMAS, _SECRET_KEYS
+from .contracts import (
+    CANONICAL_DOCUMENT_ID,
+    RESEARCH_DOCUMENT_BASE_FIELDS,
+    ROW_SCHEMAS,
+    _SECRET_KEYS,
+)
 from .errors import ProgramError
 from .evidence import _rows
 
@@ -96,7 +102,10 @@ def _secret_paths(value: Any, path: str = "$") -> list[str]:
     if isinstance(value, dict):
         for key, item in value.items():
             child = f"{path}.{key}"
-            if str(key).lower() in _SECRET_KEYS:
+            normalized_key = re.sub(
+                r"[^a-z0-9]+", "_", str(key).casefold()
+            ).strip("_")
+            if normalized_key in _SECRET_KEYS:
                 found.append(child)
             found.extend(_secret_paths(item, child))
     elif isinstance(value, list):
@@ -122,10 +131,10 @@ def _validate_documents(
 ) -> list[dict[str, Any]]:
     documents = _contract_rows(records, "documents", "document_id")
     for index, row in enumerate(documents):
-        _required(row, ("document_id", "title", "source"), f"documents[{index}]")
+        _required(row, RESEARCH_DOCUMENT_BASE_FIELDS, f"documents[{index}]")
         if canonical_ids and not CANONICAL_DOCUMENT_ID.fullmatch(str(row["document_id"])):
             raise ProgramError(
                 f"documents[{index}].document_id must be a canonical PMID, PMCID, DOI, "
-                "authoritative accession, or HTTPS URL"
+                "S2 Semantic Scholar ID, authoritative accession, or HTTPS URL"
             )
     return documents

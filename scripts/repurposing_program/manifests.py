@@ -5,9 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
-from .contracts import EXPERIMENTAL_USE_POLICY, STAGES
+from .contracts import EXPERIMENTAL_USE_POLICY
 from .evidence import _rows
-from .storage import _result_path, _sha256
+from .storage import _accepted_result_files, _sha256
 
 
 def _artifact(path: Path) -> dict[str, Any]:
@@ -35,9 +35,9 @@ def _build_manifest(
             _rows(results["candidate_seed_generation"]["records"], "candidates")
         ),
         "deduplicated_candidate_count": len(candidates),
-        "stage_results": {
-            stage: _sha256(_result_path(run_root, stage).read_bytes())
-            for stage in STAGES
+        "accepted_results": {
+            name: _sha256(path.read_bytes())
+            for name, path in _accepted_result_files(run_root).items()
         },
         "artifacts": [_artifact(path) for path in artifact_paths],
         "experimental_use_policy": EXPERIMENTAL_USE_POLICY,

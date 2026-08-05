@@ -7,7 +7,13 @@ import re
 import unicodedata
 from typing import Any, Iterable, Mapping
 
-from .contracts import _CITATION_FIELDS
+from .contracts import (
+    EVIDENCE_PASSAGE_FIELDS,
+    RESEARCH_DOCUMENT_BASE_FIELDS,
+    RESEARCH_DOCUMENT_PASSAGES_FIELD,
+    RESEARCH_DOCUMENT_REQUIRED_FIELDS,
+    _CITATION_FIELDS,
+)
 from .errors import ProgramError
 from .storage import _canonical_bytes
 
@@ -50,35 +56,70 @@ def _merge_text(*values: Any) -> str:
 
 def _validate_research_document_content(records: Mapping[str, Any]) -> None:
     for index, row in enumerate(_rows(records, "documents")):
-        passages = row.get("evidence_passages")
+        label = f"documents[{index}]"
+        missing = [
+            field for field in RESEARCH_DOCUMENT_REQUIRED_FIELDS if field not in row
+        ]
+        if missing:
+            raise ProgramError(f"{label} is missing fields: {', '.join(missing)}")
+        empty = [
+            field
+            for field in RESEARCH_DOCUMENT_BASE_FIELDS
+            if not str(row[field]).strip()
+        ]
+        if empty:
+            raise ProgramError(f"{label} has empty required fields: {', '.join(empty)}")
+        passages = row[RESEARCH_DOCUMENT_PASSAGES_FIELD]
         if not isinstance(passages, list) or not passages:
             raise ProgramError(
-                f"documents[{index}].evidence_passages must contain inspectable source content"
+                f"{label}.{RESEARCH_DOCUMENT_PASSAGES_FIELD} must contain inspectable source content"
             )
         for passage_index, passage in enumerate(passages):
-            label = f"documents[{index}].evidence_passages[{passage_index}]"
-            if not isinstance(passage, dict) or set(passage) != {"text", "locator"}:
-                raise ProgramError(f"{label} must contain exactly text and locator")
-            if not str(passage["text"]).strip() or not str(passage["locator"]).strip():
-                raise ProgramError(f"{label}.text and locator must be non-empty")
+            passage_label = (
+                f"{label}.{RESEARCH_DOCUMENT_PASSAGES_FIELD}[{passage_index}]"
+            )
+            if not isinstance(passage, dict) or set(passage) != set(
+                EVIDENCE_PASSAGE_FIELDS
+            ):
+                raise ProgramError(
+                    f"{passage_label} must contain exactly "
+                    f"{' and '.join(EVIDENCE_PASSAGE_FIELDS)}"
+                )
+            if any(
+                not isinstance(passage[field], str) or not passage[field].strip()
+                for field in EVIDENCE_PASSAGE_FIELDS
+            ):
+                raise ProgramError(
+                    f"{passage_label}.{' and '.join(EVIDENCE_PASSAGE_FIELDS)} "
+                    "must be non-empty strings"
+                )
 
 
 def _document_has_inspectable_content(row: Mapping[str, Any]) -> bool:
-    passages = row.get("evidence_passages")
+    passages = row.get(RESEARCH_DOCUMENT_PASSAGES_FIELD)
     if isinstance(passages, list) and any(
-        isinstance(passage, dict) and str(passage.get("text", "")).strip()
+        isinstance(passage, dict)
+        and all(
+            isinstance(passage.get(field), str) and passage[field].strip()
+            for field in EVIDENCE_PASSAGE_FIELDS
+        )
         for passage in passages
     ):
         return True
-    if str(row.get("abstract", "")).strip() or str(row.get("raw_path", "")).strip():
-        return True
-    if str(row.get("supporting_text", "")).strip():
+    if any(
+        isinstance(row.get(field), str) and row[field].strip()
+        for field in ("abstract", "raw_path", "supporting_text")
+    ):
         return True
     snippets = row.get("snippets")
-    if isinstance(snippets, list) and any(str(value).strip() for value in snippets):
+    if isinstance(snippets, list) and any(
+        isinstance(value, str) and value.strip() for value in snippets
+    ):
         return True
     supports = row.get("supports")
-    if isinstance(supports, list) and any(str(value).strip() for value in supports):
+    if isinstance(supports, list) and any(
+        isinstance(value, str) and value.strip() for value in supports
+    ):
         return True
     structured = row.get("structured_content")
     if isinstance(structured, (Mapping, list)) and bool(structured):

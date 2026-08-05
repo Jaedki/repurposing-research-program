@@ -7,7 +7,7 @@
 | `pathology_source_screening` | Python | Structured treatment fields are excluded and every remaining DisMech sentence matching a named-intervention, treatment-language, or treatment-event signal is deduplicated into one bounded batch |
 | `pathology_source_adjudication` | One bounded agent, or Python when the batch is empty | Every flagged sentence is classified exactly once as pathology-only, treatment, mixed, or ambiguous without searching, rewriting, or creating nodes |
 | `pathology_sources` | Python | Treatment-blind Monarch and DisMech nodes, shared disease context, receipts, versions, and raw hashes are retained |
-| `pathology_landscape_scan` | One global agent | One shallow Asta scan searches by relevance, inspects related citing papers and paper-restricted snippets, and returns only cited missing or more-specific pathology proposals; an unavailable scan returns an explicit gap and empty scientific collections |
+| `pathology_landscape_scan` | One global agent | One shallow Asta scan searches by relevance, inspects related citing papers and paper-restricted snippets, returns non-secret call receipts, and returns only cited missing or more-specific pathology proposals; relevance-search unavailability after one minimal retry returns an explicit gap and empty scientific collections |
 | `pathology_curation` | One agent | Every non-anchor Monarch, DisMech, and projected Asta node is assigned exactly once to an atomic run-local concept marked `research`, `context_only`, or `exclude`; researchability follows the biological claim rather than its provisional label, context is attached to retained research concepts, and uncertain equivalence remains separate |
 | `evidence_graph` | Python after item work | Every curated research concept has one accepted deep-research profile and desired biological state; Python projects retained concepts and source edges through the partition and freezes the graph snapshot |
 | `candidate_seed_generation` | Python after item work | Every researched pathology concept has one accepted seed result; Python assigns immutable seed IDs and submits every supported identifier to UniChem |
@@ -23,7 +23,8 @@ The isolated source-adjudication packet may contain only the compact flagged-sen
 cannot propagate into the pathology graph. The landscape packet receives only the compact initial
 index and pathology context, retrieves literature through the host-configured Asta MCP service, and
 cannot return node IDs or treatment-framed proposals. Search results, citation results, snippets,
-and raw MCP content remain transient. The
+and raw MCP content remain transient; bounded receipts retain only tool, logical operation, paper
+ID when applicable, attempt/profile, outcome category, elapsed time, and result count. The
 subsequent pathology phase may contain disease,
 gene, variant, molecular, biochemical, cellular, tissue, organ, anatomy, and phenotype records.
 It structurally rejects candidate, compound, drug, treatment, and therapeutic fields.

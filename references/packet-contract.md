@@ -19,7 +19,7 @@ The worker returns one JSON object:
 ## Agent task collections
 
 1. `pathology_source_adjudication`: `sentence_decisions`; one compact packet partitions every flagged free-text sentence exactly once as `retain_pathology`, `exclude_treatment`, `exclude_mixed`, or `exclude_ambiguous`. It performs no search or rewriting and is skipped deterministically when the batch is empty.
-2. `pathology_landscape_scan`: `documents`, `landscape_proposals`; one global, shallow Asta scan checks the compact initial index. Zero scientific results are valid; an outage returns empty collections and an explicit gap.
+2. `pathology_landscape_scan`: `documents`, `landscape_proposals`, `asta_call_receipts`; one global, shallow Asta scan checks the compact initial index. Zero scientific results are valid after a receipt-verified scan; relevance-search unavailability after one minimal retry returns empty scientific collections and an explicit gap.
 3. `pathology_curation`: `concepts`; one packet partitions every supplied non-anchor Monarch, DisMech, and projected Asta node exactly once.
 4. `pathology_node_research`: `documents`, `profiles`, `assertions`.
 5. `candidate_seed_research`: `documents`, `candidates`, `exclusions`.
@@ -30,7 +30,7 @@ The worker returns one JSON object:
 Python creates `pathology_source_screening`, `pathology_sources`, the frozen `evidence_graph`,
 UniChem-enriched `candidate_seed_generation`, and aggregated `candidate_review` results.
 
-Research `document_id` values use a canonical PMID, PMCID, DOI, authoritative database accession, or HTTPS URL. Invented `DOC-AUTHOR-YEAR` aliases are rejected. Every returned document contains one or more `evidence_passages` objects with exactly non-empty `text` and `locator` fields; a citation record without inspectable retained content is invalid.
+Research `document_id` values use a canonical PMID, PMCID, DOI, namespaced Semantic Scholar paper ID (`S2:` followed by 40 hexadecimal characters), supported authoritative database accession, or HTTPS URL; the generated packet contract lists the exact accepted formats. Invented `DOC-AUTHOR-YEAR` aliases are rejected. Every returned document contains one or more `evidence_passages` objects with exactly non-empty string values for `text` and `locator`; a citation record without inspectable retained content is invalid.
 For PMID, PMCID, and DOI documents, Python uses cached authoritative metadata to verify that the supplied title belongs to the identifier and projects the canonical publication ID, known identifier aliases, title, year, journal, and authors downstream. One worker result cannot return the same publication through two identifier aliases. Accepted worker results remain unchanged. Python keeps one document per submitted ID, unions list evidence without duplicates, and stops on conflicting bibliographic identity metadata instead of choosing the last value.
 
 Workers may search and read freely, but `records.documents` contains only underlying documents that directly support a submitted claim, counterclaim, identity decision, or limitation. Each returned document ID is cited through `source_ids`, `pathology_source_ids`, or `mechanism_source_ids` somewhere in that result, including nested observation citations. Upstream citations need not be returned again.
@@ -49,7 +49,14 @@ Python preserves accepted results unchanged and applies this rule as a soft prop
   disease context, and a coverage checklist. Following
   `https://allenai.org/asta/resources/mcp`, the worker searches papers by relevance, inspects
   related citing papers, and runs paper-restricted snippet search on every paper retained for evaluation.
-  Search results, citation results, snippets, and raw MCP responses are transient. Each proposal
+  Calls are sequential and a pending call is not terminated before 180 seconds. A retryable error
+  or 180-second no-response receives exactly one minimal same-operation retry and another full
+  wait. A terminal citation failure is endpoint-specific and does not prevent snippet evaluation
+  of the original relevance paper; only relevance search failing both attempts makes Asta
+  unavailable. `asta_call_receipts` contains one non-secret row per actual call with only logical
+  operation, tool, paper ID when applicable, attempt/profile, outcome category, elapsed time,
+  result count, and bounded error type. Query text, raw payloads, error messages, headers, and
+  credentials remain transient. Each proposal
   contains exactly `label`,
   `provisional_type`, `claim`, `index_comparison`, and `source_ids`; it cites a returned canonical
   paper with inspectable content. Python rejects duplicates, unknown sources, treatment framing,

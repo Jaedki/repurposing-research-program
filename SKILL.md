@@ -15,7 +15,10 @@ Run commands from this skill folder, or use absolute script paths.
 
 Install the pinned runtime dependencies once with `python -m pip install -r requirements.txt`.
 
-1. Start a fresh run unless the user explicitly asks to resume an existing one. Choose its run-folder path before `init` and reuse that exact path in every controller command. Supply the exact MONDO ID if available; if not, indicate that the ID is unknown and proceed without it:
+1. Start a fresh run unless the user explicitly asks to resume one created under the current
+   objective and stage sequence. Choose its run-folder path before `init` and reuse that exact path
+   in every controller command. Supply the exact MONDO ID if available; if not, indicate that the
+   ID is unknown and proceed without it:
 
    ```powershell
    python scripts/orchestrate_program.py init <run-folder> --disease "<disease>" [--gene <gene>] [--mondo MONDO:...]
@@ -61,9 +64,10 @@ Install the pinned runtime dependencies once with `python -m pip install -r requ
    python scripts/orchestrate_program.py build <run-folder>
    ```
 
-Use `status` at any time. To resume an existing run, call `next` on its run folder. Accepted results are immutable and content-addressed. Lean orchestration is not a limit on research depth: workers should investigate each packet as deeply as the evidence permits.
-The programme is an evolving work in progress rather than a sequence of named or numbered workflow
-versions. Do not invalidate an existing run solely because the controller or packet contract evolved.
+Use `status` at any time. To resume a run created under the current objective and stage sequence,
+call `next` on its run folder. Start a fresh run after either contract changes. Accepted results are
+immutable and content-addressed. Lean orchestration is not a limit on research depth: workers
+should investigate each packet as deeply as the evidence permits.
 
 ## Hard boundaries
 
@@ -76,7 +80,9 @@ versions. Do not invalidate an existing run solely because the controller or pac
   and curation. It searches papers by relevance, inspects related citing papers, and runs
   paper-restricted snippet searches on every paper retained for evaluation. It follows
   `https://allenai.org/asta/resources/mcp` and cannot create final concept IDs, perform deep node
-  research, or replace curation.
+  research, or replace curation. A pending call is not terminated before 180 seconds; a retryable
+  failure receives one minimal same-operation retry. Citation-endpoint failure is partial and does
+  not suppress snippet evaluation of the original relevance paper.
 - At curation, projected Asta additions join the same `source_nodes` collection and shared disease
   context as all other pathology claims; source origin is provenance, not a separate evidence tier.
 - Candidate eligibility follows `pathology element -> primary desired biological state -> established drug mode of action`. Secondary desired states and the phenotype objective remain context and do not create additional discovery routes.
@@ -91,8 +97,10 @@ versions. Do not invalidate an existing run solely because the controller or pac
 - Search results, citation results, snippets, and raw MCP responses are transient. In the landscape
   scan, search by relevance, inspect related citing papers, and run paper-restricted snippet search
   on each paper retained for evaluation. Return only canonical papers cited by an actual proposal, each with an
-  inspectable evidence passage. An outage yields empty scientific collections and an explicit gap
-  and does not block valid Monarch/DisMech curation.
+  inspectable evidence passage. Return non-secret call receipts containing only operation metadata,
+  outcomes, elapsed time, and result counts. Asta is unavailable only when relevance search fails
+  both the standard and minimal attempts; endpoint-specific terminal failures remain explicit gaps
+  and do not block valid Monarch/DisMech curation.
 - Configure Asta in the MCP host with `ASTA_AI2_API_KEY`. The controller never reads that variable
   or persists keys, headers, authentication data, or raw MCP exchanges.
 - Pathology research assertions are optional and may use only exact `node_id` values in the packet's `allowed_assertion_nodes`; keep newly researched mechanisms in the profile when they do not connect two allowed nodes.
