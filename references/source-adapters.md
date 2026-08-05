@@ -7,6 +7,33 @@ receipts, not credentials or excluded sentences.
 
 Normalized non-anchor nodes remain source records until the curation barrier assigns each one exactly once to a run-local research, context-only, or excluded concept. Source adapters do not perform fuzzy semantic merging or research-value pruning.
 
+## Asta pathology landscape scan
+
+Asta is not a Python source adapter and has no controller transport. After normalized Monarch and
+DisMech acquisition, one global worker uses the host-configured Asta MCP tools for bounded
+literature discovery, following the official signatures at
+`https://allenai.org/asta/resources/mcp`. The packet carries a compact initial index, source edges, compact disease
+context, and coverage checklist. The worker searches papers by relevance, inspects related citing
+papers, and runs paper-restricted snippet search on every paper retained for evaluation. It does not recurse
+through citations, pathways, or authors.
+
+The worker makes Asta calls sequentially, awaiting every `get_citations` and paper-restricted
+`snippet_search` response before making the next call. A response taking about 30 seconds is
+normal and is not an outage. An outage is recorded only after a completed tool error or after
+waiting at least 45 seconds for a response.
+
+The worker returns only canonical papers cited by an actual missing or more-specific pathology
+proposal, with inspectable evidence passages from the underlying paper. Search results, citation
+results, snippets, raw MCP responses, and authentication data are transient. Python validates the
+papers and proposals and assigns stable `ASTA-NODE` identities; the existing curator then treats
+the projected proposals on equal terms with Monarch and DisMech claims and decides whether each is
+truly distinct. Only documents attached to proposals surviving curation can enter the frozen graph.
+An Asta outage produces empty collections and an explicit gap, leaving source-derived curation
+available.
+
+Configure `ASTA_AI2_API_KEY` in the MCP host. The controller never reads it, constructs Asta
+requests, writes authentication headers, or caches raw MCP exchanges.
+
 ## Monarch Initiative
 
 The adapter resolves the case to an exact MONDO entity, preferably from `--mondo`. It exhausts the v3 association endpoint with an explicit pathology allowlist:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any, Mapping
 
 from pathology_sources import SENTENCE_DECISIONS
@@ -10,6 +11,7 @@ from pathology_sources import SENTENCE_DECISIONS
 from .contracts import (
     ASSERTION_EVIDENCE_TYPES,
     ASSERTION_POLARITIES,
+    LANDSCAPE_PROPOSAL_TYPES,
     PATHOLOGY_PROFILE_LIST_FIELDS,
     _PATHOLOGY_FORBIDDEN_KEYS,
     _RESEARCH_CONTEXT_SECTIONS,
@@ -47,6 +49,46 @@ def _compact_disease_context(records: Mapping[str, Any]) -> list[dict[str, Any]]
     ]
 
 
+def _normalized_landscape_text(value: Any) -> str:
+    return " ".join(unicodedata.normalize("NFKC", str(value)).split()).casefold()
+
+
+def _landscape_source_nodes(
+    results: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    result = results.get("pathology_landscape_scan")
+    if not isinstance(result, Mapping) or not isinstance(result.get("records"), Mapping):
+        return []
+    nodes = []
+    for proposal in _rows(result["records"], "landscape_proposals"):
+        basis = {
+            "provisional_type": _normalized_landscape_text(proposal["provisional_type"]),
+            "label": _normalized_landscape_text(proposal["label"]),
+            "claim": _normalized_landscape_text(proposal["claim"]),
+        }
+        nodes.append({
+            "node_id": _stable_id("ASTA-NODE", basis),
+            "label": str(proposal["label"]).strip(),
+            "node_type": str(proposal["provisional_type"]),
+            "description": str(proposal["claim"]).strip(),
+            "index_comparison": str(proposal["index_comparison"]).strip(),
+            "source_ids": sorted(set(map(str, proposal["source_ids"]))),
+            "source_adapter": "Asta",
+            "source_section": "pathology_landscape_scan",
+        })
+    return sorted(nodes, key=lambda row: str(row["node_id"]))
+
+
+def _combined_source_records(
+    results: Mapping[str, Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    source = results["pathology_sources"]["records"]
+    return (
+        [*_rows(source, "source_nodes"), *_landscape_source_nodes(results)],
+        _rows(source, "source_edges"),
+    )
+
+
 def _curation_concepts(
     results: Mapping[str, Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -73,10 +115,8 @@ def _canonical_source_records(
     results: Mapping[str, Mapping[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Project raw source records through the accepted run-local concept partition."""
-    source = results["pathology_sources"]["records"]
-    raw_nodes = _rows(source, "source_nodes")
+    raw_nodes, raw_edges = _combined_source_records(results)
     raw_by_id = {str(row["node_id"]): row for row in raw_nodes}
-    raw_edges = _rows(source, "source_edges")
     concepts = _curation_concepts(results)
 
     node_map: dict[str, str] = {}
@@ -304,11 +344,70 @@ def _validate_source_result(result: Mapping[str, Any]) -> None:
         raise ProgramError(f"Treatment fields reached the pathology source result: {forbidden}")
 
 
+_LANDSCAPE_TREATMENT_PATTERN = re.compile(
+    r"\b(?:candidate|compound|dos(?:e|ed|ing)|drug|medication|repurpos\w*|"
+    r"therap(?:y|ies|eutic\w*)|treat(?:ment|ed|ing|s)?)\b",
+    re.IGNORECASE,
+)
+
+def _validate_landscape_scan(records: Mapping[str, Any]) -> None:
+    documents = _validate_documents(records, canonical_ids=True)
+    proposals = _contract_rows(records, "landscape_proposals")
+    document_ids = {str(row["document_id"]) for row in documents}
+    cited_ids: set[str] = set()
+    normalized_proposals: set[tuple[str, str, str]] = set()
+    for index, proposal in enumerate(proposals):
+        label = f"landscape_proposals[{index}]"
+        _required(
+            proposal,
+            ("label", "provisional_type", "claim", "index_comparison"),
+            label,
+        )
+        for field in ("label", "provisional_type", "claim", "index_comparison"):
+            if not isinstance(proposal[field], str) or not proposal[field].strip():
+                raise ProgramError(f"{label}.{field} must be non-empty text")
+        if proposal["provisional_type"] not in LANDSCAPE_PROPOSAL_TYPES:
+            raise ProgramError(
+                f"{label}.provisional_type must be one of "
+                f"{sorted(LANDSCAPE_PROPOSAL_TYPES)}"
+            )
+        normalized = tuple(
+            _normalized_landscape_text(proposal[field])
+            for field in ("provisional_type", "label", "claim")
+        )
+        if normalized in normalized_proposals:
+            raise ProgramError(
+                "landscape_proposals must not contain duplicate normalized proposals"
+            )
+        normalized_proposals.add(normalized)
+        proposal_sources = _references(proposal, "source_ids", document_ids, label)
+        if len(proposal_sources) != len(proposal["source_ids"]):
+            raise ProgramError(f"{label}.source_ids must be unique")
+        cited_ids.update(proposal_sources)
+        proposal_text = " ".join(
+            str(proposal[field]) for field in ("label", "claim", "index_comparison")
+        )
+        if _LANDSCAPE_TREATMENT_PATTERN.search(proposal_text):
+            raise ProgramError(
+                f"{label} is treatment-framed rather than a treatment-blind pathology claim"
+            )
+    if cited_ids != document_ids:
+        raise ProgramError(
+            "Landscape documents must be cited by an actual proposal; "
+            f"uncited={sorted(document_ids - cited_ids)}"
+        )
+    forbidden = _forbidden_pathology_paths(records)
+    if forbidden:
+        raise ProgramError(
+            f"Treatment fields are forbidden in the pathology landscape scan: {forbidden}"
+        )
+
+
 def _validate_curation(
     records: Mapping[str, Any], results: Mapping[str, Mapping[str, Any]]
 ) -> None:
     concepts = _contract_rows(records, "concepts", "concept_id")
-    source_nodes = _rows(results["pathology_sources"]["records"], "source_nodes")
+    source_nodes, _ = _combined_source_records(results)
     expected = {
         str(row["node_id"])
         for row in source_nodes
@@ -396,12 +495,20 @@ def _validate_pathology_item(
     records: Mapping[str, Any], item_id: str, results: Mapping[str, Mapping[str, Any]]
 ) -> None:
     documents = _validate_documents(records, canonical_ids=True)
-    source_document_ids = _ids(
-        _rows(results["pathology_sources"]["records"], "documents"),
-        "document_id",
-        "documents",
-    )
-    if not {str(row["document_id"]) for row in documents} - source_document_ids:
+    upstream_documents = [
+        *_rows(results["pathology_sources"]["records"], "documents"),
+        *(
+            _rows(results["pathology_landscape_scan"]["records"], "documents")
+            if "pathology_landscape_scan" in results
+            else []
+        ),
+    ]
+    upstream_document_ids = {
+        str(row.get("document_id", "")).strip() for row in upstream_documents
+    }
+    if "" in upstream_document_ids:
+        raise ProgramError("upstream documents.document_id is required")
+    if not {str(row["document_id"]) for row in documents} - upstream_document_ids:
         raise ProgramError("pathology node research must retain newly researched evidence")
     profiles = _contract_rows(records, "profiles", "node_id")
     assertions = _contract_rows(records, "assertions")
@@ -447,7 +554,7 @@ def _validate_pathology_item(
         )
     node_ids = {str(row["node_id"]) for row in source_nodes}
     source_ids = {
-        *source_document_ids,
+        *upstream_document_ids,
         *(str(row["document_id"]) for row in documents),
     }
     _references(profiles[0], "source_ids", source_ids, "profiles[0]")

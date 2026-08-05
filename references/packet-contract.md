@@ -19,12 +19,13 @@ The worker returns one JSON object:
 ## Agent task collections
 
 1. `pathology_source_adjudication`: `sentence_decisions`; one compact packet partitions every flagged free-text sentence exactly once as `retain_pathology`, `exclude_treatment`, `exclude_mixed`, or `exclude_ambiguous`. It performs no search or rewriting and is skipped deterministically when the batch is empty.
-2. `pathology_curation`: `concepts`; one packet partitions every supplied non-anchor source node exactly once.
-3. `pathology_node_research`: `documents`, `profiles`, `assertions`.
-4. `candidate_seed_research`: `documents`, `candidates`, `exclusions`.
-5. `candidate_identity`: `documents`, `identity_groups`; one global packet partitions every UniChem-flagged or unresolved seed exactly once. It is skipped deterministically when the queue is empty.
-6. `candidate_evidence_review`: `documents`, `reviews`; one packet contains the identity-resolved candidates assigned to one pathology concept and requires exactly one evidence dossier per supplied candidate.
-7. `candidate_audit`: `assessments`, `excluded_candidates`; one global closed-corpus packet requires an exact partition of every reviewed candidate and cannot return new documents.
+2. `pathology_landscape_scan`: `documents`, `landscape_proposals`; one global, shallow Asta scan checks the compact initial index. Zero scientific results are valid; an outage returns empty collections and an explicit gap.
+3. `pathology_curation`: `concepts`; one packet partitions every supplied non-anchor Monarch, DisMech, and projected Asta node exactly once.
+4. `pathology_node_research`: `documents`, `profiles`, `assertions`.
+5. `candidate_seed_research`: `documents`, `candidates`, `exclusions`.
+6. `candidate_identity`: `documents`, `identity_groups`; one global packet partitions every UniChem-flagged or unresolved seed exactly once. It is skipped deterministically when the queue is empty.
+7. `candidate_evidence_review`: `documents`, `reviews`; one packet contains the identity-resolved candidates assigned to one pathology concept and requires exactly one evidence dossier per supplied candidate.
+8. `candidate_audit`: `assessments`, `excluded_candidates`; one global closed-corpus packet requires an exact partition of every reviewed candidate and cannot return new documents.
 
 Python creates `pathology_source_screening`, `pathology_sources`, the frozen `evidence_graph`,
 UniChem-enriched `candidate_seed_generation`, and aggregated `candidate_review` results.
@@ -34,7 +35,7 @@ For PMID, PMCID, and DOI documents, Python uses cached authoritative metadata to
 
 Workers may search and read freely, but `records.documents` contains only underlying documents that directly support a submitted claim, counterclaim, identity decision, or limitation. Each returned document ID is cited through `source_ids`, `pathology_source_ids`, or `mechanism_source_ids` somewhere in that result, including nested observation citations. Upstream citations need not be returned again.
 
-Python preserves accepted results unchanged and applies this rule as a soft propagation boundary: unused returned documents are not rejected, but do not enter aggregated stages or downstream packets. The graph, seeds, identity review, and candidate review each contribute only their own cited documents. `_all_documents()` assembles the deduplicated cross-stage union for the auditor and final outputs, including cited evidence for excluded candidates and negative findings.
+Python preserves accepted results unchanged and applies this rule as a soft propagation boundary: unused returned documents are normally not rejected, but do not enter aggregated stages or downstream packets. The landscape scan is stricter and rejects papers not cited by a proposal. The graph, seeds, identity review, and candidate review each contribute only their own cited documents. `_all_documents()` assembles the deduplicated retained cross-stage union for the auditor and final outputs, including cited evidence for excluded candidates and negative findings but excluding papers attached only to rejected landscape proposals.
 
 ## Pathology records
 
@@ -44,9 +45,21 @@ Python preserves accepted results unchanged and applies this rule as a soft prop
   introduce replacement text. Python restores only exact sentences classified
   `retain_pathology`; mixed and ambiguous sentences fail closed and become explicit gaps.
 
-- Monarch and DisMech nodes are disease-specific claims with a provisional source-adapter type and retained sources. The curator assigns the authoritative run-local concept type from the supplied claim, payload, and edges.
+- The landscape packet contains the compact initial source-node index, source edges, compact
+  disease context, and a coverage checklist. Following
+  `https://allenai.org/asta/resources/mcp`, the worker searches papers by relevance, inspects
+  related citing papers, and runs paper-restricted snippet search on every paper retained for evaluation.
+  Search results, citation results, snippets, and raw MCP responses are transient. Each proposal
+  contains exactly `label`,
+  `provisional_type`, `claim`, `index_comparison`, and `source_ids`; it cites a returned canonical
+  paper with inspectable content. Python rejects duplicates, unknown sources, treatment framing,
+  worker-supplied IDs, and unused papers, then assigns `ASTA-NODE-<hash>` from normalized type,
+  label, and claim. Zero proposals are valid.
+
+- Monarch, DisMech, and projected Asta nodes are disease-specific claims with a provisional type and retained sources. Each Asta proposal contains one pathological state or process at one causal level; one paper may support several separate proposals. The curator assigns the authoritative run-local concept type from the supplied claim, payload, and edges; Asta proposals have no privileged status.
 - Non-node DisMech material is retained in `disease_context`. The curator receives only compact disease-defining context and performs packet-only classification without searching or deep research. Receipts and full provenance remain controller-owned and do not create independent research tasks.
-- A curated concept chooses one member source-node ID as its run-local `concept_id`, retains member IDs and aliases, and uses one of `driver`, `mechanism`, `phenotype`, or `context`. Nodes merge only when they express the same claim at the same causal level; source-supported claims at different causal levels remain separate even when causally linked. Shared identifiers or biological relationships are not equivalence. Same-label gene-level disease claims may merge across sources, while mutation-, variant-, repeat-, model-, and mechanism-specific claims remain separate. True duplicates remain as members of the retained concept, and Python rejects duplicate retained type-label pairs. Python requires an exact partition and does not perform fuzzy matching.
+- A curated concept chooses one member source-node ID as its run-local `concept_id`, retains member IDs and aliases, and uses one of `driver`, `mechanism`, `phenotype`, or `context`. A mechanism concept contains one pathological state or process at one causal level. Nodes merge only when the same pathological state, biological context, profile, and desired biological state fit every member; source-supported claims at different causal levels remain separate even when causally linked. Shared identifiers or biological relationships are not equivalence and are represented by source edges or researched assertions. Same-label gene-level disease claims may merge across sources, while mutation-, variant-, repeat-, model-, and mechanism-specific claims remain separate. True duplicates remain as members of the retained concept, and Python rejects duplicate retained type-label pairs. Python requires an exact partition and does not perform fuzzy matching.
+- Concept type and disposition are separate judgments. Researchability follows the supplied biological claim rather than a provisional source label. Subordinate phenotypes and measurement-only biomarkers are normally `context_only`; a distinct modifiable phenotype or separate intervention objective may be `research`, while a biomarker-labelled causal process is classified by that mechanistic role, normally as a mechanism.
 - Only `research` concepts receive deep work. Each `context_only` concept names at least one research concept in `related_concept_ids`; Python retains it in the frozen graph and creates explicit context edges without a separate research packet. `exclude` concepts remain visible in the curation artifact but do not enter the graph.
 - Each researched concept returns one detailed profile covering normal and pathological state, causal role, granular mechanisms, cell types, anatomy, timing, upstream causes, downstream consequences, contradictions, uncertainty, and gaps. `desired_biological_state` contains one primary biological variable and one desired direction; an irreversible driver uses a specific compensatory state rather than generic improvement. `secondary_desired_states` may contain distinct atomic biological states and may be empty. `phenotype_objective` states the separate disease-phenotype change sought. State fields do not contain phenotype outcomes, assays, stages, populations, treatments, candidates, or generic clinical improvement. Important bundled or missing submechanisms remain explicit gaps and do not create new graph nodes.
 - `established_pathology_observations` is a list of `{observation, source_ids}` objects and may be empty. It retains only sourced pathology observations of movement toward the desired state; workers do not invent assays, thresholds, or biomarkers.
@@ -58,7 +71,7 @@ Python preserves accepted results unchanged and applies this rule as a soft prop
 
 ## Candidate records
 
-Each seed packet contains one frozen focal concept, a compact index of every retained non-anchor graph concept, and a read-only command that returns one bounded node context from the same snapshot. Focal and retrieved contexts keep source edges separate from researched assertions and omit pathology document metadata.
+Each seed packet contains one frozen focal concept, a compact index of every retained non-anchor graph concept, and a read-only command that returns one bounded node context from the same snapshot. Focal and retrieved contexts keep source edges separate from researched assertions and omit pathology document metadata. Before searching, the seed worker reviews every immediate focal neighbour, source edge, and researched assertion; it then includes only materially useful graph context. A focal-only hypothesis remains valid after this bounded review.
 
 Each candidate links established drug action to the focal profile's primary `desired_biological_state` and carries:
 
@@ -84,7 +97,7 @@ UniChem identifiers use their native database values under `chembl`, `drugbank`,
 
 The identity reviewer may attach a resolved queued group only to a candidate ID copied exactly from `canonical_candidate_options`, or partition queued seeds into new resolved, unresolved, or conflicting groups with a null `canonical_candidate_id`. Each option is either an existing resolved candidate or a queued exact-UCI block and names any queued seed IDs that the group must contain. UCI values appearing elsewhere in a partial or conflicting queue record are identity evidence, not canonical options. Seeds sharing one exact UCI are an indivisible identity block even when that block enters review because of a connectivity relationship. Each group cites newly retained authoritative identity evidence. Python validates complete, non-overlapping queue coverage and constructs the final candidate records without rewriting pathology or mechanism evidence.
 
-Review packets retain the assigned candidates and all of their linked frozen pathology concepts and profiles, including complete cross-concept provenance, and include document metadata for the candidates' identity and drug-mechanism sources. Pathology citations remain attached to the frozen graph and candidate records without duplicating other graph sections or the full pathology source library into every review packet. Workers first verify drug facts with primary or authoritative sources and map them to the supplied pathology, then check exact-disease prior art. A review is an evidence dossier, not a decision: it contains a hypothesis, cited supporting findings, an explicit mechanistic bridge, assumptions, cited counterevidence, prior-art classification, supported aliases, and limitations. It does not score, rank, or exclude the candidate.
+Review packets retain the assigned candidates and all of their linked frozen pathology concepts and profiles, including complete cross-concept provenance, and include document metadata for the candidates' identity and drug-mechanism sources. For each candidate they also contain `selected_graph_evidence`: researched assertions matching `assertion_ids` exactly and source edges bounded to selected nodes and the candidate's cited pathology sources. Pathology citations remain attached to the frozen graph and candidate records without duplicating the full graph or pathology source library into every review packet. Workers first verify drug facts with primary or authoritative sources and map them to the supplied pathology, then check exact-disease prior art. A review is an evidence dossier, not a decision: it contains a hypothesis, cited supporting findings, an explicit mechanistic bridge, assumptions, cited counterevidence, prior-art classification, supported aliases, and limitations. It does not score, rank, or exclude the candidate.
 
 Final candidate provenance exports the selected assertion IDs directly; it never infers assertion use from endpoint incidence. The summary reports compact graph coverage: candidate counts per non-anchor node, uncovered nodes, candidates using multiple nodes, and candidates using context-only nodes.
 

@@ -31,6 +31,7 @@ STAGES = (
     "pathology_source_screening",
     "pathology_source_adjudication",
     "pathology_sources",
+    "pathology_landscape_scan",
     "pathology_curation",
     "evidence_graph",
     "candidate_seed_generation",
@@ -150,6 +151,9 @@ AUDIT_EXCLUSION_POLICY = {
     ),
 }
 AUDIT_EXCLUSION_REASONS = frozenset(AUDIT_EXCLUSION_POLICY)
+LANDSCAPE_PROPOSAL_TYPES = frozenset({
+    "driver", "mechanism", "phenotype", "biomarker", "context",
+})
 
 STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
     "pathology_source_adjudication": {
@@ -166,17 +170,49 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
         ),
         "collections": ["sentence_decisions"],
     },
+    "pathology_landscape_scan": {
+        "role": "treatment-blind disease pathology landscape researcher",
+        "task": (
+            "Use the official Asta MCP tools described at "
+            "https://allenai.org/asta/resources/mcp for one shallow, treatment-blind landscape "
+            "scan. Search for disease-pathology papers with search_papers_by_relevance. For each "
+            "result retained as potentially informative, use get_citations to inspect related "
+            "citing papers. Use snippet_search, restricted by paper ID, on every relevance result "
+            "and related citation retained for evaluation. Make Asta calls sequentially: wait for "
+            "each get_citations or paper-restricted snippet_search response before starting the "
+            "next. A response taking about 30 seconds is normal; do not record an outage solely "
+            "because a call is slow. Record an outage only after a completed tool error or after "
+            "waiting at least 45 seconds for a response. Compare the supported claims with the "
+            "supplied source_node_index "
+            "and propose only specific pathological states or processes that appear missing or "
+            "materially more specific. Return one atomic proposal per claim and cite only the "
+            "canonical underlying papers that directly support it, each with an inspectable "
+            "evidence passage. Do not decide whether a proposal is truly distinct or assign a node "
+            "ID; the following curation agent makes that judgment in the context of all source "
+            "nodes. Do not perform deep node research, candidate research, recursive citation "
+            "traversal, or treatment interpretation. Search results, snippets, and raw MCP "
+            "responses are transient. Zero proposals are valid; if Asta is unavailable, return "
+            "empty documents and landscape_proposals and record the limitation as a gap."
+        ),
+        "collections": ["documents", "landscape_proposals"],
+    },
     "pathology_curation": {
         "role": "disease pathology concept curator",
         "task": (
             "Use only the supplied packet; do not search or perform deep research. Convert the "
-            "supplied source-derived pathology nodes into coherent run-local concepts "
-            "before research; do not minimize concept count. Merge only when one disease-specific "
-            "biological profile and one desired biological state accurately describe every "
-            "member at the same causal level. Keep source-supported claims at different causal "
-            "levels separate even when one causes another; do not bundle them to reduce work. "
+            "supplied Monarch, DisMech, and Asta pathology nodes into coherent run-local concepts "
+            "before research; Asta proposals have no privileged status over source-adapter claims; "
+            "do not minimize concept count. Treat concept type and disposition as separate judgments: "
+            "researchability follows the supplied disease claim, not its provisional label. Keep each "
+            "mechanism concept atomic: one pathological state or process at one causal level. Merge "
+            "only when the same pathological state, biological context, disease-specific profile, and "
+            "desired biological state accurately describe every member. Keep source-supported claims at different causal "
+            "levels separate even when one causes another; distinct abnormal processes or desired "
+            "biological states remain separate. A broad mechanism and a supported molecular "
+            "submechanism remain separate when each implies a distinct desired biological state. "
             "Shared genes, ontology IDs, pathways, anatomy, or "
-            "causal relationships do not establish equivalence; keep bare entities, disease "
+            "causal relationships do not establish equivalence; represent overlap or causality with "
+            "the supplied source edges or later researched assertions, not by merging concepts. Keep bare entities, disease "
             "drivers, mechanisms, and phenotypes separate unless they express the same claim. "
             "Input node_type values are provisional source-adapter categories, not curated "
             "classifications; assign concept_type independently from the supplied claim, "
@@ -192,8 +228,14 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "independently. A valid, unique claim is research only when supplied evidence "
             "establishes distinct causal or modifiable pathology, or a major phenotype defining a "
             "distinct intervention objective. Subordinate symptoms, clinical signs, severity "
-            "descriptors, and measurement endpoints are context_only even when measurable; attach "
-            "them to the relevant research concept. A bare entity or observational readout is also "
+            "descriptors, measurement-only biomarkers, and measurement endpoints are normally context_only even when "
+            "measurable; attach them to the relevant research concept through related_concept_ids. "
+            "This attachment is related research context, not semantic merger. A phenotype receives "
+            "its own research packet only when it is distinct modifiable pathology or a genuinely "
+            "separate intervention objective. A claim described as a biomarker is not forced into "
+            "context_only when the supplied evidence instead establishes that the measured entity or "
+            "process is causal or modifiable pathology; classify that biological claim independently, "
+            "normally as a mechanism. A bare entity or observational readout is also "
             "supporting context unless its abnormal state satisfies this research test. Otherwise "
             "retain relevant supporting claims "
             "context_only and attach them to relevant research concepts; uncertainty never "
@@ -242,7 +284,10 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "once in graph_rationale without repeating the drug mechanism hypothesis. An empty "
             "assertion_ids list is valid when the focal profile alone supports the hypothesis, "
             "but graph_rationale must say so. Include only materially used graph nodes. "
-            "Inspect related graph context when relevant, but cross-node use is never mandatory. "
+            "Before searching, review the focal profile and every immediate source edge, researched "
+            "assertion, and neighbouring node supplied in focal_context. Include only context that "
+            "materially contributes after that bounded review; a focal-only hypothesis remains valid. "
+            "After that review, cross-node use is never mandatory. "
             "Do not pad the "
             "list. Consider both disease-modifying changes to the assigned concept and symptomatic "
             "or compensatory benefit for linked context nodes where mechanistically plausible. "
@@ -274,7 +319,10 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
     "candidate_evidence_review": {
         "role": "pathology-concept candidate evidence reviewer",
         "task": (
-            "Treat the supplied frozen pathology profiles as authoritative disease context. For "
+            "Treat the supplied frozen pathology profiles and candidate-specific selected_graph_evidence "
+            "as authoritative disease context. Its assertions are exactly those selected by assertion_id; "
+            "its source edges are limited to selected-node edges supported by the candidate's cited "
+            "pathology sources. Do not infer graph support from evidence outside that projection. For "
             "every candidate, first retrieve primary or authoritative sources that verify identity, "
             "target and action, pharmacology, relevant exposure, and measurable readouts, then map "
             "those facts to the supplied pathology. Build an evidence dossier rather than a score "
@@ -327,6 +375,12 @@ ROW_SCHEMAS = {
     "documents": {
         "required_fields": ["document_id", "title", "source"],
         "additional_fields": True,
+    },
+    "landscape_proposals": {
+        "required_fields": [
+            "label", "provisional_type", "claim", "index_comparison", "source_ids",
+        ],
+        "additional_fields": False,
     },
     "source_nodes": {
         "required_fields": ["node_id", "label", "node_type", "source_ids"],
@@ -427,18 +481,55 @@ FIELD_RULES = {
         "reason is one concise classification rationale and does not repeat the sentence",
         "do not search, cite sources, create nodes, or introduce new text",
     ],
+    "pathology_landscape_scan": [
+        "use the documented Asta search_papers_by_relevance, get_citations, and snippet_search "
+        "tools for one shallow scan; do not recursively traverse citations, authors, or pathways",
+        "run paper-restricted snippet_search on every relevance result and related citation "
+        "retained for evaluation",
+        "make Asta calls sequentially; wait for each get_citations or paper-restricted "
+        "snippet_search response before starting the next, treat responses of about 30 seconds "
+        "as normal, and record an outage only after a completed tool error or after waiting at "
+        "least 45 seconds for a response",
+        "provisional_type is driver, mechanism, phenotype, biomarker, or context",
+        "each proposal is a specific disease-linked abnormal biological claim that is missing from "
+        "or more specific than the supplied index",
+        "each proposal contains one pathological state or process at one causal level; one paper may "
+        "support multiple separate proposals",
+        "do not return node IDs; Python assigns ASTA-NODE IDs deterministically after validation",
+        "each source_id cites a document returned in this result, and every returned document is "
+        "cited by at least one proposal",
+        "search snippets are transient; each retained canonical paper has an evidence_passages entry "
+        "copied from the underlying paper",
+        "retain only directly supported causal pathology from experimental perturbations; do not "
+        "frame a proposal as a drug, treatment, therapeutic, or candidate response",
+        "do not decide whether a proposal is truly distinct; the curation agent judges every "
+        "projected proposal together with the existing source nodes",
+        "never return raw MCP response payloads, search results, snippets, credentials, headers, "
+        "or authentication data",
+        "if Asta is unavailable, return empty documents and landscape_proposals and record an "
+        "explicit gap",
+    ],
     "pathology_curation": [
-        "partition every supplied non-anchor source node exactly once across concepts",
+        "partition every supplied non-anchor Monarch, DisMech, and Asta node exactly once across concepts",
         "concept_id is one member_node_id; choose an authoritative member ID only after same-level "
         "equivalence is established and the ID denotes the curated concept",
-        "keep source-supported claims at different causal levels separate even when causally linked",
+        "keep each mechanism atomic at one causal level and keep source-supported claims at different "
+        "causal levels separate even when causally linked",
+        "keep distinct abnormal processes and desired biological states separate; retain both a "
+        "broad mechanism and a supported molecular submechanism when each could support a distinct "
+        "desired biological state",
         "shared identifiers, genes, pathways, anatomy, or causal adjacency are not equivalence; "
-        "one biological profile and desired biological state must fit every merged member",
+        "the same pathological state, biological context, profile, and desired biological state must "
+        "fit every merged member; use edges or assertions for relationships rather than merging",
         "same-label gene-level source claims may merge across sources; mutation-, variant-, "
         "repeat-, model-, and mechanism-specific claims remain separate",
         "merge true duplicate records into a retained concept; do not exclude their evidence",
         "concept_type is driver, mechanism, phenotype, or context",
         "disposition is research, context_only, or exclude; every decision has a concise reason",
+        "disposition follows the biological claim rather than its provisional type: subordinate "
+        "phenotypes and measurement-only biomarkers are normally context_only and attach through "
+        "related_concept_ids, while a distinct modifiable phenotype may be research and a biomarker-"
+        "labelled causal process is classified independently, normally as a mechanism",
         "each context_only concept links to at least one research concept through "
         "related_concept_ids; other dispositions use an empty list",
         "aliases and member_node_ids are JSON lists; uncertain equivalence remains separate",
@@ -481,7 +572,8 @@ FIELD_RULES = {
         "assertion_ids lists only graph assertions materially used; it may be empty when the focal "
         "profile is sufficient, and graph_rationale explains the selected graph support once "
         "without repeating mechanism_hypothesis",
-        "inspect related graph context when relevant; cross-node use is optional and must never be "
+        "before searching, review every immediate source edge, researched assertion, and neighbouring "
+        "node in focal_context; after that bounded review cross-node use is optional and must never be "
         "added for coverage",
         "each graph_node_id has at least one attached source in pathology_source_ids; state the "
         "supported relationship because graph proximity or label similarity is not evidence",
@@ -505,6 +597,9 @@ FIELD_RULES = {
     ],
     "candidate_evidence_review": [
         "return exactly one review for every candidate in the supplied batch and no others",
+        "use only the candidate-specific selected_graph_evidence supplied for graph support: assertions "
+        "match selected assertion_ids exactly and source edges are bounded by selected nodes and cited "
+        "pathology sources",
         "each review cites at least one document retained in this result through supporting_findings, "
         "why_not, prior_art findings, or aliases",
         "hypothesis and mechanistic_bridge are concise non-empty text; mechanistic_bridge is an "

@@ -220,32 +220,12 @@ class BibliographicMetadataTest(unittest.TestCase):
         self.assertEqual(second, first)
         fetch.assert_called_once_with("https://example.org/record", accept="application/json")
 
-    def test_identifier_converter_indexes_every_returned_publication_alias(self):
-        response = {
-            "records": [{
-                "pmid": "11",
-                "pmcid": "PMC11",
-                "doi": "10.1000/eleven",
-            }]
-        }
+    def test_large_native_summary_sets_are_split_into_bounded_requests(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
-            bibliography, "_bibliographic_request", return_value=response
-        ):
-            records = bibliography._id_converter_records(
-                Path(directory), ["PMID:11", "PMCID:PMC11", "DOI:10.1000/ELEVEN"]
-            )
-
-        self.assertEqual(
-            set(records),
-            {"PMID:11", "PMCID:PMC11", "DOI:10.1000/eleven"},
-        )
-
-    def test_large_identifier_sets_are_split_into_bounded_requests(self):
-        with tempfile.TemporaryDirectory() as directory, patch.object(
-            bibliography, "_bibliographic_request", return_value={"records": []}
+            bibliography, "_bibliographic_request", return_value={"result": {}}
         ) as request:
-            bibliography._id_converter_records(
-                Path(directory), [f"PMID:{identifier}" for identifier in range(1, 202)]
+            bibliography._ncbi_summaries(
+                Path(directory), "pubmed", (str(identifier) for identifier in range(1, 202))
             )
 
         self.assertEqual(request.call_count, 2)
@@ -257,11 +237,6 @@ class BibliographicMetadataTest(unittest.TestCase):
             {"document_id": "DOI:10.1000/example", "title": "DOI article"},
             {"document_id": "https://example.org/database", "title": "Database"},
         ]
-        converted = {
-            "PMID:11": {"pmid": "11", "pmcid": "PMC11", "doi": "10.1000/eleven"},
-            "PMCID:PMC22": {"pmcid": "PMC22"},
-        }
-
         def summaries(_root, database, identifiers):
             self.assertEqual(set(identifiers), {"11"} if database == "pubmed" else {"22"})
             if database == "pubmed":
@@ -270,7 +245,10 @@ class BibliographicMetadataTest(unittest.TestCase):
                     "pubdate": "2020 Jan",
                     "fulljournalname": "Journal A",
                     "authors": [{"name": "A Author"}],
-                    "articleids": [],
+                    "articleids": [
+                        {"idtype": "pmc", "value": "PMC11"},
+                        {"idtype": "doi", "value": "10.1000/eleven"},
+                    ],
                 }}
             return {"22": {
                 "title": "Twenty two",
@@ -290,14 +268,15 @@ class BibliographicMetadataTest(unittest.TestCase):
         }
         with (
             tempfile.TemporaryDirectory() as directory,
-            patch.object(bibliography, "_id_converter_records", return_value=converted),
             patch.object(bibliography, "_ncbi_summaries", side_effect=summaries),
             patch.object(bibliography, "_doi_metadata", return_value=doi_metadata) as doi,
         ):
             resolved = bibliography._resolve_bibliographic_metadata(Path(directory), documents)
 
         self.assertEqual(set(resolved), {"PMID:11", "PMCID:PMC22", "DOI:10.1000/example"})
-        self.assertEqual(resolved["PMID:11"]["canonical_publication_id"], "PMID:11")
+        self.assertEqual(
+            resolved["PMID:11"]["canonical_publication_id"], "DOI:10.1000/eleven"
+        )
         self.assertEqual(
             resolved["PMID:11"]["identifier_aliases"],
             ["DOI:10.1000/eleven", "PMCID:PMC11", "PMID:11"],
@@ -309,10 +288,50 @@ class BibliographicMetadataTest(unittest.TestCase):
         )
         doi.assert_called_once()
 
+    def test_mixed_doi_and_pmcid_inputs_use_only_native_metadata_routes(self):
+        documents = [
+            {"document_id": "DOI:10.1093/brain/awae038", "title": "Mitochondria"},
+            {"document_id": "DOI:10.1002/glia.24042", "title": "Axon and myelin"},
+            {"document_id": "PMCID:PMC10497986", "title": "Biomarkers"},
+        ]
+
+        def request(_root, kind, url, *, accept="application/json"):
+            self.assertNotIn("idconv", url)
+            if kind == "ncbi-pmc-summary":
+                return {"result": {"10497986": {
+                    "title": "Biomarkers",
+                    "pubdate": "2023 Oct",
+                    "source": "EBioMedicine",
+                    "authors": [],
+                    "articleids": [
+                        {"idtype": "pmc", "value": "PMC10497986"},
+                        {"idtype": "doi", "value": "10.1016/j.ebiom.2023.104781"},
+                    ],
+                }}}
+            title = "Mitochondria" if url.endswith("awae038") else "Axon and myelin"
+            return {
+                "title": title,
+                "issued": {"date-parts": [[2024]]},
+                "container-title": "Journal",
+                "author": [],
+            }
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            bibliography, "_bibliographic_request", side_effect=request
+        ) as fetch:
+            resolved = bibliography._resolve_bibliographic_metadata(
+                Path(directory), documents
+            )
+
+        self.assertEqual(fetch.call_count, 3)
+        self.assertEqual(
+            resolved["PMCID:PMC10497986"]["canonical_publication_id"],
+            "DOI:10.1016/j.ebiom.2023.104781",
+        )
+
     def test_missing_canonical_publication_metadata_stops_validation(self):
         with (
             tempfile.TemporaryDirectory() as directory,
-            patch.object(bibliography, "_id_converter_records", return_value={}),
             patch.object(bibliography, "_ncbi_summaries", return_value={}),
         ):
             with self.assertRaisesRegex(core.ProgramError, "Canonical metadata was not found"):
@@ -491,6 +510,25 @@ class SourceAdjudicationWorkflowTest(unittest.TestCase):
             core.submit(root, submission)
 
             action = core.next_action(root)
+            self.assertEqual(action["next_task"], "pathology_landscape_scan")
+            landscape_result = {
+                "stage": "pathology_landscape_scan",
+                "item_id": None,
+                "packet_id": action["packet_id"],
+                "status": "complete",
+                "records": {
+                    "documents": [],
+                    "landscape_proposals": [],
+                },
+                "gaps": ["Asta was unavailable in this test fixture."],
+            }
+            landscape_submission = root / "landscape.json"
+            landscape_submission.write_text(
+                json.dumps(landscape_result), encoding="utf-8"
+            )
+            core.submit(root, landscape_submission)
+
+            action = core.next_action(root)
             self.assertEqual(action["next_task"], "pathology_curation")
             curation_packet = Path(action["packet_path"]).read_text(encoding="utf-8")
             self.assertNotIn(sentences[0], curation_packet)
@@ -519,6 +557,12 @@ class WorkflowTest(unittest.TestCase):
         )
         self.bibliographic_patch.start()
         core.initialize(self.root, "Disease", mondo="MONDO:1")
+        landscape = core.next_action(self.root)
+        self.assertEqual(landscape["next_task"], "pathology_landscape_scan")
+        self.submit(
+            landscape,
+            {"documents": [], "landscape_proposals": []},
+        )
 
     def tearDown(self):
         self.screening_patch.stop()
@@ -799,6 +843,24 @@ class WorkflowTest(unittest.TestCase):
             [row["document_id"] for row in review_packet["context"]["source_index"]],
             ["PMID:1", "PMID:2"],
         )
+        selected_graph_evidence = {
+            row["candidate_id"]: row
+            for row in review_packet["context"]["selected_graph_evidence"]
+        }
+        self.assertNotIn("graph_node_ids", selected_graph_evidence["UNICHEM:1"])
+        selected_source_edges = selected_graph_evidence["UNICHEM:1"]["source_edges"]
+        self.assertEqual(len(selected_source_edges), 1)
+        self.assertEqual(selected_source_edges[0]["subject_id"], "NODE:1")
+        self.assertEqual(selected_source_edges[0]["relation"], "contributes_to")
+        self.assertEqual(selected_source_edges[0]["object_id"], "MONDO:1")
+        self.assertEqual(
+            [
+                row["assertion_id"]
+                for row in selected_graph_evidence["UNICHEM:1"]["assertions"]
+            ],
+            [selected_assertion_id],
+        )
+        self.assertEqual(selected_graph_evidence["UNICHEM:2"]["assertions"], [])
         seeds = json.loads(
             (self.root / "results" / "candidate_seed_generation.json").read_text()
         )
@@ -1099,6 +1161,8 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("do not create additional discovery routes", seed_guidance)
         self.assertIn("assertion_ids", seed_guidance)
         self.assertIn("graph_rationale", seed_guidance)
+        self.assertIn("every immediate source edge", seed_guidance)
+        self.assertIn("neighbouring node", seed_guidance)
         self.assertIn("cross-node use is never mandatory", seed_guidance)
         self.assertIn("symptomatic or compensatory benefit", seed_guidance)
         self.assertIn("linked context nodes", seed_guidance)

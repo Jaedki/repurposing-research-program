@@ -189,10 +189,16 @@ def _cited_documents(records: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _all_documents(results: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Return the retained downstream corpus, not every accepted discovery document.
+
+    Landscape papers are projected selectively into the frozen graph after curation. Directly
+    unioning the scan result here would reintroduce papers supporting excluded proposals.
+    """
     return _merge_documents(
         (
             row
-            for result in results.values()
+            for stage, result in results.items()
+            if stage != "pathology_landscape_scan"
             if isinstance(result.get("records"), Mapping)
             for row in _cited_documents(result["records"])
         )

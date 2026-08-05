@@ -35,7 +35,12 @@ def _case(root: Path) -> dict[str, Any]:
         "mondo": case.get("mondo"),
         "objective": OBJECTIVE,
     }
-    if case.get("case_id") != _stable_id("CASE", basis):
+    identity_basis = (
+        {**basis, "workflow_revision": case["workflow_revision"]}
+        if "workflow_revision" in case
+        else basis
+    )
+    if case.get("case_id") != _stable_id("CASE", identity_basis):
         raise ProgramError("case.json content no longer matches its case_id")
     return case
 
@@ -140,8 +145,19 @@ def _stop_reason(results: Mapping[str, Mapping[str, Any]]) -> str | None:
         if isinstance(row, dict)
     ):
         return "pathology curation retained no concepts requiring deep research"
+    landscape = results.get("pathology_landscape_scan")
+    if landscape is not None:
+        source_nodes = results.get("pathology_sources", {}).get("records", {}).get(
+            "source_nodes", []
+        )
+        proposals = landscape.get("records", {}).get("landscape_proposals", [])
+        has_source_concept = isinstance(source_nodes, list) and any(
+            isinstance(row, dict) and row.get("node_type") != "disease_anchor"
+            for row in source_nodes
+        )
+        if not has_source_concept and not proposals:
+            return "Monarch, DisMech, and Asta returned no pathology concepts"
     checks = (
-        ("pathology_sources", "source_nodes", "Monarch and DisMech returned no pathology nodes"),
         ("evidence_graph", "profiles", "no source-backed pathology profiles were produced"),
         (
             "candidate_seed_generation",

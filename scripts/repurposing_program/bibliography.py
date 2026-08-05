@@ -107,43 +107,6 @@ def _ncbi_summaries(
     return output
 
 
-def _id_converter_records(root: Path, document_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
-    normalized = sorted({
-        value
-        for document_id in document_ids
-        if (value := _normalized_publication_id(document_id)) is not None
-    })
-    by_alias: dict[str, dict[str, Any]] = {}
-    for batch in _batches(normalized):
-        query = urlencode({
-            "ids": ",".join(value.split(":", 1)[1] for value in batch),
-            "format": "json",
-            "versions": "no",
-            "tool": "repurposing-research-program",
-        })
-        response = _bibliographic_request(
-            root,
-            "ncbi-idconv",
-            f"https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?{query}",
-        )
-        records = response.get("records")
-        if not isinstance(records, list):
-            raise ProgramError("NCBI identifier conversion response has no records list")
-        for record in records:
-            if not isinstance(record, dict) or record.get("status") == "error":
-                continue
-            aliases = []
-            if record.get("pmid"):
-                aliases.append(f"PMID:{record['pmid']}")
-            if record.get("pmcid"):
-                aliases.append(f"PMCID:{str(record['pmcid']).upper()}")
-            if record.get("doi"):
-                aliases.append(f"DOI:{str(record['doi']).lower()}")
-            for alias in aliases:
-                by_alias[alias] = record
-    return by_alias
-
-
 def _summary_metadata(
     row: Mapping[str, Any],
     *,
@@ -226,69 +189,47 @@ def _doi_metadata(root: Path, doi: str) -> dict[str, Any]:
 def _resolve_bibliographic_metadata(
     root: Path, documents: Iterable[Mapping[str, Any]]
 ) -> dict[str, dict[str, Any]]:
-    publication_ids = [
-        str(row["document_id"])
+    identities = {
+        str(row["document_id"]): normalized
         for row in documents
-        if _normalized_publication_id(row.get("document_id")) is not None
-    ]
-    converted = _id_converter_records(root, publication_ids)
-    identities: dict[str, dict[str, str]] = {}
-    for document_id in publication_ids:
-        normalized = _normalized_publication_id(document_id)
-        assert normalized is not None
-        record = converted.get(normalized, {})
-        identity: dict[str, str] = {}
-        if record.get("pmid"):
-            identity["pmid"] = str(record["pmid"])
-        if record.get("pmcid"):
-            identity["pmcid"] = str(record["pmcid"]).upper()
-        if record.get("doi"):
-            identity["doi"] = str(record["doi"]).lower()
-        prefix, value = normalized.split(":", 1)
-        identity.setdefault(prefix.casefold(), value)
-        identities[document_id] = identity
-
+        if (normalized := _normalized_publication_id(row.get("document_id"))) is not None
+    }
     pubmed = _ncbi_summaries(root, "pubmed", (
-        identity["pmid"] for identity in identities.values() if identity.get("pmid")
+        normalized.removeprefix("PMID:")
+        for normalized in identities.values()
+        if normalized.startswith("PMID:")
     ))
     pmc = _ncbi_summaries(root, "pmc", (
-        identity["pmcid"].removeprefix("PMC")
-        for identity in identities.values()
-        if identity.get("pmcid") and not identity.get("pmid") and not identity.get("doi")
+        normalized.removeprefix("PMCID:PMC")
+        for normalized in identities.values()
+        if normalized.startswith("PMCID:PMC")
     ))
 
     resolved: dict[str, dict[str, Any]] = {}
-    for document_id, identity in identities.items():
-        aliases = []
-        if identity.get("pmid"):
-            aliases.append(f"PMID:{identity['pmid']}")
-        if identity.get("pmcid"):
-            aliases.append(f"PMCID:{identity['pmcid']}")
-        if identity.get("doi"):
-            aliases.append(f"DOI:{identity['doi']}")
-        if identity.get("pmid") and identity["pmid"] in pubmed:
+    for document_id, normalized in identities.items():
+        prefix, value = normalized.split(":", 1)
+        if prefix == "PMID" and value in pubmed:
             metadata = _summary_metadata(
-                pubmed[identity["pmid"]], source="PubMed", aliases=aliases
+                pubmed[value], source="PubMed", aliases=[normalized]
             )
-        elif identity.get("doi"):
-            metadata = _doi_metadata(root, identity["doi"])
-            metadata["identifier_aliases"] = sorted({
-                *metadata["identifier_aliases"], *aliases,
-            })
-        elif identity.get("pmcid"):
-            key = identity["pmcid"].removeprefix("PMC")
+        elif prefix == "PMCID":
+            key = value.removeprefix("PMC")
             if key not in pmc:
                 raise ProgramError(f"Canonical metadata was not found for {document_id}")
-            metadata = _summary_metadata(pmc[key], source="PubMed Central", aliases=aliases)
+            metadata = _summary_metadata(
+                pmc[key], source="PubMed Central", aliases=[normalized]
+            )
+        elif prefix == "DOI":
+            metadata = _doi_metadata(root, value)
         else:
             raise ProgramError(f"Canonical metadata was not found for {document_id}")
         if not metadata["title"]:
             raise ProgramError(f"Canonical metadata has no title for {document_id}")
         alias_set = set(map(str, metadata["identifier_aliases"]))
         canonical_id = next(
-            (value for prefix in ("PMID:", "DOI:", "PMCID:")
-             for value in sorted(alias_set) if value.startswith(prefix)),
-            _normalized_publication_id(document_id),
+            (alias for alias_prefix in ("DOI:", "PMID:", "PMCID:")
+             for alias in sorted(alias_set) if alias.startswith(alias_prefix)),
+            normalized,
         )
         resolved[document_id] = {
             **metadata,

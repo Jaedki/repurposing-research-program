@@ -40,7 +40,10 @@ Install the pinned runtime dependencies once with `python -m pip install -r requ
    - deterministic Monarch and DisMech source screening, followed by one compact
      pathology-source sentence adjudication packet when free text is flagged;
    - pathology-only source normalization after Python applies the complete adjudication;
-   - one constrained curation packet that partitions every non-anchor source node into run-local research, context-only, or excluded concepts;
+   - one shallow, global `pathology_landscape_scan` that uses the host-configured Asta MCP tools
+     to identify supported missing or overly broad pathology claims without deep research;
+   - one constrained curation packet that partitions every non-anchor Monarch, DisMech, and
+     projected Asta node into run-local research, context-only, or excluded concepts;
    - one deep pathology-research packet per curated research concept;
    - a frozen, content-addressed living evidence graph;
    - one mechanism-directed candidate-seed packet per researched pathology concept, with a compact frozen-graph index and read-only context lookup;
@@ -59,6 +62,8 @@ Install the pinned runtime dependencies once with `python -m pip install -r requ
    ```
 
 Use `status` at any time. To resume an existing run, call `next` on its run folder. Accepted results are immutable and content-addressed. Lean orchestration is not a limit on research depth: workers should investigate each packet as deeply as the evidence permits.
+The programme is an evolving work in progress rather than a sequence of named or numbered workflow
+versions. Do not invalidate an existing run solely because the controller or packet contract evolved.
 
 ## Hard boundaries
 
@@ -67,6 +72,13 @@ Use `status` at any time. To resume an existing run, call `next` on its run fold
   into pathology context. All subsequent pathology packets must not contain drug, compound,
   treatment, therapeutic, or candidate fields or interpretations.
 - Candidate generation starts only after curation and every required pathology-concept result are accepted and Python freezes the graph snapshot.
+- The Asta landscape scan is a single treatment-blind discovery packet between normalized sources
+  and curation. It searches papers by relevance, inspects related citing papers, and runs
+  paper-restricted snippet searches on every paper retained for evaluation. It follows
+  `https://allenai.org/asta/resources/mcp` and cannot create final concept IDs, perform deep node
+  research, or replace curation.
+- At curation, projected Asta additions join the same `source_nodes` collection and shared disease
+  context as all other pathology claims; source origin is provenance, not a separate evidence tier.
 - Candidate eligibility follows `pathology element -> primary desired biological state -> established drug mode of action`. Secondary desired states and the phenotype objective remain context and do not create additional discovery routes.
 - Monarch associations are pathology-category allowlisted. DisMech treatment-oriented sections
   and fields are excluded unconditionally. Flagged free text is batched once, classified without
@@ -76,10 +88,24 @@ Use `status` at any time. To resume an existing run, call `next` on its run fold
 ## Evidence safeguards
 
 - Preserve source IDs, exact identity, contradictions, negative results, unresolved identity, exclusions, and explicit gaps.
-- Search results and snippets are transient. When using [Asta](https://allenai.org/asta/resources/mcp), search narrowly, inspect snippets, select and verify the underlying paper, cite its canonical ID, and return only that paper; do not propagate search output.
+- Search results, citation results, snippets, and raw MCP responses are transient. In the landscape
+  scan, search by relevance, inspect related citing papers, and run paper-restricted snippet search
+  on each paper retained for evaluation. Return only canonical papers cited by an actual proposal, each with an
+  inspectable evidence passage. An outage yields empty scientific collections and an explicit gap
+  and does not block valid Monarch/DisMech curation.
+- Configure Asta in the MCP host with `ASTA_AI2_API_KEY`. The controller never reads that variable
+  or persists keys, headers, authentication data, or raw MCP exchanges.
 - Pathology research assertions are optional and may use only exact `node_id` values in the packet's `allowed_assertion_nodes`; keep newly researched mechanisms in the profile when they do not connect two allowed nodes.
+- Curation keeps mechanisms atomic at one causal level and judges researchability from the biological
+  claim rather than its provisional label. Measurement-only biomarkers are context; a distinct
+  modifiable phenotype may be research, and a biomarker-labelled causal process is classified by
+  that mechanistic role rather than forced into context.
 - Every graph assertion is keyed by its biological triple and retains cited evidence contexts for evidence type, model, stage, polarity, and summary; Python assigns the stable assertion ID.
 - Candidate graph provenance contains only graph nodes and assertion IDs explicitly selected by the seed worker, with one non-duplicative graph rationale. Focal-profile-only hypotheses may select no assertion.
+- Seed workers review every immediate focal neighbour, source edge, and researched assertion before
+  searching, then retain only materially useful graph context. Candidate reviewers receive the exact
+  selected assertions plus a bounded source-edge projection for the selected nodes and cited
+  pathology sources; the full graph remains available to the audit.
 - Candidate evidence reviews use the frozen graph as disease context, retrieve primary or authoritative drug facts, and build cited dossiers without scoring, ranking, or excluding candidates.
 - The independent audit receives the frozen graph, candidate-identity result, dossiers, and retained source content. It reads and weighs that evidence rather than restating a review and may not search, add evidence, or send a candidate for re-review.
 - Audit source integrity is decided at the exact point of use. Every source cited by a score component, net assessment, indexed alias, indexed reservation, or exclusion receives one concrete `supports`, `partly_supports`, `does_not_support`, or `contradicts` finding based on retained content. A generic integrity status or a direction to re-verify later is invalid; Python checks complete non-overlapping coverage, prevents publication aliases from being counted as independent support in one scope, and summarizes the results.

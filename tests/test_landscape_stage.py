@@ -1,0 +1,780 @@
+import json
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+sys.path.insert(0, str(SCRIPTS))
+import program_core as core  # noqa: E402
+from repurposing_program import (  # noqa: E402
+    bibliography,
+    contracts,
+    graph as graph_rules,
+    orchestration,
+    packets,
+    pathology,
+    run_state,
+    storage,
+)
+
+
+def source_screening_result(*_args):
+    return {
+        "stage": "pathology_source_screening",
+        "status": "complete",
+        "resolved_disease": {"mondo_id": "MONDO:1", "name": "Disease"},
+        "records": {"flagged_sentences": []},
+        "gaps": [],
+        "notes": [],
+    }
+
+
+def source_result(*_args):
+    return {
+        "stage": "pathology_sources",
+        "status": "complete",
+        "resolved_disease": {"mondo_id": "MONDO:1", "name": "Disease"},
+        "records": {
+            "documents": [
+                {"document_id": "SRC:1", "title": "Pathology", "source": "test"}
+            ],
+            "source_nodes": [
+                {
+                    "node_id": "MONDO:1",
+                    "label": "Disease",
+                    "node_type": "disease_anchor",
+                    "source_ids": ["SRC:1"],
+                },
+                {
+                    "node_id": "NODE:1",
+                    "label": "Broad process",
+                    "node_type": "mechanism",
+                    "description": "A broad disease mechanism",
+                    "source_ids": ["SRC:1"],
+                },
+            ],
+            "source_edges": [
+                {
+                    "edge_id": "EDGE:1",
+                    "subject_id": "NODE:1",
+                    "relation": "contributes_to",
+                    "object_id": "MONDO:1",
+                    "evidence_summary": "test",
+                    "source_ids": ["SRC:1"],
+                }
+            ],
+            "source_receipts": [
+                {"source": "test", "version": "1", "query": {}, "record_count": 2}
+            ],
+            "disease_context": [
+                {
+                    "context_id": "CONTEXT:1",
+                    "section": "description",
+                    "value": "Shared disease context",
+                    "source_ids": ["SRC:1"],
+                }
+            ],
+        },
+        "gaps": [],
+        "notes": [],
+    }
+
+
+def bibliographic_metadata(_root, documents):
+    return {
+        row["document_id"]: {
+            "title": row["title"],
+            "year": 2026,
+            "journal": "Test journal",
+            "authors": ["Test Author"],
+            "canonical_publication_id": row["document_id"],
+            "identifier_aliases": [row["document_id"]],
+            "metadata_source": "test",
+        }
+        for row in documents
+        if bibliography._normalized_publication_id(str(row["document_id"])) is not None
+    }
+
+
+def document(document_id, title):
+    return {
+        "document_id": document_id,
+        "title": title,
+        "source": "Asta-selected underlying paper",
+        "evidence_passages": [
+            {"text": f"Inspectable pathology evidence from {title}.", "locator": "abstract"}
+        ],
+    }
+
+
+def proposal(label, claim, source_id, provisional_type="mechanism"):
+    return {
+        "label": label,
+        "provisional_type": provisional_type,
+        "claim": claim,
+        "index_comparison": "Adds a more specific causal level than the initial index.",
+        "source_ids": [source_id],
+    }
+
+
+class LandscapeWorkflowTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.patchers = [
+            patch.object(orchestration, "screen_pathology_sources", source_screening_result),
+            patch.object(orchestration, "fetch_pathology_sources", source_result),
+            patch.object(
+                bibliography, "_resolve_bibliographic_metadata", bibliographic_metadata
+            ),
+            patch.dict(os.environ, {"ASTA_AI2_API_KEY": "TEST-SECRET-MUST-NOT-LEAK"}),
+        ]
+        for patcher in self.patchers:
+            patcher.start()
+        core.initialize(self.root, "Disease", gene="GENE1", mondo="MONDO:1")
+        self.action = core.next_action(self.root)
+
+    def tearDown(self):
+        for patcher in reversed(self.patchers):
+            patcher.stop()
+        self.temp.cleanup()
+
+    def submit(self, records, gaps=None):
+        result_gaps = [] if gaps is None else gaps
+        result = {
+            "stage": "pathology_landscape_scan",
+            "item_id": None,
+            "packet_id": self.action["packet_id"],
+            "status": "complete",
+            "records": records,
+            "gaps": result_gaps,
+        }
+        path = self.root / f"landscape-{len(list(self.root.glob('landscape-*')))}.json"
+        path.write_text(json.dumps(result), encoding="utf-8")
+        return core.submit(self.root, path)
+
+    def accepted_results(self):
+        return run_state._load_results(self.root)
+
+    def test_stage_appears_once_before_curation_and_packet_has_no_secret(self):
+        self.assertEqual(contracts.STAGES.count("pathology_landscape_scan"), 1)
+        self.assertEqual(
+            contracts.STAGES.index("pathology_landscape_scan") + 1,
+            contracts.STAGES.index("pathology_curation"),
+        )
+        self.assertEqual(self.action["next_task"], "pathology_landscape_scan")
+        packet = json.loads(Path(self.action["packet_path"]).read_text(encoding="utf-8"))
+        serialized = json.dumps(packet)
+        self.assertNotIn("TEST-SECRET-MUST-NOT-LEAK", serialized)
+        self.assertEqual(packets._secret_paths(packet), [])
+        self.assertEqual(
+            [row["node_id"] for row in packet["context"]["source_node_index"]],
+            ["NODE:1"],
+        )
+        self.assertEqual(
+            set(packet["result_contract"]["records"]),
+            {"documents", "landscape_proposals"},
+        )
+        self.assertIn("coverage_checklist", packet["context"])
+        self.assertTrue(any("embedded" in rule for rule in packet["rules"]))
+
+    def test_packet_describes_the_simple_asta_discovery_and_curation_flow(self):
+        packet = json.loads(Path(self.action["packet_path"]).read_text(encoding="utf-8"))
+        self.assertIn("search_papers_by_relevance", packet["task"])
+        self.assertIn("get_citations", packet["task"])
+        self.assertIn("snippet_search", packet["task"])
+        self.assertIn(
+            "on every relevance result and related citation retained for evaluation",
+            packet["task"],
+        )
+        self.assertIn("following curation agent makes that judgment", packet["task"])
+        self.assertIn("https://allenai.org/asta/resources/mcp", packet["task"])
+        self.assertFalse(any("asta_operations" in rule for rule in packet["rules"]))
+        self.assertNotIn("asta_operations", packet["result_contract"]["records"])
+
+    def test_valid_proposal_gets_a_normalized_deterministic_node_id(self):
+        records = {
+            "documents": [document("PMID:101", "Specific mechanism")],
+            "landscape_proposals": [
+                proposal(
+                    "  Specific   Process ",
+                    "Abnormal signalling causes cellular dysfunction.",
+                    "PMID:101",
+                )
+            ],
+        }
+        status = self.submit(records)
+        self.assertEqual(status["next_task"], "pathology_curation")
+        first = pathology._landscape_source_nodes(self.accepted_results())[0]
+
+        variant = self.accepted_results()
+        variant["pathology_landscape_scan"] = json.loads(
+            json.dumps(variant["pathology_landscape_scan"])
+        )
+        variant_proposal = variant["pathology_landscape_scan"]["records"][
+            "landscape_proposals"
+        ][0]
+        variant_proposal["label"] = "specific process"
+        variant_proposal["claim"] = "  abnormal SIGNALLING causes cellular dysfunction.  "
+        second = pathology._landscape_source_nodes(variant)[0]
+
+        self.assertRegex(first["node_id"], r"^ASTA-NODE-[A-F0-9]{24}$")
+        self.assertEqual(first["node_id"], second["node_id"])
+
+    def test_duplicate_and_uncited_proposals_are_rejected(self):
+        duplicate = proposal(
+            "Specific Process",
+            "Abnormal signalling causes cellular dysfunction.",
+            "PMID:101",
+        )
+        with self.assertRaisesRegex(core.ProgramError, "duplicate normalized proposals"):
+            self.submit({
+                "documents": [document("PMID:101", "Specific mechanism")],
+                "landscape_proposals": [
+                    duplicate,
+                    {
+                        **duplicate,
+                        "label": " specific   process ",
+                        "claim": "ABNORMAL signalling causes cellular dysfunction.",
+                    },
+                ],
+            })
+
+        with self.assertRaisesRegex(core.ProgramError, "uncited"):
+            self.submit({
+                "documents": [
+                    document("PMID:101", "Specific mechanism"),
+                    document("PMID:102", "Unused paper"),
+                ],
+                "landscape_proposals": [duplicate],
+            })
+
+    def test_unknown_evidence_and_treatment_framing_are_rejected(self):
+        with self.assertRaisesRegex(core.ProgramError, "unknown IDs"):
+            self.submit({
+                "documents": [document("PMID:101", "Specific mechanism")],
+                "landscape_proposals": [
+                    proposal("Specific process", "Disease-linked abnormality.", "PMID:999")
+                ],
+            })
+        with self.assertRaisesRegex(core.ProgramError, "treatment-framed"):
+            self.submit({
+                "documents": [document("PMID:101", "Specific mechanism")],
+                "landscape_proposals": [
+                    proposal(
+                        "Treatment response",
+                        "A drug treatment reverses the measured phenotype.",
+                        "PMID:101",
+                    )
+                ],
+            })
+
+    def test_empty_scan_continues_existing_source_workflow(self):
+        status = self.submit(
+            {"documents": [], "landscape_proposals": []},
+            gaps=["Asta was unavailable; Monarch and DisMech remain available."],
+        )
+        self.assertEqual(status["state"], "needs_agent")
+        self.assertEqual(status["next_task"], "pathology_curation")
+
+    def test_curation_partitions_original_and_asta_nodes_and_can_merge_equivalents(self):
+        self.submit({
+            "documents": [document("PMID:101", "Specific mechanism")],
+            "landscape_proposals": [
+                proposal(
+                    "Broad process",
+                    "A broad disease mechanism.",
+                    "PMID:101",
+                )
+            ],
+        })
+        results = self.accepted_results()
+        asta_id = pathology._landscape_source_nodes(results)[0]["node_id"]
+        curation = core.next_action(self.root)
+        incomplete = {
+            "concepts": [{
+                "concept_id": "NODE:1",
+                "preferred_label": "Broad process",
+                "concept_type": "mechanism",
+                "member_node_ids": ["NODE:1"],
+                "aliases": [],
+                "disposition": "research",
+                "reason": "Distinct modifiable disease mechanism.",
+                "related_concept_ids": [],
+            }]
+        }
+        result = {
+            "stage": "pathology_curation",
+            "item_id": None,
+            "packet_id": curation["packet_id"],
+            "status": "complete",
+            "records": incomplete,
+            "gaps": [],
+        }
+        path = self.root / "curation-incomplete.json"
+        path.write_text(json.dumps(result), encoding="utf-8")
+        with self.assertRaisesRegex(core.ProgramError, "partition every supplied"):
+            core.submit(self.root, path)
+
+        result["records"]["concepts"][0]["member_node_ids"].append(asta_id)
+        path = self.root / "curation-merged.json"
+        path.write_text(json.dumps(result), encoding="utf-8")
+        status = core.submit(self.root, path)
+        self.assertEqual(status["next_task"], "pathology_node_research")
+        self.assertEqual(status["next_item_id"], "NODE:1")
+
+    def test_distinct_mechanisms_remain_distinct_research_items(self):
+        self.submit({
+            "documents": [document("PMID:101", "Specific mechanism")],
+            "landscape_proposals": [
+                proposal(
+                    "Specific downstream process",
+                    "A distinct downstream abnormality causes cellular dysfunction.",
+                    "PMID:101",
+                )
+            ],
+        })
+        results = self.accepted_results()
+        asta_id = pathology._landscape_source_nodes(results)[0]["node_id"]
+        action = core.next_action(self.root)
+        concepts = [
+            {
+                "concept_id": node_id,
+                "preferred_label": label,
+                "concept_type": "mechanism",
+                "member_node_ids": [node_id],
+                "aliases": [],
+                "disposition": "research",
+                "reason": "A distinct abnormal process with its own desired biological state.",
+                "related_concept_ids": [],
+            }
+            for node_id, label in (
+                ("NODE:1", "Broad process"),
+                (asta_id, "Specific downstream process"),
+            )
+        ]
+        self._submit_curation(action, concepts)
+        self.assertEqual(
+            run_state._item_ids("evidence_graph", self.accepted_results()),
+            sorted(["NODE:1", asta_id]),
+        )
+
+    def test_biomarker_context_does_not_create_a_research_item(self):
+        self.submit({
+            "documents": [document("PMID:101", "Biomarker paper")],
+            "landscape_proposals": [
+                proposal(
+                    "Informative biomarker",
+                    "The biomarker is elevated in affected tissue.",
+                    "PMID:101",
+                    provisional_type="biomarker",
+                )
+            ],
+        })
+        results = self.accepted_results()
+        asta_id = pathology._landscape_source_nodes(results)[0]["node_id"]
+        action = core.next_action(self.root)
+        self._submit_curation(action, [
+            {
+                "concept_id": "NODE:1",
+                "preferred_label": "Broad process",
+                "concept_type": "mechanism",
+                "member_node_ids": ["NODE:1"],
+                "aliases": [],
+                "disposition": "research",
+                "reason": "Distinct modifiable mechanism.",
+                "related_concept_ids": [],
+            },
+            {
+                "concept_id": asta_id,
+                "preferred_label": "Informative biomarker",
+                "concept_type": "context",
+                "member_node_ids": [asta_id],
+                "aliases": [],
+                "disposition": "context_only",
+                "reason": "Observational readout contextualizes the mechanism.",
+                "related_concept_ids": ["NODE:1"],
+            },
+        ])
+        self.assertEqual(
+            run_state._item_ids("evidence_graph", self.accepted_results()), ["NODE:1"]
+        )
+
+    def test_researchable_phenotype_and_measurement_biomarker_remain_distinct(self):
+        self.submit({
+            "documents": [
+                document("PMID:101", "Distinct phenotype"),
+                document("PMID:102", "Measurement biomarker"),
+            ],
+            "landscape_proposals": [
+                proposal(
+                    "Distinct functional phenotype",
+                    "A modifiable functional state defines a separate intervention objective.",
+                    "PMID:101",
+                    provisional_type="phenotype",
+                ),
+                proposal(
+                    "Damage marker",
+                    "The measured marker tracks the functional pathology.",
+                    "PMID:102",
+                    provisional_type="biomarker",
+                ),
+            ],
+        })
+        nodes = {
+            row["label"]: row["node_id"]
+            for row in pathology._landscape_source_nodes(self.accepted_results())
+        }
+        phenotype_id = nodes["Distinct functional phenotype"]
+        biomarker_id = nodes["Damage marker"]
+        action = core.next_action(self.root)
+        self._submit_curation(action, [
+            {
+                "concept_id": "NODE:1",
+                "preferred_label": "Broad process",
+                "concept_type": "mechanism",
+                "member_node_ids": ["NODE:1"],
+                "aliases": [],
+                "disposition": "research",
+                "reason": "Distinct modifiable mechanism.",
+                "related_concept_ids": [],
+            },
+            {
+                "concept_id": phenotype_id,
+                "preferred_label": "Distinct functional phenotype",
+                "concept_type": "phenotype",
+                "member_node_ids": [phenotype_id],
+                "aliases": [],
+                "disposition": "research",
+                "reason": "Distinct modifiable pathology and intervention objective.",
+                "related_concept_ids": [],
+            },
+            {
+                "concept_id": biomarker_id,
+                "preferred_label": "Damage marker",
+                "concept_type": "context",
+                "member_node_ids": [biomarker_id],
+                "aliases": [],
+                "disposition": "context_only",
+                "reason": "Measurement-only readout of the functional pathology.",
+                "related_concept_ids": [phenotype_id],
+            },
+        ])
+        results = self.accepted_results()
+        self.assertEqual(
+            run_state._item_ids("evidence_graph", results),
+            sorted(["NODE:1", phenotype_id]),
+        )
+        _, edges = pathology._canonical_source_records(results)
+        self.assertTrue(any(
+            row["subject_id"] == biomarker_id
+            and row["relation"] == "contextualizes"
+            and row["object_id"] == phenotype_id
+            for row in edges
+        ))
+
+    def test_retained_asta_concept_and_source_reach_its_research_packet(self):
+        self.submit({
+            "documents": [document("PMID:101", "Specific mechanism")],
+            "landscape_proposals": [
+                proposal(
+                    "Specific downstream process",
+                    "A distinct downstream abnormality causes cellular dysfunction.",
+                    "PMID:101",
+                )
+            ],
+        })
+        results = self.accepted_results()
+        asta_id = pathology._landscape_source_nodes(results)[0]["node_id"]
+        action = core.next_action(self.root)
+        self._submit_curation(action, [
+            {
+                "concept_id": asta_id,
+                "preferred_label": "Specific downstream process",
+                "concept_type": "mechanism",
+                "member_node_ids": [asta_id],
+                "aliases": [],
+                "disposition": "research",
+                "reason": "Distinct modifiable mechanism.",
+                "related_concept_ids": [],
+            },
+            {
+                "concept_id": "NODE:1",
+                "preferred_label": "Broad process",
+                "concept_type": "context",
+                "member_node_ids": ["NODE:1"],
+                "aliases": [],
+                "disposition": "context_only",
+                "reason": "The broad claim contextualizes the specific mechanism.",
+                "related_concept_ids": [asta_id],
+            },
+        ])
+        research = core.next_action(self.root)
+        packet = json.loads(Path(research["packet_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(research["next_item_id"], asta_id)
+        self.assertEqual(
+            [row["node_id"] for row in packet["context"]["member_source_nodes"]],
+            [asta_id],
+        )
+        self.assertIn(
+            "PMID:101",
+            [row["document_id"] for row in packet["context"]["source_index"]],
+        )
+
+        shallow_only_result = {
+            "stage": "pathology_node_research",
+            "item_id": asta_id,
+            "packet_id": research["packet_id"],
+            "status": "complete",
+            "records": {
+                "documents": [document("PMID:101", "Specific mechanism")],
+                "profiles": [{
+                    "node_id": asta_id,
+                    "node_type": "mechanism",
+                    "summary": "Specific downstream pathology.",
+                    "normal_state": "Regulated signalling.",
+                    "pathological_state": "Abnormal signalling.",
+                    "desired_biological_state": "Decrease abnormal signalling.",
+                    "secondary_desired_states": [],
+                    "phenotype_objective": "Reduce disease-linked cellular dysfunction.",
+                    "established_pathology_observations": [],
+                    "causal_role": "Contributes to dysfunction.",
+                    "mechanisms": [],
+                    "cell_types": [],
+                    "anatomical_context": [],
+                    "temporal_context": [],
+                    "upstream_causes": [],
+                    "downstream_consequences": [],
+                    "contradictions": [],
+                    "gaps": [],
+                    "uncertainty": "Model generalization remains uncertain.",
+                    "source_ids": ["PMID:101"],
+                }],
+                "assertions": [],
+            },
+            "gaps": [],
+        }
+        shallow_path = self.root / "shallow-only-research.json"
+        shallow_path.write_text(json.dumps(shallow_only_result), encoding="utf-8")
+        with self.assertRaisesRegex(core.ProgramError, "newly researched evidence"):
+            core.submit(self.root, shallow_path)
+
+        deep_result = json.loads(json.dumps(shallow_only_result))
+        deep_result["records"]["documents"] = [
+            document("PMID:103", "Deep mechanism research")
+        ]
+        deep_result["records"]["profiles"][0]["source_ids"] = [
+            "PMID:101", "PMID:103"
+        ]
+        deep_path = self.root / "deep-research.json"
+        deep_path.write_text(json.dumps(deep_result), encoding="utf-8")
+        core.submit(self.root, deep_path)
+        seed_action = core.next_action(self.root)
+        self.assertEqual(seed_action["next_task"], "candidate_seed_research")
+        self.assertEqual(seed_action["next_item_id"], asta_id)
+        graph_result = json.loads(
+            (self.root / "results" / "evidence_graph.json").read_text(encoding="utf-8")
+        )
+        graph_document_ids = {
+            row["document_id"] for row in graph_result["records"]["documents"]
+        }
+        self.assertTrue({"PMID:101", "PMID:103"} <= graph_document_ids)
+
+    def test_excluded_asta_document_does_not_enter_frozen_graph(self):
+        self.submit({
+            "documents": [
+                document("PMID:101", "Retained context"),
+                document("PMID:102", "Excluded proposal"),
+            ],
+            "landscape_proposals": [
+                proposal(
+                    "Retained context",
+                    "A defining phenotype accompanies the broad process.",
+                    "PMID:101",
+                    provisional_type="phenotype",
+                ),
+                proposal(
+                    "Irrelevant observation",
+                    "An observation is not relevant to the disease mechanism.",
+                    "PMID:102",
+                    provisional_type="context",
+                ),
+            ],
+        })
+        results = self.accepted_results()
+        nodes = {
+            row["label"]: row["node_id"]
+            for row in pathology._landscape_source_nodes(results)
+        }
+        retained_id = nodes["Retained context"]
+        excluded_id = nodes["Irrelevant observation"]
+        action = core.next_action(self.root)
+        self._submit_curation(action, [
+            {
+                "concept_id": "NODE:1",
+                "preferred_label": "Broad process",
+                "concept_type": "mechanism",
+                "member_node_ids": ["NODE:1"],
+                "aliases": [],
+                "disposition": "research",
+                "reason": "Distinct modifiable mechanism.",
+                "related_concept_ids": [],
+            },
+            {
+                "concept_id": retained_id,
+                "preferred_label": "Retained context",
+                "concept_type": "phenotype",
+                "member_node_ids": [retained_id],
+                "aliases": [],
+                "disposition": "context_only",
+                "reason": "Phenotype contextualizes the broad mechanism.",
+                "related_concept_ids": ["NODE:1"],
+            },
+            {
+                "concept_id": excluded_id,
+                "preferred_label": "Irrelevant observation",
+                "concept_type": "context",
+                "member_node_ids": [excluded_id],
+                "aliases": [],
+                "disposition": "exclude",
+                "reason": "Not relevant to the disease mechanism.",
+                "related_concept_ids": [],
+            },
+        ])
+        results = self.accepted_results()
+        graph = graph_rules._assemble_graph_result(
+            results,
+            [{"node_id": "NODE:1", "source_ids": ["PMID:999"]}],
+            [],
+            [document("PMID:999", "Deep research")],
+            [],
+        )
+        document_ids = {
+            row["document_id"] for row in graph["records"]["documents"]
+        }
+        self.assertIn("PMID:101", document_ids)
+        self.assertNotIn("PMID:102", document_ids)
+
+    def _submit_curation(self, action, concepts):
+        result = {
+            "stage": "pathology_curation",
+            "item_id": None,
+            "packet_id": action["packet_id"],
+            "status": "complete",
+            "records": {"concepts": concepts},
+            "gaps": [],
+        }
+        path = self.root / f"curation-{len(list(self.root.glob('curation-*')))}.json"
+        path.write_text(json.dumps(result), encoding="utf-8")
+        return core.submit(self.root, path)
+
+
+class EvolvingWorkflowTest(unittest.TestCase):
+    def test_legacy_workflow_marker_does_not_invalidate_an_existing_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            case_basis = {
+                "disease": "Disease",
+                "gene": None,
+                "mondo": "MONDO:1",
+                "objective": core.OBJECTIVE,
+                "workflow_revision": "legacy-work-in-progress-marker",
+            }
+            root.mkdir(exist_ok=True)
+            (root / "case.json").write_text(
+                json.dumps({
+                    "case_id": storage._stable_id("CASE", case_basis),
+                    **case_basis,
+                }),
+                encoding="utf-8",
+            )
+            status = core.status(root)
+            self.assertEqual(status["state"], "needs_controller")
+            self.assertEqual(status["next_task"], "pathology_source_screening")
+
+
+class DocumentationContractTest(unittest.TestCase):
+    def test_skill_and_references_describe_one_consistent_landscape_barrier(self):
+        root = Path(__file__).resolve().parents[1]
+        skill = (root / "SKILL.md").read_text(encoding="utf-8")
+        architecture = (root / "references" / "architecture.md").read_text(
+            encoding="utf-8"
+        )
+        packet_contract = (root / "references" / "packet-contract.md").read_text(
+            encoding="utf-8"
+        )
+        adapters = (root / "references" / "source-adapters.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertLess(
+            skill.index("pathology-only source normalization"),
+            skill.index("`pathology_landscape_scan`"),
+        )
+        self.assertLess(
+            skill.index("`pathology_landscape_scan`"),
+            skill.index("one constrained curation packet"),
+        )
+        self.assertLess(
+            architecture.index("`pathology_sources`"),
+            architecture.index("`pathology_landscape_scan`"),
+        )
+        self.assertLess(
+            architecture.index("`pathology_landscape_scan`"),
+            architecture.index("`pathology_curation`"),
+        )
+        self.assertIn("Zero proposals are valid", packet_contract)
+        self.assertIn("Asta is not a Python source adapter", adapters)
+        self.assertIn("ASTA_AI2_API_KEY", skill)
+        self.assertIn("ASTA_AI2_API_KEY", adapters)
+
+
+class SparseSourceWorkflowTest(unittest.TestCase):
+    def test_landscape_scan_can_rescue_an_empty_initial_concept_index(self):
+        sparse = source_result()
+        sparse["records"]["source_nodes"] = sparse["records"]["source_nodes"][:1]
+        sparse["records"]["source_edges"] = []
+        sparse["records"]["source_receipts"][0]["record_count"] = 1
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(orchestration, "screen_pathology_sources", source_screening_result),
+            patch.object(orchestration, "fetch_pathology_sources", return_value=sparse),
+            patch.object(
+                bibliography, "_resolve_bibliographic_metadata", bibliographic_metadata
+            ),
+        ):
+            root = Path(directory)
+            core.initialize(root, "Disease", mondo="MONDO:1")
+            action = core.next_action(root)
+            self.assertEqual(action["next_task"], "pathology_landscape_scan")
+            packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(packet["context"]["source_node_index"], [])
+            result = {
+                "stage": "pathology_landscape_scan",
+                "item_id": None,
+                "packet_id": action["packet_id"],
+                "status": "complete",
+                "records": {
+                    "documents": [document("PMID:101", "Rescue mechanism")],
+                    "landscape_proposals": [
+                        proposal(
+                            "Rescue mechanism",
+                            "A disease-linked molecular defect causes cellular dysfunction.",
+                            "PMID:101",
+                        )
+                    ],
+                },
+                "gaps": [],
+            }
+            path = root / "landscape.json"
+            path.write_text(json.dumps(result), encoding="utf-8")
+            status = core.submit(root, path)
+            self.assertEqual(status["next_task"], "pathology_curation")
+
+
+if __name__ == "__main__":
+    unittest.main()

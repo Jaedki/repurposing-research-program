@@ -32,6 +32,7 @@ from .identity import (
 from .packets import _build_packet
 from .pathology import (
     _validate_curation,
+    _validate_landscape_scan,
     _validate_pathology_item,
     _validate_source_adjudication,
     _validate_source_result,
@@ -365,6 +366,7 @@ def _validate_result(
         "pathology_source_adjudication": lambda: _validate_source_adjudication(
             result["records"], prior
         ),
+        "pathology_landscape_scan": lambda: _validate_landscape_scan(result["records"]),
         "pathology_curation": lambda: _validate_curation(result["records"], prior),
         "pathology_node_research": lambda: _validate_pathology_item(
             result["records"], str(item_id), prior

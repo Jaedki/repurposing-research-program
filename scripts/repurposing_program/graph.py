@@ -159,8 +159,16 @@ def _assemble_graph_result(
         "profiles": _merge_unique(profiles, "node_id", "profiles"),
         "assertions": _merge_assertions(assertions),
     }
+    landscape = results.get("pathology_landscape_scan", {}).get("records")
+    landscape_documents = (
+        _cited_documents(landscape) if isinstance(landscape, Mapping) else []
+    )
     records["documents"] = _select_cited_documents(
-        _merge_documents([*_cited_documents(source), *item_documents]),
+        _merge_documents([
+            *_cited_documents(source),
+            *landscape_documents,
+            *item_documents,
+        ]),
         records,
     )
     return {
