@@ -244,7 +244,8 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "Use only the supplied packet; do not search or perform deep research. Convert the "
             "supplied Monarch, DisMech, and Asta pathology nodes into coherent run-local concepts "
             "before research; Asta proposals have no privileged status over source-adapter claims; "
-            "do not minimize concept count. Treat concept type and disposition as separate judgments: "
+            "do not merge distinct claims merely to reduce concept count, but concept distinctness "
+            "does not create a research job. Treat concept type and disposition as separate judgments: "
             "researchability follows the supplied disease claim, not its provisional label. Keep each "
             "mechanism concept atomic: one pathological state or process at one causal level. Merge "
             "only when the same pathological state, biological context, disease-specific profile, and "
@@ -262,14 +263,22 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "The supplied nodes are disease-specific source claims, so same-label gene-level "
             "claims from different sources may merge when neither specifies a mutation, variant, "
             "repeat, model genotype, or downstream mechanism; keep those more specific claims "
-            "separate from the broader gene association. "
+            "separate from the broader gene association. This identity rule does not determine "
+            "either concept's disposition. "
             "Merge true duplicate records into the retained concept so all evidence survives. "
             "Retain original labels as aliases and assign every non-anchor source node exactly "
             "once. Use supplied disease_context to interpret nodes, but do not create concepts "
             "from administrative metadata alone. After resolving identity, assign disposition "
-            "independently. A valid, unique claim is research only when supplied evidence "
-            "establishes distinct causal or modifiable pathology, or a major phenotype defining a "
-            "distinct intervention objective. Subordinate symptoms, clinical signs, severity "
+            "independently. Researchability may not be deferred to deep research. A distinct "
+            "concept is research only when the supplied packet already establishes a specific "
+            "abnormal biological state or process, a specific well-supported causal lesion that "
+            "defines its own pathology route and non-generic compensatory direction, or a major "
+            "phenotype defining a distinct intervention objective. A bare gene or gene-disease "
+            "association, risk factor, model genotype, broad pathway, terminal outcome, or mutation "
+            "label without supplied functional pathology is normally context_only. Generic gene "
+            "and lesion-specific claims do not both create research routes unless each supplies a "
+            "distinct intervention variable; keep the non-qualifying concept as linked context for "
+            "provenance. Subordinate symptoms, clinical signs, severity "
             "descriptors, measurement-only biomarkers, and measurement endpoints are normally context_only even when "
             "measurable; attach them to the relevant research concept through related_concept_ids. "
             "This attachment is related research context, not semantic merger. A phenotype receives "
@@ -283,7 +292,8 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "context_only and attach them to relevant research concepts; uncertainty never "
             "upgrades a claim to research. Exclude only malformed or "
             "irrelevant records, generic ontology noise, and self-referential disease concepts. "
-            "When uncertain, keep concepts separate. Do not introduce or discuss drugs or treatments."
+            "When uncertain, keep concepts separate for identity but do not upgrade uncertain "
+            "research eligibility. Do not introduce or discuss drugs or treatments."
         ),
         "collections": ["concepts"],
     },
@@ -319,9 +329,10 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
         "role": "mechanism-directed candidate seed researcher",
         "task": (
             "For this frozen researched pathology concept and its linked context, generate a "
-            "focused set of diverse existing-drug seeds whose established mode of action could "
-            "produce its primary desired_biological_state. Secondary desired states and the "
-            "phenotype objective are context only and do not create additional discovery routes. "
+            "focused set of diverse existing-drug seeds. Keep the focal primary "
+            "desired_biological_state as the main candidate anchor. Secondary desired states and "
+            "the phenotype objective are context only and do not create additional discovery "
+            "routes by themselves. "
             "List only graph assertion IDs actually used and explain the selected graph support "
             "once in graph_rationale without repeating the drug mechanism hypothesis. An empty "
             "assertion_ids list is valid when the focal profile alone supports the hypothesis, "
@@ -331,8 +342,9 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "materially contributes after that bounded review; a focal-only hypothesis remains valid. "
             "After that review, cross-node use is never mandatory. "
             "Do not pad the "
-            "list. Consider both disease-modifying changes to the assigned concept and symptomatic "
-            "or compensatory benefit for linked context nodes where mechanistically plausible. "
+            "list. A supplied linked graph node may support a symptomatic or compensatory candidate "
+            "only when its relationship to the focal concept and candidate hypothesis is "
+            "mechanistically justified. "
             "Retain a less-plausible seed only when it offers a discriminating, mechanism-relevant "
             "readout, and state what that readout would resolve. "
             "Use the compact graph index to identify context and retrieve only concepts materially "
@@ -625,10 +637,16 @@ FIELD_RULES = {
         "the same pathological state, biological context, profile, and desired biological state must "
         "fit every merged member; use edges or assertions for relationships rather than merging",
         "same-label gene-level source claims may merge across sources; mutation-, variant-, "
-        "repeat-, model-, and mechanism-specific claims remain separate",
+        "repeat-, model-, and mechanism-specific claims remain separate, but this identity rule "
+        "does not determine disposition",
         "merge true duplicate records into a retained concept; do not exclude their evidence",
         "concept_type is driver, mechanism, phenotype, or context",
         "disposition is research, context_only, or exclude; every decision has a concise reason",
+        "concept distinctness does not create a research job, and researchability may not be "
+        "deferred to deep research; a bare gene or gene-disease association, risk factor, model "
+        "genotype, broad pathway, terminal outcome, or mutation label without supplied functional "
+        "pathology is normally context_only; generic gene and lesion-specific claims do not both "
+        "create research routes unless each supplies a distinct intervention variable",
         "disposition follows the biological claim rather than its provisional type: subordinate "
         "phenotypes and measurement-only biomarkers are normally context_only and attach through "
         "related_concept_ids, while a distinct modifiable phenotype may be research and a biomarker-"
@@ -658,8 +676,10 @@ FIELD_RULES = {
         "one context-specific summary; no treatment content",
     ],
     "candidate_seed_research": [
-        "candidate discovery is anchored to desired_biological_state; secondary desired states "
-        "and phenotype_objective are context only and do not create discovery routes",
+        "candidate discovery keeps the focal primary desired_biological_state as its main anchor; "
+        "secondary desired states and phenotype_objective do not create discovery routes by "
+        "themselves, while a supplied linked graph node may support a symptomatic or compensatory "
+        "candidate when its relationship to the focal concept and hypothesis is mechanistically justified",
         "include every authoritative candidate identifier found because Python submits all "
         "supported identifiers to UniChem; identity resolution belongs to Python and the later "
         "identity-review stage",
@@ -734,6 +754,8 @@ FIELD_RULES = {
         "mechanistic_bridge_plausibility, and translational_feasibility",
         "each component has exactly value, reason, and source_ids; value is 5, 10, 15, or 20; "
         "Python sums the four values without weighting",
+        "each component has at least one supports or partly_supports source-integrity check; "
+        "a 20-point component has no does_not_support or contradicts checks",
         "counterevidence never earns positive scoring credit; lower every component whose premise "
         "it directly challenges and otherwise retain it only in why_not and net_assessment",
         "net_assessment has exactly text and source_ids and explicitly weighs decisive support "

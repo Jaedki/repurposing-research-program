@@ -170,7 +170,7 @@ def _canonical_source_records(
                 and str(value).strip().casefold()
                 != str(concept["preferred_label"]).strip().casefold()
             },
-            key=str.casefold,
+            key=lambda value: (value.casefold(), value),
         )
         nodes.append(
             {

@@ -60,24 +60,6 @@ def _write_json(path: Path, value: Any) -> None:
     _write_once(path, _canonical_bytes(value))
 
 
-def _replace_packet(path: Path, value: Any) -> None:
-    """Atomically replace a pending worker packet without weakening result immutability."""
-    payload = _canonical_bytes(value)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() and path.read_bytes() == payload:
-        return
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    try:
-        with temporary.open("xb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-
-
 def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     payload = b"".join(_canonical_bytes(row) for row in rows)
     _write_once(path, payload)

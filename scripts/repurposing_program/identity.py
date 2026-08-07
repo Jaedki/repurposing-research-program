@@ -251,6 +251,19 @@ def _identity_candidate_options(records: Mapping[str, Any]) -> list[dict[str, An
     return options
 
 
+def _merge_identifiers(*identifier_sets: Mapping[str, Any]) -> dict[str, Any]:
+    merged: dict[str, set[str]] = {}
+    for identifiers in identifier_sets:
+        for key, raw_value in identifiers.items():
+            values = raw_value if isinstance(raw_value, list) else [raw_value]
+            merged.setdefault(str(key), set()).update(map(str, values))
+    return {
+        key: values[0] if len(values) == 1 else values
+        for key in sorted(merged)
+        if (values := sorted(merged[key]))
+    }
+
+
 def _merge_candidate_rows(
     rows: list[dict[str, Any]], candidate_id: str, identity: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -258,6 +271,12 @@ def _merge_candidate_rows(
         {str(row["seed_id"]): row for row in rows}.values(),
         key=lambda row: str(row["seed_id"]),
     )
+    identity = {
+        **identity,
+        "identifiers": _merge_identifiers(
+            *(row["identifiers"] for row in rows), identity["identifiers"]
+        ),
+    }
     return {
         "candidate_id": candidate_id,
         "name": str(identity["preferred_name"]),
@@ -315,14 +334,13 @@ def _canonical_candidates(
         if target:
             exact = exact_groups[str(target)]
             rows.extend(seeds[seed_id] for seed_id in exact)
-            preferred_name = min(
-                (str(row["name"]) for row in rows),
-                key=lambda value: (value.casefold(), value),
-            )
             identity = {
                 "status": "resolved",
-                "preferred_name": preferred_name,
-                "identifiers": {"unichem_uci": str(target).split(":", 1)[1]},
+                "preferred_name": group["preferred_name"],
+                "identifiers": _merge_identifiers(
+                    group["identifiers"],
+                    {"unichem_uci": str(target).split(":", 1)[1]},
+                ),
                 "source_ids": sorted(set(map(str, group["source_ids"]))),
             }
             candidate_id = str(target)

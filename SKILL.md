@@ -85,7 +85,7 @@ should investigate each packet as deeply as the evidence permits.
   not suppress snippet evaluation of the original relevance paper.
 - At curation, projected Asta additions join the same `source_nodes` collection and shared disease
   context as all other pathology claims; source origin is provenance, not a separate evidence tier.
-- Candidate eligibility follows `pathology element -> primary desired biological state -> established drug mode of action`. Secondary desired states and the phenotype objective remain context and do not create additional discovery routes.
+- Candidate generation keeps `pathology element -> focal primary desired biological state -> established drug mode of action` as its main anchor. Secondary desired states and the phenotype objective remain context and do not create additional discovery routes by themselves. A supplied linked graph node may support a symptomatic or compensatory candidate only when its relationship to the focal concept and candidate hypothesis is mechanistically justified.
 - Monarch associations are pathology-category allowlisted. DisMech treatment-oriented sections
   and fields are excluded unconditionally. Flagged free text is batched once, classified without
   search or rewriting, and retained only when the complete sentence is adjudicated pathology-only.
@@ -104,10 +104,14 @@ should investigate each packet as deeply as the evidence permits.
 - Configure Asta in the MCP host with `ASTA_AI2_API_KEY`. The controller never reads that variable
   or persists keys, headers, authentication data, or raw MCP exchanges.
 - Pathology research assertions are optional and may use only exact `node_id` values in the packet's `allowed_assertion_nodes`; keep newly researched mechanisms in the profile when they do not connect two allowed nodes.
-- Curation keeps mechanisms atomic at one causal level and judges researchability from the biological
-  claim rather than its provisional label. Measurement-only biomarkers are context; a distinct
-  modifiable phenotype may be research, and a biomarker-labelled causal process is classified by
-  that mechanistic role rather than forced into context.
+- Curation keeps mechanisms atomic at one causal level and separates concept identity from research
+  eligibility: concept distinctness does not create a research job, and researchability may not be
+  deferred to deep research. A bare gene or gene-disease association, risk factor, model genotype,
+  broad pathway, terminal outcome, or mutation label without supplied functional pathology is
+  normally context-only. Generic gene and lesion-specific claims do not both create research routes
+  unless each supplies a distinct intervention variable. Measurement-only biomarkers are context;
+  a distinct modifiable phenotype may be research, and a biomarker-labelled causal process is
+  classified by that mechanistic role rather than forced into context.
 - Every graph assertion is keyed by its biological triple and retains cited evidence contexts for evidence type, model, stage, polarity, and summary; Python assigns the stable assertion ID.
 - Candidate graph provenance contains only graph nodes and assertion IDs explicitly selected by the seed worker, with one non-duplicative graph rationale. Focal-profile-only hypotheses may select no assertion.
 - Seed workers review every immediate focal neighbour, source edge, and researched assertion before

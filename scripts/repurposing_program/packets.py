@@ -38,7 +38,7 @@ from .pathology import (
     _compact_disease_context,
     _research_concepts,
 )
-from .storage import _packet_path, _replace_packet, _result_path, _sha256, _stable_id
+from .storage import _packet_path, _result_path, _sha256, _stable_id, _write_json
 from .validation import _secret_paths
 
 
@@ -186,7 +186,9 @@ def _packet_context(
             "allowed_assertion_nodes": allowed_assertion_nodes,
             "disease_context": disease_context,
             "source_index": _source_index(
-                documents,
+                _canonicalize_documents(
+                    run_root, documents, verify_titles=False
+                ),
                 _cited_ids(
                     [node, *member_nodes, *related_nodes, *edges, *disease_context]
                 ),
@@ -296,7 +298,10 @@ def _packet_context(
             "pathology_concepts": concepts,
             "pathology_profiles": profiles,
             "selected_graph_evidence": selected_graph_evidence,
-            "source_index": _source_index(documents, review_source_ids),
+            "source_index": _source_index(
+                _canonicalize_documents(run_root, documents, verify_titles=False),
+                review_source_ids,
+            ),
         }
     documents = _canonicalize_documents(
         run_root, _all_documents(results), verify_titles=False
@@ -444,5 +449,5 @@ def _build_packet(
     }
     _validate_packet(unsigned, task, item_id)
     packet = {**unsigned, "packet_id": _stable_id("PACKET", unsigned)}
-    _replace_packet(_packet_path(run_root, task, item_id), packet)
+    _write_json(_packet_path(run_root, task, item_id), packet)
     return packet

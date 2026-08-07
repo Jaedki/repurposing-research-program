@@ -141,17 +141,8 @@ def _validate_candidate_audit(
     corpus = source_index if source_index is not None else _all_documents(results)
     documents = {str(row["document_id"]): row for row in corpus}
     source_ids = set(documents)
-    reviews = {
-        str(row["candidate_id"]): row
-        for row in _rows(results["candidate_review"]["records"], "reviews")
-    }
     for index, row in enumerate(assessments):
         label = f"assessments[{index}]"
-        prior_status = reviews[str(row["candidate_id"])]["prior_art"]["status"]
-        if prior_status in {"human_intervention", "established_use"}:
-            raise ProgramError(
-                f"{label} cannot assess a candidate with disqualifying prior-art status {prior_status}"
-            )
         components = _validate_exact_object(
             row["component_scores"], set(SCORE_COMPONENTS), f"{label}.component_scores"
         )
@@ -195,11 +186,25 @@ def _validate_candidate_audit(
             documents=documents,
             label=f"{label}.source_integrity",
         )
+        for component in SCORE_COMPONENTS:
+            verdicts = {
+                str(check["verdict"])
+                for check in row["source_integrity"]["checks"]
+                if str(check["scope"]) == component
+            }
+            if not verdicts & {"supports", "partly_supports"}:
+                raise ProgramError(
+                    f"{label}.component_scores.{component} must have at least one "
+                    "supports or partly_supports source-integrity check"
+                )
+            if components[component]["value"] == 20 and verdicts & {
+                "does_not_support", "contradicts"
+            }:
+                raise ProgramError(
+                    f"{label}.component_scores.{component} is a 20-point component and "
+                    "cannot contain does_not_support or contradicts checks"
+                )
 
-    expected_prior_reasons = {
-        "established_use": "exact_disease_use",
-        "human_intervention": "human_intervention",
-    }
     for index, row in enumerate(exclusions):
         label = f"excluded_candidates[{index}]"
         if row["reason_code"] not in AUDIT_EXCLUSION_REASONS:
@@ -215,9 +220,3 @@ def _validate_candidate_audit(
             documents=documents,
             label=f"{label}.source_integrity",
         )
-        prior_status = reviews[str(row["candidate_id"])]["prior_art"]["status"]
-        expected_reason = expected_prior_reasons.get(prior_status)
-        if expected_reason and row["reason_code"] != expected_reason:
-            raise ProgramError(
-                f"{label}.reason_code must be {expected_reason} for prior-art status {prior_status}"
-            )

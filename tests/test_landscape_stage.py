@@ -433,36 +433,20 @@ class LandscapeWorkflowTest(unittest.TestCase):
                 ],
             })
 
-    def test_unaccepted_landscape_packet_regenerates_without_touching_results(self):
+    def test_unaccepted_landscape_packet_is_reused_by_next_and_submit(self):
         packet_path = Path(self.action["packet_path"])
-        stale = json.loads(packet_path.read_text(encoding="utf-8"))
-        stale["result_contract"]["records"]["documents"] = {
-            "type": "list of objects",
-            **contracts.ROW_SCHEMAS["documents"],
-        }
-        stale_unsigned = {
-            key: value for key, value in stale.items() if key != "packet_id"
-        }
-        stale["packet_id"] = storage._stable_id("PACKET", stale_unsigned)
-        packet_path.write_text(json.dumps(stale), encoding="utf-8")
-        accepted_before = {
-            path.relative_to(self.root): path.read_bytes()
-            for path in (self.root / "results").rglob("*.json")
-        }
+        issued = packet_path.read_bytes()
 
-        regenerated_action = core.next_action(self.root)
-        regenerated = json.loads(packet_path.read_text(encoding="utf-8"))
-        accepted_after = {
-            path.relative_to(self.root): path.read_bytes()
-            for path in (self.root / "results").rglob("*.json")
-        }
+        with patch.object(
+            orchestration,
+            "_build_packet",
+            side_effect=AssertionError("an issued packet must not be rebuilt"),
+        ):
+            resumed_action = core.next_action(self.root)
+            self.assertEqual(resumed_action["packet_id"], self.action["packet_id"])
+            self.submit({"documents": [], "landscape_proposals": []})
 
-        self.assertNotEqual(regenerated_action["packet_id"], stale["packet_id"])
-        self.assertEqual(
-            regenerated["result_contract"]["records"]["documents"],
-            {"type": "list of objects", **contracts.RESEARCH_DOCUMENT_CONTRACT},
-        )
-        self.assertEqual(accepted_after, accepted_before)
+        self.assertEqual(packet_path.read_bytes(), issued)
 
     def test_duplicate_and_uncited_proposals_are_rejected(self):
         duplicate = proposal(

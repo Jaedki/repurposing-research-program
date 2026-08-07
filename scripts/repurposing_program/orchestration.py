@@ -73,8 +73,12 @@ def next_action(root: str | Path) -> dict[str, Any]:
         return current
     task = str(current["next_task"])
     item_id = current.get("next_item_id")
-    packet = _build_packet(run_root, case, results, task, item_id)
     packet_path = _packet_path(run_root, task, item_id)
+    packet = (
+        _read_json(packet_path)
+        if packet_path.exists()
+        else _build_packet(run_root, case, results, task, item_id)
+    )
     result_path = _submission_path(run_root, task, item_id)
     display_item_id = (
         f"{task}/{item_id}/{_item_token(str(item_id))}"
@@ -403,7 +407,7 @@ def submit(root: str | Path, result_path: str | Path) -> dict[str, Any]:
         )
     task = str(current["next_task"])
     item_id = current.get("next_item_id")
-    packet = _build_packet(run_root, case, prior, task, item_id)
+    packet = _read_json(_packet_path(run_root, task, item_id))
     result = _read_json(Path(result_path).expanduser().resolve())
     _validate_result(task, item_id, result, packet, prior)
     if "documents" in STAGE_GUIDANCE[task]["collections"]:

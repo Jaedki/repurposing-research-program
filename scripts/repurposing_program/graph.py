@@ -94,7 +94,10 @@ def _graph_support_ids(records: Mapping[str, Any]) -> dict[str, set[str]]:
             if node_id in support:
                 support[node_id].update(source_ids)
     for row in _rows(records, "assertions"):
-        source_ids = _cited_ids(row)
+        source_ids = _cited_ids([
+            context for context in _rows(row, "evidence_context")
+            if context.get("polarity") == "supports"
+        ])
         for node_id in map(str, (row["subject_id"], row["object_id"])):
             if node_id in support:
                 support[node_id].update(source_ids)

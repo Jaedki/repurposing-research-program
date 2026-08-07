@@ -25,6 +25,27 @@ def _normalized_title(value: Any) -> str:
     return " ".join(re.findall(r"[\w]+", text, flags=re.UNICODE))
 
 
+def _normalized_document_title(document_id: str, value: Any) -> str:
+    """Normalize a title while ignoring a redundant database-record locator."""
+    title = _normalized_title(value)
+    if re.fullmatch(
+        r"(?:PMID:\d+|PMCID:PMC\d+|DOI:10\.\d{4,9}/\S+)",
+        document_id,
+        flags=re.IGNORECASE,
+    ):
+        # Submission-time bibliographic verification uses this compact form so
+        # formatting variants such as ``5-HT2`` and ``5-HT(2)`` can both match
+        # the same authoritative title.  Aggregation must apply the identical
+        # equivalence rule to already-verified immutable results.
+        return title.replace(" ", "")
+    match = re.fullmatch(r"PUBCHEM:(\d+)", document_id, flags=re.IGNORECASE)
+    if match:
+        suffix = f" pubchem cid {match.group(1)}"
+        if title.endswith(suffix):
+            title = title[: -len(suffix)].strip()
+    return title
+
+
 def _year(value: Any) -> int | None:
     match = re.search(r"\b(1[6-9]\d{2}|20\d{2}|21\d{2})\b", str(value))
     return int(match.group(1)) if match else None
@@ -170,7 +191,9 @@ def _merge_documents(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
                 continue
             conflict = field in identity_fields and field in current and current[field] != value
             if field == "title" and conflict:
-                conflict = _normalized_title(current[field]) != _normalized_title(value)
+                conflict = _normalized_document_title(
+                    document_id, current[field]
+                ) != _normalized_document_title(document_id, value)
             if field == "year" and conflict:
                 conflict = _year(current[field]) != _year(value)
             if conflict:

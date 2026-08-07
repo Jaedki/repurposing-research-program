@@ -254,7 +254,9 @@ def _canonicalize_documents(
         if canonical is None:
             output.append(row)
             continue
-        if _normalized_title(row.get("title")) != _normalized_title(canonical["title"]):
+        submitted_title = _normalized_title(row.get("title")).replace(" ", "")
+        canonical_title = _normalized_title(canonical["title"]).replace(" ", "")
+        if submitted_title != canonical_title:
             if verify_titles:
                 raise ProgramError(
                     f"Document metadata mismatch for {document_id}: submitted title "
