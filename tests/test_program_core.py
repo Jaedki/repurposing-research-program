@@ -2663,6 +2663,28 @@ class WorkflowTest(unittest.TestCase):
         )
         self.assertEqual(ranking._final_score(assessment), baseline_score)
 
+        redundant = json.loads(json.dumps(assessment))
+        redundant["net_assessment"] = {
+            "text": assessment["why_not"][0]["finding"],
+            "source_ids": ["PMID:1"],
+        }
+        redundant["source_integrity"] = self.source_integrity(redundant)
+        with self.assertRaisesRegex(core.ProgramError, "must not repeat"):
+            audit._validate_candidate_audit(
+                {"assessments": [redundant], "excluded_candidates": []}, results
+            )
+
+        redundant = json.loads(json.dumps(assessment))
+        redundant["net_assessment"] = {
+            "text": assessment["component_scores"]["drug_action_confidence"]["reason"],
+            "source_ids": ["PMID:1"],
+        }
+        redundant["source_integrity"] = self.source_integrity(redundant)
+        with self.assertRaisesRegex(core.ProgramError, "must not repeat"):
+            audit._validate_candidate_audit(
+                {"assessments": [redundant], "excluded_candidates": []}, results
+            )
+
         invalid = json.loads(json.dumps(assessment))
         invalid["component_scores"]["evidence_robustness"] = {
             "value": 20,

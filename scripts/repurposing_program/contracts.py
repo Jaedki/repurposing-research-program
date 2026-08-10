@@ -442,10 +442,11 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "contradicts the exact place it is used. Do not defer this judgment or request re-verification. "
             "Counterevidence earns no points: lower any component whose premise "
             "it directly challenges; if it does not challenge a scored premise, retain it only as an "
-            "unscored why-not finding and in the net assessment. Assign one cited 5, 10, 15, or 20 score "
+            "unscored why-not finding. Assign one cited 5, 10, 15, or 20 score "
             "for each of drug-action confidence, disease-mechanism relevance, mechanistic-bridge "
-            "plausibility, and translational feasibility; and give a cited net assessment that weighs "
-            "the strongest support against the strongest reservation. Python computes the raw total "
+            "plausibility, and translational feasibility; and give a concise cited net assessment of why "
+            "the candidate remains worth ranking without repeating component reasons or why-not findings. "
+            "Python computes the raw total "
             "and ranking. Return only audited aliases and why-not findings that may enter final output."
         ),
         "collections": ["assessments", "excluded_candidates"],
@@ -828,9 +829,9 @@ FIELD_RULES = {
         "each component has at least one supports or partly_supports source-integrity check; "
         "a 20-point component has no does_not_support or contradicts checks",
         "counterevidence never earns positive scoring credit; lower every component whose premise "
-        "it directly challenges and otherwise retain it only in why_not and net_assessment",
-        "net_assessment has exactly text and source_ids and explicitly weighs decisive support "
-        "against the strongest reservation",
+        "it directly challenges and otherwise retain it only in why_not",
+        "net_assessment has exactly text and source_ids and concisely states why the candidate "
+        "remains worth ranking without repeating component reasons or why_not findings",
         "audited aliases and why_not use cited name or finding objects and are the only review-like "
         "fields that may enter final cards",
         "excluded_candidates use a source-backed reason_code from the bounded exclusion policy and "

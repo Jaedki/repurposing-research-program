@@ -191,6 +191,21 @@ def _validate_candidate_audit(
             text_field="finding",
             source_ids=source_ids,
         )
+        normalized_net = " ".join(str(net["text"]).split()).casefold()
+        card_details = [
+            (f"{label}.component_scores.{component}.reason", components[component]["reason"])
+            for component in SCORE_COMPONENTS
+        ] + [
+            (f"{label}.why_not[{why_not_index}].finding", finding["finding"])
+            for why_not_index, finding in enumerate(row["why_not"])
+        ]
+        for detail_label, detail in card_details:
+            normalized_detail = " ".join(str(detail).split()).casefold()
+            if normalized_detail in normalized_net or normalized_net in normalized_detail:
+                raise ProgramError(
+                    f"{label}.net_assessment.text must not repeat "
+                    f"{detail_label}"
+                )
         _validate_source_integrity(
             row["source_integrity"],
             expected_uses=_assessment_source_uses(row),
