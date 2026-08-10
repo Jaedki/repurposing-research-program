@@ -18,6 +18,7 @@ from .contracts import (
     ASTA_NO_RESPONSE_SECONDS,
     ASTA_OPERATION_ID_PATTERN,
     ASTA_PAPER_ID_PATTERN,
+    CURATION_ATOMICITY_FIELDS,
     LANDSCAPE_PROPOSAL_TYPES,
     PATHOLOGY_PROFILE_LIST_FIELDS,
     _PATHOLOGY_FORBIDDEN_KEYS,
@@ -60,30 +61,59 @@ def _normalized_landscape_text(value: Any) -> str:
     return " ".join(unicodedata.normalize("NFKC", str(value)).split()).casefold()
 
 
-def _landscape_source_nodes(
+def _proposal_source_nodes(
     results: Mapping[str, Mapping[str, Any]],
+    *,
+    stage: str,
+    collection: str,
+    prefix: str,
+    adapter: str,
 ) -> list[dict[str, Any]]:
-    result = results.get("pathology_landscape_scan")
+    result = results.get(stage)
     if not isinstance(result, Mapping) or not isinstance(result.get("records"), Mapping):
         return []
     nodes = []
-    for proposal in _rows(result["records"], "landscape_proposals"):
+    for proposal in _rows(result["records"], collection):
         basis = {
             "provisional_type": _normalized_landscape_text(proposal["provisional_type"]),
             "label": _normalized_landscape_text(proposal["label"]),
             "claim": _normalized_landscape_text(proposal["claim"]),
         }
         nodes.append({
-            "node_id": _stable_id("ASTA-NODE", basis),
+            "node_id": _stable_id(prefix, basis),
             "label": str(proposal["label"]).strip(),
             "node_type": str(proposal["provisional_type"]),
             "description": str(proposal["claim"]).strip(),
             "index_comparison": str(proposal["index_comparison"]).strip(),
             "source_ids": sorted(set(map(str, proposal["source_ids"]))),
-            "source_adapter": "Asta",
-            "source_section": "pathology_landscape_scan",
+            "source_adapter": adapter,
+            "source_section": stage,
         })
     return sorted(nodes, key=lambda row: str(row["node_id"]))
+
+
+def _landscape_source_nodes(
+    results: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    return _proposal_source_nodes(
+        results,
+        stage="pathology_landscape_scan",
+        collection="landscape_proposals",
+        prefix="ASTA-NODE",
+        adapter="Asta",
+    )
+
+
+def _coverage_source_nodes(
+    results: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    return _proposal_source_nodes(
+        results,
+        stage="pathology_coverage_expansion",
+        collection="coverage_proposals",
+        prefix="UNDERMIND-NODE",
+        adapter="Undermind",
+    )
 
 
 def _combined_source_records(
@@ -91,7 +121,11 @@ def _combined_source_records(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     source = results["pathology_sources"]["records"]
     return (
-        [*_rows(source, "source_nodes"), *_landscape_source_nodes(results)],
+        [
+            *_rows(source, "source_nodes"),
+            *_landscape_source_nodes(results),
+            *_coverage_source_nodes(results),
+        ],
         _rows(source, "source_edges"),
     )
 
@@ -181,6 +215,7 @@ def _canonical_source_records(
                 "aliases": aliases,
                 "member_node_ids": members,
                 "disposition": str(concept["disposition"]),
+                "atomicity": concept["atomicity"],
             }
         )
 
@@ -548,20 +583,16 @@ def _validate_asta_call_receipts(
         raise ProgramError("Terminal Asta call failures require an explicit gap")
 
 
-def _validate_landscape_scan(records: Mapping[str, Any], gaps: list[Any]) -> None:
+def _validate_pathology_proposals(
+    records: Mapping[str, Any], collection: str, stage_label: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     documents = _validate_documents(records, canonical_ids=True)
-    proposals = _contract_rows(records, "landscape_proposals")
-    _validate_asta_call_receipts(
-        records,
-        gaps,
-        has_documents=bool(documents),
-        has_proposals=bool(proposals),
-    )
+    proposals = _contract_rows(records, collection)
     document_ids = {str(row["document_id"]) for row in documents}
     cited_ids: set[str] = set()
     normalized_proposals: set[tuple[str, str, str]] = set()
     for index, proposal in enumerate(proposals):
-        label = f"landscape_proposals[{index}]"
+        label = f"{collection}[{index}]"
         _required(
             proposal,
             ("label", "provisional_type", "claim", "index_comparison"),
@@ -581,7 +612,7 @@ def _validate_landscape_scan(records: Mapping[str, Any], gaps: list[Any]) -> Non
         )
         if normalized in normalized_proposals:
             raise ProgramError(
-                "landscape_proposals must not contain duplicate normalized proposals"
+                f"{collection} must not contain duplicate normalized proposals"
             )
         normalized_proposals.add(normalized)
         proposal_sources = _references(proposal, "source_ids", document_ids, label)
@@ -597,14 +628,33 @@ def _validate_landscape_scan(records: Mapping[str, Any], gaps: list[Any]) -> Non
             )
     if cited_ids != document_ids:
         raise ProgramError(
-            "Landscape documents must be cited by an actual proposal; "
+            f"{stage_label} documents must be cited by an actual proposal; "
             f"uncited={sorted(document_ids - cited_ids)}"
         )
     forbidden = _forbidden_pathology_paths(records)
     if forbidden:
         raise ProgramError(
-            f"Treatment fields are forbidden in the pathology landscape scan: {forbidden}"
+            f"Treatment fields are forbidden in {stage_label}: {forbidden}"
         )
+    return documents, proposals
+
+
+def _validate_landscape_scan(records: Mapping[str, Any], gaps: list[Any]) -> None:
+    documents, proposals = _validate_pathology_proposals(
+        records, "landscape_proposals", "the pathology landscape scan"
+    )
+    _validate_asta_call_receipts(
+        records,
+        gaps,
+        has_documents=bool(documents),
+        has_proposals=bool(proposals),
+    )
+
+
+def _validate_coverage_expansion(records: Mapping[str, Any], gaps: list[Any]) -> None:
+    _validate_pathology_proposals(
+        records, "coverage_proposals", "the pathology coverage expansion"
+    )
 
 
 def _validate_curation(
@@ -652,6 +702,22 @@ def _validate_curation(
             raise ProgramError(
                 f"{label}.disposition must be research, context_only, or exclude"
             )
+        atomicity = concept["atomicity"]
+        if concept["disposition"] != "research":
+            if atomicity is not None:
+                raise ProgramError(
+                    f"{label}.atomicity must be null unless disposition is research"
+                )
+        else:
+            atomicity = _validate_exact_object(
+                atomicity, set(CURATION_ATOMICITY_FIELDS), f"{label}.atomicity"
+            )
+            _required(atomicity, CURATION_ATOMICITY_FIELDS, f"{label}.atomicity")
+            if not all(
+                isinstance(atomicity[field], str) and atomicity[field].strip()
+                for field in CURATION_ATOMICITY_FIELDS
+            ):
+                raise ProgramError(f"{label}.atomicity fields must be non-empty strings")
         if concept["disposition"] == "research" and concept["concept_type"] == "context":
             raise ProgramError(f"{label} cannot research a context-only concept type")
         if concept["disposition"] != "exclude":
@@ -706,6 +772,11 @@ def _validate_pathology_item(
             if "pathology_landscape_scan" in results
             else []
         ),
+        *(
+            _rows(results["pathology_coverage_expansion"]["records"], "documents")
+            if "pathology_coverage_expansion" in results
+            else []
+        ),
     ]
     upstream_document_ids = {
         str(row.get("document_id", "")).strip() for row in upstream_documents
@@ -736,6 +807,10 @@ def _validate_pathology_item(
     for field in ("desired_biological_state", "phenotype_objective"):
         if not isinstance(profile[field], str) or not profile[field].strip():
             raise ProgramError(f"profiles[0].{field} must be non-empty text")
+    curated_state = node["atomicity"]["primary_desired_biological_state"]
+    submitted_state = " ".join(profile["desired_biological_state"].split()).casefold()
+    if submitted_state != " ".join(curated_state.split()).casefold():
+        raise ProgramError("profile.desired_biological_state must preserve the curated primary desired state")
     for field in PATHOLOGY_PROFILE_LIST_FIELDS:
         if not isinstance(profile[field], list):
             raise ProgramError(f"profiles[0].{field} must be a list")

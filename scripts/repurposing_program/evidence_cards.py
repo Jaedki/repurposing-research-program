@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping
 
+from .audit import _source_scope
 from .contracts import (
     MAX_SCORE,
     SCORE_COMPONENTS,
@@ -71,7 +72,12 @@ def _evidence_card_rows(
                     ),
                 },
                 "why_not": why_not,
-                "source_integrity": assessment["source_integrity"],
+                "source_integrity": {
+                    "checks": [
+                        {**check, "scope": _source_scope(check["scope"])}
+                        for check in assessment["source_integrity"]["checks"]
+                    ]
+                },
             }
         )
     return cards

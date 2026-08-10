@@ -15,6 +15,13 @@ from .evidence import _merge_text, _rows
 from .storage import _canonical_bytes, _read_json, _sha256, _stable_id, _write_json
 from .validation import _contract_rows, _references, _required, _validate_documents
 
+_UNICHEM_BATCH_SIZE = 10
+
+
+class _UniChemBatchPending(RuntimeError):
+    """Signal durable controller progress without reporting a source failure."""
+
+
 def _candidate_queries(row: Mapping[str, Any]) -> list[dict[str, Any]]:
     queries: set[tuple[str, int | None, str]] = set()
     identifiers = row.get("identifiers")
@@ -86,11 +93,15 @@ def _post_unichem(endpoint: str, body: Mapping[str, Any]) -> dict[str, Any]:
     raise AssertionError("unreachable")
 
 
+def _unichem_path(root: Path, endpoint: str, body: Mapping[str, Any]) -> Path:
+    token = _sha256(_canonical_bytes(body))[:24]
+    return root / "sources" / "raw" / "unichem" / f"{endpoint}-{token}.json"
+
+
 def _unichem_request(
     root: Path, endpoint: str, body: Mapping[str, Any]
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    token = _sha256(_canonical_bytes(body))[:24]
-    path = root / "sources" / "raw" / "unichem" / f"{endpoint}-{token}.json"
+    path = _unichem_path(root, endpoint, body)
     if path.exists():
         response = _read_json(path)
     else:
@@ -110,6 +121,17 @@ def _unichem_requests(
     root: Path, endpoint: str, bodies: Iterable[Mapping[str, Any]]
 ) -> dict[bytes, tuple[dict[str, Any], dict[str, Any]]]:
     unique = {_canonical_bytes(body): dict(body) for body in bodies}
+    pending = [
+        body for _, body in sorted(unique.items())
+        if not _unichem_path(root, endpoint, body).exists()
+    ]
+    for body in pending[:_UNICHEM_BATCH_SIZE]:
+        _unichem_request(root, endpoint, body)
+    if len(pending) > _UNICHEM_BATCH_SIZE:
+        raise _UniChemBatchPending(
+            f"UniChem {endpoint}: cached {_UNICHEM_BATCH_SIZE} request(s); "
+            f"{len(pending) - _UNICHEM_BATCH_SIZE} remain. Call next again."
+        )
     return {
         key: _unichem_request(root, endpoint, body) for key, body in unique.items()
     }

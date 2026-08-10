@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import re
 import unicodedata
+from difflib import SequenceMatcher
 from typing import Any, Iterable, Mapping
 
 from .contracts import (
@@ -44,6 +45,18 @@ def _normalized_document_title(document_id: str, value: Any) -> str:
         if title.endswith(suffix):
             title = title[: -len(suffix)].strip()
     return title
+
+
+def _equivalent_document_titles(document_id: str, left: Any, right: Any) -> bool:
+    """Accept minor title variants while retaining a wrong-title sanity check."""
+    normalized = [
+        _normalized_document_title(document_id, value) for value in (left, right)
+    ]
+    if normalized[0] == normalized[1]:
+        return True
+    return min(map(len, normalized)) >= 12 and SequenceMatcher(
+        None, *normalized, autojunk=False
+    ).ratio() >= 0.9
 
 
 def _year(value: Any) -> int | None:
@@ -191,9 +204,9 @@ def _merge_documents(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
                 continue
             conflict = field in identity_fields and field in current and current[field] != value
             if field == "title" and conflict:
-                conflict = _normalized_document_title(
-                    document_id, current[field]
-                ) != _normalized_document_title(document_id, value)
+                conflict = not _equivalent_document_titles(
+                    document_id, current[field], value
+                )
             if field == "year" and conflict:
                 conflict = _year(current[field]) != _year(value)
             if conflict:
@@ -255,14 +268,17 @@ def _cited_documents(records: Mapping[str, Any]) -> list[dict[str, Any]]:
 def _all_documents(results: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Return the retained downstream corpus, not every accepted discovery document.
 
-    Landscape papers are projected selectively into the frozen graph after curation. Directly
-    unioning the scan result here would reintroduce papers supporting excluded proposals.
+    Asta and Undermind discovery papers are projected selectively into the frozen graph after
+    curation. Directly unioning either discovery result here would reintroduce papers supporting
+    excluded proposals.
     """
     return _merge_documents(
         (
             row
             for stage, result in results.items()
-            if stage != "pathology_landscape_scan"
+            if stage not in {
+                "pathology_landscape_scan", "pathology_coverage_expansion",
+            }
             if isinstance(result.get("records"), Mapping)
             for row in _cited_documents(result["records"])
         )

@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 
 from .contracts import _PUBLICATION_ID
 from .errors import ProgramError
-from .evidence import _normalized_title, _rows, _year
+from .evidence import _equivalent_document_titles, _rows, _year
 from .storage import _canonical_bytes, _read_json, _sha256, _write_json
 
 
@@ -254,9 +254,9 @@ def _canonicalize_documents(
         if canonical is None:
             output.append(row)
             continue
-        submitted_title = _normalized_title(row.get("title")).replace(" ", "")
-        canonical_title = _normalized_title(canonical["title"]).replace(" ", "")
-        if submitted_title != canonical_title:
+        if not _equivalent_document_titles(
+            document_id, row.get("title"), canonical["title"]
+        ):
             if verify_titles:
                 raise ProgramError(
                     f"Document metadata mismatch for {document_id}: submitted title "

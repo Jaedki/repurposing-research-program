@@ -143,18 +143,21 @@ def _stop_reason(results: Mapping[str, Mapping[str, Any]]) -> str | None:
         if isinstance(row, dict)
     ):
         return "pathology curation retained no concepts requiring deep research"
-    landscape = results.get("pathology_landscape_scan")
-    if landscape is not None:
+    coverage = results.get("pathology_coverage_expansion")
+    if coverage is not None:
         source_nodes = results.get("pathology_sources", {}).get("records", {}).get(
             "source_nodes", []
         )
-        proposals = landscape.get("records", {}).get("landscape_proposals", [])
+        landscape_proposals = results.get("pathology_landscape_scan", {}).get(
+            "records", {}
+        ).get("landscape_proposals", [])
+        coverage_proposals = coverage.get("records", {}).get("coverage_proposals", [])
         has_source_concept = isinstance(source_nodes, list) and any(
             isinstance(row, dict) and row.get("node_type") != "disease_anchor"
             for row in source_nodes
         )
-        if not has_source_concept and not proposals:
-            return "Monarch, DisMech, and Asta returned no pathology concepts"
+        if not has_source_concept and not landscape_proposals and not coverage_proposals:
+            return "Monarch, DisMech, Asta, and Undermind returned no pathology concepts"
     checks = (
         ("evidence_graph", "profiles", "no source-backed pathology profiles were produced"),
         (

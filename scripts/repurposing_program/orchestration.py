@@ -24,6 +24,7 @@ from .evidence import (
 )
 from .graph import _assemble_graph_result
 from .identity import (
+    _UniChemBatchPending,
     _empty_identity_result,
     _exact_identity_groups,
     _resolve_seed_identities,
@@ -31,6 +32,7 @@ from .identity import (
 )
 from .packets import _build_packet
 from .pathology import (
+    _validate_coverage_expansion,
     _validate_curation,
     _validate_landscape_scan,
     _validate_pathology_item,
@@ -66,7 +68,10 @@ def next_action(root: str | Path) -> dict[str, Any]:
         current = _program_status(run_root, case, results)
         if current["state"] != "needs_controller":
             break
-        _advance_controller(run_root, case, results, str(current["next_stage"]))
+        try:
+            _advance_controller(run_root, case, results, str(current["next_stage"]))
+        except _UniChemBatchPending as progress:
+            return {**current, "controller_progress": str(progress)}
     else:
         raise ProgramError("Controller could not reach an agent or terminal state")
     if current["state"] != "needs_agent":
@@ -375,6 +380,9 @@ def _validate_result(
             result["records"], prior
         ),
         "pathology_landscape_scan": lambda: _validate_landscape_scan(
+            result["records"], result["gaps"]
+        ),
+        "pathology_coverage_expansion": lambda: _validate_coverage_expansion(
             result["records"], result["gaps"]
         ),
         "pathology_curation": lambda: _validate_curation(result["records"], prior),

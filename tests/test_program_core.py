@@ -37,6 +37,21 @@ PROGRAM_BASELINE = json.loads(
 )
 
 
+def curation_atomicity(disposition="research", desired_state="restore the normal process"):
+    if disposition != "research":
+        return None
+    return {
+        "focal_abnormal_state": "increased kinase signalling",
+        "causal_level": "molecular signalling",
+        "biological_direction": "increased kinase activity",
+        "compartment": "spinal motor neurons",
+        "primary_desired_biological_state": (
+            desired_state if disposition == "research" else None
+        ),
+        "atomicity_rationale": "Kinase activity is one distinct normalisable variable.",
+    }
+
+
 def source_result(*_args):
     return {
         "stage": "pathology_sources",
@@ -165,11 +180,18 @@ def asta_receipt(
 
 
 def completed_asta_receipts(result_count=0):
-    receipts = [asta_receipt(
-        "ASTA-OP-SEARCH-1",
-        "search_papers_by_relevance",
-        result_count=result_count,
-    )]
+    receipts = [
+        asta_receipt(
+            "ASTA-OP-SEARCH-1",
+            "search_papers_by_relevance",
+            result_count=result_count,
+        ),
+        asta_receipt(
+            "ASTA-OP-SEARCH-2",
+            "search_papers_by_relevance",
+            result_count=0,
+        ),
+    ]
     if result_count:
         paper_id = "3fabad2e28b0d9b09b98194d68f8c63862ede98a"
         receipts.extend([
@@ -194,6 +216,24 @@ def unavailable_asta_receipts():
             error_type="timeout",
         ),
         asta_receipt(
+            "ASTA-OP-SEARCH-2",
+            "search_papers_by_relevance",
+            outcome="no_response",
+            elapsed_seconds=180,
+            result_count=None,
+            error_type="timeout",
+        ),
+        asta_receipt(
+            "ASTA-OP-SEARCH-2",
+            "search_papers_by_relevance",
+            attempt=2,
+            request_profile="minimal",
+            outcome="no_response",
+            elapsed_seconds=180,
+            result_count=None,
+            error_type="timeout",
+        ),
+        asta_receipt(
             "ASTA-OP-SEARCH-1",
             "search_papers_by_relevance",
             attempt=2,
@@ -207,6 +247,53 @@ def unavailable_asta_receipts():
 
 
 class UniChemTransportTest(unittest.TestCase):
+    def test_request_batches_cache_progress_and_resume(self):
+        bodies = [{"compound": str(value), "type": "uci"} for value in range(3)]
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(identity, "_UNICHEM_BATCH_SIZE", 2),
+            patch.object(
+                identity,
+                "_post_unichem",
+                return_value={"response": "Success", "compounds": []},
+            ) as request,
+        ):
+            root = Path(directory)
+            with self.assertRaisesRegex(identity._UniChemBatchPending, "Call next again"):
+                identity._unichem_requests(root, "compounds", bodies)
+            self.assertEqual(request.call_count, 2)
+
+            resolved = identity._unichem_requests(root, "compounds", bodies)
+
+        self.assertEqual(len(resolved), 3)
+        self.assertEqual(request.call_count, 3)
+
+    def test_controller_reports_unichem_batch_progress_as_normal_state(self):
+        current = {
+            "case_id": "CASE:1",
+            "state": "needs_controller",
+            "next_stage": "candidate_seed_generation",
+            "next_task": "candidate_seed_research",
+            "next_item_id": None,
+            "accepted_items": 1,
+            "accepted_stages": [],
+            "stop_reason": None,
+        }
+        with (
+            patch.object(orchestration, "_case", return_value={"case_id": "CASE:1"}),
+            patch.object(orchestration, "_load_results", return_value={}),
+            patch.object(orchestration, "_program_status", return_value=current),
+            patch.object(
+                orchestration,
+                "_advance_controller",
+                side_effect=identity._UniChemBatchPending("two remain"),
+            ),
+        ):
+            action = orchestration.next_action(".")
+
+        self.assertEqual(action["state"], "needs_controller")
+        self.assertEqual(action["controller_progress"], "two remain")
+
     def test_accepts_explicit_compound_not_found_response(self):
         response = MagicMock()
         response.__enter__.return_value.read.return_value = json.dumps({
@@ -474,6 +561,15 @@ class ArtifactPersistenceTest(unittest.TestCase):
 
 
 class InstructionContractTest(unittest.TestCase):
+    def test_routine_execution_is_silent_by_default(self):
+        root = Path(__file__).resolve().parents[1]
+        agents = (root / "AGENTS.md").read_text(encoding="utf-8")
+        skill = (root / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("Default to no optional commentary during routine execution", agents)
+        self.assertEqual(agents.casefold().count("commentary"), 1)
+        self.assertNotIn("visible controller chat", skill)
+
     def test_validation_failure_stops_instead_of_retrying_automatically(self):
         skill = (Path(__file__).resolve().parents[1] / "SKILL.md").read_text(
             encoding="utf-8"
@@ -599,6 +695,25 @@ class SourceAdjudicationWorkflowTest(unittest.TestCase):
             core.submit(root, landscape_submission)
 
             action = core.next_action(root)
+            self.assertEqual(action["next_task"], "pathology_coverage_expansion")
+            coverage_result = {
+                "stage": "pathology_coverage_expansion",
+                "item_id": None,
+                "packet_id": action["packet_id"],
+                "status": "complete",
+                "records": {
+                    "documents": [],
+                    "coverage_proposals": [],
+                },
+                "gaps": [],
+            }
+            coverage_submission = root / "coverage.json"
+            coverage_submission.write_text(
+                json.dumps(coverage_result), encoding="utf-8"
+            )
+            core.submit(root, coverage_submission)
+
+            action = core.next_action(root)
             self.assertEqual(action["next_task"], "pathology_curation")
             curation_packet = Path(action["packet_path"]).read_text(encoding="utf-8")
             self.assertNotIn(sentences[0], curation_packet)
@@ -633,6 +748,12 @@ class WorkflowTest(unittest.TestCase):
             landscape,
             {"documents": [], "landscape_proposals": []},
         )
+        coverage = core.next_action(self.root)
+        self.assertEqual(coverage["next_task"], "pathology_coverage_expansion")
+        self.submit(
+            coverage,
+            {"documents": [], "coverage_proposals": []},
+        )
 
     def tearDown(self):
         self.screening_patch.stop()
@@ -643,6 +764,11 @@ class WorkflowTest(unittest.TestCase):
 
     def submit(self, action, records, *, add_evidence_passages=True):
         records = json.loads(json.dumps(records))
+        if action["next_task"] == "pathology_curation":
+            for concept in records.get("concepts", []):
+                concept.setdefault(
+                    "atomicity", curation_atomicity(concept["disposition"])
+                )
         if action["next_task"] == "pathology_landscape_scan":
             records.setdefault(
                 "asta_call_receipts",
@@ -708,6 +834,7 @@ class WorkflowTest(unittest.TestCase):
                 "disposition": "research",
                 "reason": "Distinct process",
                 "related_concept_ids": [],
+                "atomicity": curation_atomicity(),
             }]}},
         }
 
@@ -846,12 +973,23 @@ class WorkflowTest(unittest.TestCase):
             [row["node_id"] for row in research_packet["context"]["allowed_assertion_nodes"]],
             ["MONDO:1", "NODE:1"],
         )
+        indexed_node = next(
+            row
+            for row in research_packet["context"]["allowed_assertion_nodes"]
+            if row["node_id"] == "NODE:1"
+        )
+        self.assertEqual(indexed_node["atomicity"], curation_atomicity())
         research_rules = " ".join(contract["field_rules"])
         endpoint_rule = contracts.PATHOLOGY_ASSERTION_ENDPOINT_RULE
+        nested_rule = contracts.NESTED_MECHANISM_RESEARCH_RULE
         self.assertIn(endpoint_rule, research_packet["task"])
         self.assertIn(endpoint_rule, contract["field_rules"])
         self.assertEqual(research_packet["task"].count(endpoint_rule), 1)
         self.assertEqual(contract["field_rules"].count(endpoint_rule), 1)
+        self.assertIn(nested_rule, research_packet["task"])
+        self.assertIn(nested_rule, contract["field_rules"])
+        self.assertEqual(research_packet["task"].count(nested_rule), 1)
+        self.assertEqual(contract["field_rules"].count(nested_rule), 1)
         self.assertIn("context.allowed_assertion_nodes", research_rules)
         pathology_records = self.profile(first_item, node_type)
         pathology_records["assertions"] = [
@@ -1074,9 +1212,9 @@ class WorkflowTest(unittest.TestCase):
                         **self.review("UNICHEM:2", "PMID:3"),
                         "prior_art": {
                             "status": "human_intervention",
-                            "summary": "An exact-disease human intervention was registered.",
+                            "summary": "An interpretable exact-disease controlled intervention was published.",
                             "findings": [{
-                                "finding": "The candidate entered an exact-disease human study.",
+                                "finding": "The candidate achieved relevant exposure against a placebo counterfactual and a disease-relevant outcome.",
                                 "source_ids": ["PMID:3"],
                             }],
                         },
@@ -1144,6 +1282,10 @@ class WorkflowTest(unittest.TestCase):
         )
         exclusion_policy = audit_packet["result_contract"]["exclusion_policy"]
         self.assertEqual(set(exclusion_policy), set(contracts.AUDIT_EXCLUSION_REASONS))
+        qualifying_policy = exclusion_policy["qualifying_exact_disease_experiment"]
+        self.assertIn("whether favorable or unfavorable", qualifying_policy)
+        self.assertIn("uncontrolled anecdote", qualifying_policy)
+        self.assertNotIn("human_intervention", exclusion_policy)
         self.assertIn("missing data", exclusion_policy["impossible_translational_feasibility"])
         self.assertIn("unresolved identity alone", exclusion_policy["invalid_candidate"])
         review_result = json.loads(
@@ -1184,8 +1326,8 @@ class WorkflowTest(unittest.TestCase):
                 "assessments": [first_assessment],
                 "excluded_candidates": [{
                     "candidate_id": "UNICHEM:2",
-                    "reason_code": "human_intervention",
-                    "finding": "An exact-disease human intervention disqualifies repurposing.",
+                    "reason_code": "qualifying_exact_disease_experiment",
+                    "finding": "A qualifying exact-disease experiment disqualifies repurposing.",
                     "source_ids": ["PMID:3"],
                     "source_integrity": self.exclusion_integrity(["PMID:3"]),
                 }],
@@ -1251,7 +1393,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertNotIn("Audit:", cards)
         exclusions = (self.root / "outputs" / "candidate_exclusions.jsonl").read_text()
         self.assertIn('"candidate_id":"UNICHEM:2"', exclusions)
-        self.assertIn('"reason_code":"human_intervention"', exclusions)
+        self.assertIn('"reason_code":"qualifying_exact_disease_experiment"', exclusions)
         self.assertEqual(core.status(self.root)["state"], "complete")
         self.assertEqual(core.build_outputs(self.root), manifest)
 
@@ -1424,6 +1566,7 @@ class WorkflowTest(unittest.TestCase):
                     "disposition": "research",
                     "reason": "Distinct mechanism",
                     "related_concept_ids": [],
+                    "atomicity": curation_atomicity(),
                 }
             ]
         }
@@ -1433,6 +1576,42 @@ class WorkflowTest(unittest.TestCase):
         records["concepts"][0]["concept_id"] = "UNKNOWN"
         with self.assertRaisesRegex(core.ProgramError, "partition every supplied"):
             pathology._validate_curation(records, prior)
+
+    def test_curation_structurally_owns_atomicity(self):
+        concept = {
+            "concept_id": "NODE:1",
+            "preferred_label": "Process",
+            "concept_type": "mechanism",
+            "member_node_ids": ["NODE:1"],
+            "aliases": [],
+            "disposition": "research",
+            "reason": "Distinct mechanism",
+            "related_concept_ids": [],
+            "atomicity": curation_atomicity(),
+        }
+        prior = {"pathology_sources": source_result()}
+        pathology._validate_curation({"concepts": [concept]}, prior)
+        self.assertIn("atomicity", contracts.ROW_SCHEMAS["concepts"]["required_fields"])
+
+        missing = json.loads(json.dumps(concept))
+        del missing["atomicity"]
+        with self.assertRaisesRegex(core.ProgramError, "missing fields: atomicity"):
+            pathology._validate_curation({"concepts": [missing]}, prior)
+
+        conflicting = json.loads(json.dumps(concept))
+        conflicting["proposed_splits"] = []
+        with self.assertRaisesRegex(core.ProgramError, "unexpected fields"):
+            pathology._validate_curation({"concepts": [conflicting]}, prior)
+
+        context = json.loads(json.dumps(concept))
+        context.update({
+            "concept_type": "context",
+            "disposition": "context_only",
+            "related_concept_ids": ["NODE:1"],
+        })
+        with self.assertRaisesRegex(core.ProgramError, "must be null unless disposition is research"):
+            pathology._validate_curation({"concepts": [context]}, prior)
+        self.assertIsNone(curation_atomicity("context_only"))
 
     def test_curation_merges_nodes_and_collapses_self_edges(self):
         source = source_result()
@@ -1468,6 +1647,7 @@ class WorkflowTest(unittest.TestCase):
                             "disposition": "research",
                             "reason": "Equivalent source concepts",
                             "related_concept_ids": [],
+                            "atomicity": curation_atomicity(),
                         }
                     ]
                 }
@@ -1514,6 +1694,7 @@ class WorkflowTest(unittest.TestCase):
                 "disposition": "research",
                 "reason": "Equivalent source concepts",
                 "related_concept_ids": [],
+                "atomicity": curation_atomicity(),
             }]}},
         }
         script = (
@@ -1556,6 +1737,7 @@ class WorkflowTest(unittest.TestCase):
                 "disposition": "research",
                 "reason": "Separate source claim",
                 "related_concept_ids": [],
+                "atomicity": curation_atomicity(),
             }
             for node_id in ("NODE:1", "NODE:2")
         ]
@@ -1621,6 +1803,7 @@ class WorkflowTest(unittest.TestCase):
                 "disposition": disposition,
                 "reason": reason,
                 "related_concept_ids": related,
+                "atomicity": curation_atomicity(disposition),
             }
             for node_id, label, concept_type, disposition, reason, related in (
                 ("NODE:1", "Process", "mechanism", "research", "Distinct mechanism", []),
@@ -1741,6 +1924,11 @@ class WorkflowTest(unittest.TestCase):
         records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
         records["profiles"][0]["desired_biological_state"] = ""
         with self.assertRaisesRegex(core.ProgramError, "desired_biological_state"):
+            self.submit(action, records)
+
+        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
+        records["profiles"][0]["desired_biological_state"] = "change a different state"
+        with self.assertRaisesRegex(core.ProgramError, "preserve the curated primary desired state"):
             self.submit(action, records)
 
         records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
@@ -2280,6 +2468,7 @@ class WorkflowTest(unittest.TestCase):
                 "disposition": "research",
                 "reason": "test",
                 "related_concept_ids": [],
+                "atomicity": curation_atomicity(),
             }
             for concept_id in ("NODE:A", "NODE:B")
         ]
@@ -2403,6 +2592,11 @@ class WorkflowTest(unittest.TestCase):
 
         audit._validate_candidate_audit(records, results)
         self.assertEqual(ranking._final_score(longshot), 20)
+
+        legacy_reason = json.loads(json.dumps(records))
+        legacy_reason["excluded_candidates"][0]["reason_code"] = "human_intervention"
+        with self.assertRaisesRegex(core.ProgramError, "reason_code must be one of"):
+            audit._validate_candidate_audit(legacy_reason, results)
 
         all_excluded = {
             "assessments": [],
@@ -2554,6 +2748,22 @@ class WorkflowTest(unittest.TestCase):
         }
         self.assertIn("aliases[0]", scopes)
         self.assertIn("aliases[1]", scopes)
+
+        prefixed = json.loads(json.dumps(assessment))
+        for check in prefixed["source_integrity"]["checks"]:
+            if check["scope"] in contracts.SCORE_COMPONENTS:
+                check["scope"] = f"component_scores.{check['scope']}"
+        audit._validate_candidate_audit(
+            {"assessments": [prefixed], "excluded_candidates": []}, results
+        )
+        cards = evidence_cards._evidence_card_rows(
+            [{"candidate_id": "DRUG-A"}],
+            {"candidate_audit": {"records": {"assessments": [prefixed]}}},
+        )
+        self.assertNotIn(
+            "component_scores.",
+            " ".join(check["scope"] for check in cards[0]["source_integrity"]["checks"]),
+        )
 
         generic = json.loads(json.dumps(assessment))
         generic["source_integrity"] = {
@@ -2872,7 +3082,7 @@ class WorkflowTest(unittest.TestCase):
             "why_not": [],
             "prior_art": {
                 "status": "none_found",
-                "summary": "No exact-disease human intervention was found in the bounded search.",
+                "summary": "No exact-disease experimentation was found in the bounded search.",
                 "findings": [],
             },
             "limitations": [],

@@ -7,8 +7,9 @@
 | `pathology_source_screening` | Python | Structured treatment fields are excluded and every remaining DisMech sentence matching a named-intervention, treatment-language, or treatment-event signal is deduplicated into one bounded batch |
 | `pathology_source_adjudication` | One bounded agent, or Python when the batch is empty | Every flagged sentence is classified exactly once as pathology-only, treatment, mixed, or ambiguous without searching, rewriting, or creating nodes |
 | `pathology_sources` | Python | Treatment-blind Monarch and DisMech nodes, shared disease context, receipts, versions, and raw hashes are retained |
-| `pathology_landscape_scan` | One global agent | One shallow Asta scan searches by relevance, inspects related citing papers and paper-restricted snippets, returns non-secret call receipts, and returns only cited missing or more-specific pathology proposals; relevance-search unavailability after one minimal retry returns an explicit gap and empty scientific collections |
-| `pathology_curation` | One agent | Every non-anchor Monarch, DisMech, and projected Asta node is assigned exactly once to an atomic run-local concept marked `research`, `context_only`, or `exclude`; researchability follows the biological claim rather than its provisional label, context is attached to retained research concepts, and uncertain equivalence remains separate |
+| `pathology_landscape_scan` | One global agent | One shallow Asta scan streams one stable broad search plus one to three focused searches without a cross-search pending-paper queue, evaluates at most thirty unique originals against a live mechanism index, and stops only under the coverage-saturation rule defined in [SKILL.md](../SKILL.md#hard-boundaries); every retained original and up to three distinct citing papers receive paper-specific snippets; it returns non-secret receipts and only cited missing or refined proposals, while all attempted searches failing their retries returns an explicit gap and empty scientific collections |
+| `pathology_coverage_expansion` | One global agent | One Undermind deep search challenges the complete post-Asta index, inspects the full ranked result, and reads up to twenty decision-relevant papers in one native parallel batch; only cited underlying papers and supported proposals are returned, while service failure is an explicit non-blocking gap |
+| `pathology_curation` | One agent | Every non-anchor Monarch, DisMech, and projected Asta or Undermind node is assigned exactly once to a run-local concept marked `research`, `context_only`, or `exclude`; each research concept fixes its focal abnormal state, causal level, direction, compartment, atomicity rationale, and primary desired state, while context-only and excluded concepts carry no invented atomicity metadata; umbrella relabelling cannot make a bundle atomic; researchability follows the biological claim rather than its provisional label; a phenotype is research only when all disease-attribution, mechanistic-anchor, single-state, independence, and materiality criteria are supplied; context is attached to retained research concepts, and uncertain equivalence remains separate |
 | `evidence_graph` | Python after item work | Every curated research concept has one accepted deep-research profile and desired biological state; Python projects retained concepts and source edges through the partition and freezes the graph snapshot |
 | `candidate_seed_generation` | Python after item work | Every researched pathology concept has one accepted seed result; Python assigns immutable seed IDs and submits every supported identifier to UniChem |
 | `candidate_identity` | Python plus one bounded agent review when needed | Exact UniChem UCI groups merge automatically; every connectivity match, identifier conflict, unsupported candidate, and no-result seed is partitioned exactly once by the identity reviewer |
@@ -21,10 +22,10 @@ Within the three item barriers, `next` selects the first missing item from a sta
 
 The isolated source-adjudication packet may contain only the compact flagged-sentence batch and
 cannot propagate into the pathology graph. The landscape packet receives only the compact initial
-index and pathology context, retrieves literature through the host-configured Asta MCP service, and
-cannot return node IDs or treatment-framed proposals. Search results, citation results, snippets,
-and raw MCP content remain transient; bounded receipts retain only tool, logical operation, paper
-ID when applicable, attempt/profile, outcome category, elapsed time, and result count. The
+index and pathology context and retrieves literature through Asta. The coverage-expansion packet
+then receives the complete post-Asta index and retrieves literature through Undermind. Neither can
+return node IDs or treatment-framed proposals. Search results, citation results, snippets,
+deep-search reports, rankings, goals, queries, and raw MCP content remain transient. The
 subsequent pathology phase may contain disease,
 gene, variant, molecular, biochemical, cellular, tissue, organ, anatomy, and phenotype records.
 It structurally rejects candidate, compound, drug, treatment, and therapeutic fields.
@@ -40,25 +41,28 @@ The chain is sufficient without a paper directly joining the drug to the disease
 
 Python owns order, source receipts, hashing, item cursors, immutable acceptance, structured
 treatment exclusion, sentence screening, application of adjudication decisions, curation coverage
-checks, deterministic Asta-node identity,
+checks, deterministic Asta- and Undermind-node identity,
 cross-reference checks, secret rejection, graph freezing
 and context projection, exact
 UniChem merging, cached publication-identity validation, candidate aggregation, raw score calculation, ranking order, and exports. The
 source adjudicator owns only the interpretation of flagged sentences and may neither search nor
-rewrite them. The landscape worker owns one bounded literature-discovery scan and proposal set; it
-does not curate or perform deep node research. The candidate identity reviewer owns only the
+rewrite them. The landscape worker owns the bounded Asta scan; the coverage challenger owns the
+single Undermind deep search, ranked-result inspection, one PDF batch, and proposal set. Neither
+curates or performs deep node research. The candidate identity reviewer owns only the
 interpretation of UniChem-flagged or
 unresolved seeds. Candidate evidence reviewers own source-backed dossiers but do not score or
 decide eligibility. The independent auditor owns the closed-corpus assessment, bounded exclusions,
-component judgments, net assessment, and final aliases and reservations. The curation agent owns
-pathology semantic equivalence and research-value judgment; research agents own research content.
+component judgments, net assessment, and final aliases and reservations. The curation agent alone
+owns pathology decomposition, semantic equivalence, identity, the primary desired state, and
+research-value judgment. Asta and Undermind proposals are non-authoritative decomposition candidates;
+research agents preserve the curated boundary and own only research content.
 Sources own evidence. No worker may select the next task or declare the programme complete.
 
 A run is derived from `case.json`, canonical `results/*.json`, item results under `results/items/`, cached source receipts, and the final output manifest. The manifest hashes every accepted result file.
 
 ## Evidence propagation
 
-Accepted worker results remain unchanged for provenance. Research documents carry the exact retained passage or passages used by the worker. At submission, Python resolves PMID, PMCID, and DOI metadata through cached authoritative endpoints and rejects an ID/title mismatch. At each deterministic aggregation boundary, Python recursively collects `source_ids`, `pathology_source_ids`, and `mechanism_source_ids` from all non-document records, including nested observations, and propagates only returned documents whose IDs were cited by that result. Unused documents remain in the accepted worker result but do not enter downstream context. Landscape papers receive an additional semantic filter: only papers attached to Asta nodes surviving curation may enter the frozen graph or later retained corpus. Repeated document IDs union list evidence only when bibliographic identity fields agree; conflicting identity metadata stops aggregation instead of being overwritten.
+Accepted worker results remain unchanged for provenance. Research documents carry the exact retained passage or passages used by the worker. At submission, Python resolves PMID, PMCID, and DOI metadata through cached authoritative endpoints and rejects a material ID/title mismatch while accepting generic formatting or minor wording variants. At each deterministic aggregation boundary, Python recursively collects `source_ids`, `pathology_source_ids`, and `mechanism_source_ids` from all non-document records, including nested observations, and propagates only returned documents whose IDs were cited by that result. Unused documents remain in the accepted worker result but do not enter downstream context. Discovery papers receive an additional semantic filter: only papers attached to Asta or Undermind nodes surviving curation may enter the frozen graph or later retained corpus. Repeated document IDs union list evidence only when bibliographic identity fields agree under the same title check; conflicting identity metadata stops aggregation instead of being overwritten.
 
 Aggregated stages own only their evidence: the graph retains cited pathology documents, seed generation retains cited seed documents, identity contributes cited identity documents, and candidate review retains cited review documents. They do not copy prior stage libraries. Researched assertions are merged by biological triple and keep sources and summaries only inside model-, stage-, type-, and polarity-specific evidence contexts. `_all_documents()` constructs the deduplicated union when audit or output generation genuinely needs cross-stage evidence. The audit receives this closed union as a canonical source index, including retained passages and controller-resolved publication aliases, together with the complete frozen graph and candidate-identity result; it cannot add documents. A result may cite an upstream document without returning it again, so propagation requires returned document IDs to be a subset of the result's citations, not equality.
 
@@ -88,8 +92,8 @@ point while extracted responsibilities have one owner:
   canonical publication projection, and bibliographic validation;
 - `repurposing_program.validation` owns shared record-schema, reference, secret, and document-ID
   validation primitives;
-- `repurposing_program.pathology` owns treatment-field rejection, landscape-proposal validation and
-  deterministic node projection, curation projection, pathology source/adjudication validation,
+- `repurposing_program.pathology` owns treatment-field rejection, Asta and Undermind proposal and
+  receipt validation, deterministic discovery-node projection, curation projection, pathology source/adjudication validation,
   and researched-profile validation;
 - `repurposing_program.graph` owns deterministic assertion merging, frozen-graph assembly, graph
   indexing, support lookup, and bounded node-context projection;

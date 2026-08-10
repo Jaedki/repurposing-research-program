@@ -129,7 +129,7 @@ def _write_output_files(
         "Candidate nomination did not require a prior disease-drug literature association. "
         f"Audited candidates were ranked by an unweighted sum of "
         f"{len(SCORE_COMPONENTS)} 20-point components out of {MAX_SCORE}; "
-        "exact-disease established use or human trials and other bounded decisive failures were "
+        "exact-disease established use or qualifying interpretable experiments and other bounded decisive failures were "
         "exclusionary.\n\n"
         f"{EXPERIMENTAL_USE_POLICY}\n"
     )

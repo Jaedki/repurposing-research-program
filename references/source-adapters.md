@@ -13,20 +13,27 @@ Asta is not a Python source adapter and has no controller transport. After norma
 DisMech acquisition, one global worker uses the host-configured Asta MCP tools for bounded
 literature discovery, following the official signatures at
 `https://allenai.org/asta/resources/mcp`. The packet carries a compact initial index, source edges, compact disease
-context, and coverage checklist. The worker searches papers by relevance, inspects related citing
-papers, and runs paper-restricted snippet search on every paper retained for evaluation. It does not recurse
+context, and coverage checklist. The worker runs one stable broad relevance search and one to three
+short searches for broad or under-covered indexed concepts. It screens compact metadata, evaluates
+at most thirty unique originals, and applies the coverage-saturation rule defined in
+[SKILL.md](../SKILL.md#hard-boundaries). Each search is processed
+as a complete cycle with no cross-search pending-paper queue; completed receipts provide exact-ID
+deduplication while a live index tracks duplicate/refinement/new mechanisms. For every retained original it retrieves
+at most three citing papers and runs one paper-specific snippet search per distinct paper. It does not recurse
 through citations, pathways, or authors.
 
-The worker makes Asta calls sequentially, awaiting every `get_citations` and paper-restricted
-`snippet_search` response before making the next call. Slow responses are not outages. A pending
+The worker makes exactly one Asta call per orchestration step and inspects its complete response
+before constructing the next; calls are never batched, looped, or buffered. `get_citations`
+papers are read from `structuredContent.result[].citingPaper`; a different shape blocks rather
+than silently discarding citations. Slow responses are not outages. A pending
 call is not terminated before 180 seconds. A completed retryable error or a 180-second no-response
 receives exactly one retry of the same logical operation using a minimal payload, followed by
 another full wait. Minimal search and citation retries request only title, year, and URL with the
 smallest useful limit; a minimal snippet retry uses a concise query and limit 1. Authentication and
 invalid-request errors are blocking defects, not outages. A terminal `get_citations` failure is
 endpoint-specific: the worker still performs paper-restricted `snippet_search` on the original
-relevance paper and records a partial gap. Asta is unavailable only if relevance search itself
-fails both attempts.
+relevance paper and records a partial gap. One failed relevance-search operation also records a
+gap; Asta is unavailable only if all attempted relevance searches fail their retries.
 
 The worker returns only canonical papers cited by an actual missing or more-specific pathology
 proposal, with inspectable evidence passages from the underlying paper. Search results, citation
@@ -39,11 +46,26 @@ the projected proposals on equal terms with Monarch and DisMech claims and decid
 truly distinct. Only documents attached to proposals surviving curation can enter the frozen graph.
 Receipt validation rejects early no-response claims, missing retries, citation abandonment without
 snippet evaluation, blocking request/authentication defects mislabeled as outages, and terminal
-failures without an explicit gap. Verified relevance-search unavailability produces empty
+failures without an explicit gap. Verified two-search unavailability produces empty
 scientific collections and an explicit gap, leaving source-derived curation available.
 
 Configure `ASTA_AI2_API_KEY` in the MCP host. The controller never reads it, constructs Asta
 requests, writes authentication headers, or caches raw MCP exchanges.
+
+## Undermind pathology coverage expansion
+
+Undermind is also an agent-used MCP service rather than a Python source adapter. After the Asta
+result is accepted, one global worker receives the complete projected post-Asta node index, source
+edges, disease context, coverage checklist, and upstream gaps. It runs one comprehensive,
+treatment-blind deep search for missing or materially refined atomic pathology, inspects the full
+ranked result, and reads up to twenty decision-relevant papers in one native parallel batch. Only
+canonical underlying papers cited by an actual proposal are returned, with inspectable full-text
+passages; search and account data remain transient.
+
+`coverage_proposals` use the same scientific shape as Asta proposals. Python validates their
+evidence and assigns `UNDERMIND-NODE-<hash>` IDs; the final curator treats them on the same terms as
+all other source nodes and alone decides concept identity. Service failure yields empty scientific
+collections plus an explicit gap and does not block curation.
 
 ## Monarch Initiative
 
@@ -90,14 +112,16 @@ If no MONDO-mapped DisMech entry exists, the adapter records an explicit gap and
 
 ## Publication identity
 
-PMID, PMCID, and DOI references from source adapters and research workers use the same small controller-owned validation path. Responses from the NCBI identifier converter, PubMed or PubMed Central summary service, and DOI resolver are cached immutably under `<run>/sources/raw/bibliography/`. The controller uses them only to validate and project bibliographic identity; it does not infer scientific support from metadata. A submitted publication title that does not match the identifier stops acceptance. Known aliases are retained under one canonical publication identity in downstream source projections, while the originally cited document ID remains stable for provenance.
+PMID, PMCID, and DOI references from source adapters and research workers use the same small controller-owned validation path. Responses from the NCBI identifier converter, PubMed or PubMed Central summary service, and DOI resolver are cached immutably under `<run>/sources/raw/bibliography/`. The controller uses them only to validate and project bibliographic identity; it does not infer scientific support from metadata. A submitted publication title that materially disagrees with the identifier stops acceptance; formatting and minor wording variants share one generic near-match check. Known aliases are retained under one canonical publication identity in downstream source projections, while the originally cited document ID remains stable for provenance.
 
 ## UniChem candidate identity
 
 Candidate identity resolution is separate from treatment-blind pathology ingestion. After every
 seed packet is accepted, the controller queries the EMBL-EBI UniChem `compounds` endpoint for
 every supported source identifier and caches each response immutably under
-`<run>/sources/raw/unichem/`. Exact UCI equality is the only automatic candidate merge.
+`<run>/sources/raw/unichem/`. Uncached requests run sequentially in bounded batches; a
+`needs_controller` progress response resumes from that cache on the next `next` call. Exact UCI
+equality is the only automatic candidate merge.
 
 The controller also checks connectivity for every exact UCI. Connectivity-only relationships,
 partial or conflicting mappings, unsupported identifiers, and explicit no-result responses enter

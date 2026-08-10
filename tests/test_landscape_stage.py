@@ -22,6 +22,21 @@ from repurposing_program import (  # noqa: E402
 )
 
 
+def curation_atomicity(disposition="research"):
+    if disposition != "research":
+        return None
+    return {
+        "focal_abnormal_state": "increased kinase signalling",
+        "causal_level": "molecular signalling",
+        "biological_direction": "increased kinase activity",
+        "compartment": "spinal motor neurons",
+        "primary_desired_biological_state": (
+            "Decrease abnormal signalling." if disposition == "research" else None
+        ),
+        "atomicity_rationale": "Kinase activity is one distinct normalisable variable.",
+    }
+
+
 def source_screening_result(*_args):
     return {
         "stage": "pathology_source_screening",
@@ -150,11 +165,18 @@ def asta_receipt(
 
 
 def completed_asta_receipts(result_count=1):
-    receipts = [asta_receipt(
-        "ASTA-OP-SEARCH-1",
-        "search_papers_by_relevance",
-        result_count=result_count,
-    )]
+    receipts = [
+        asta_receipt(
+            "ASTA-OP-SEARCH-1",
+            "search_papers_by_relevance",
+            result_count=result_count,
+        ),
+        asta_receipt(
+            "ASTA-OP-SEARCH-2",
+            "search_papers_by_relevance",
+            result_count=0,
+        ),
+    ]
     if result_count:
         receipts.extend([
             asta_receipt(
@@ -176,6 +198,24 @@ def unavailable_asta_receipts():
         asta_receipt(
             "ASTA-OP-SEARCH-1",
             "search_papers_by_relevance",
+            outcome="no_response",
+            elapsed_seconds=180,
+            result_count=None,
+            error_type="timeout",
+        ),
+        asta_receipt(
+            "ASTA-OP-SEARCH-2",
+            "search_papers_by_relevance",
+            outcome="no_response",
+            elapsed_seconds=180,
+            result_count=None,
+            error_type="timeout",
+        ),
+        asta_receipt(
+            "ASTA-OP-SEARCH-2",
+            "search_papers_by_relevance",
+            attempt=2,
+            request_profile="minimal",
             outcome="no_response",
             elapsed_seconds=180,
             result_count=None,
@@ -216,7 +256,7 @@ class LandscapeWorkflowTest(unittest.TestCase):
             patcher.stop()
         self.temp.cleanup()
 
-    def submit(self, records, gaps=None, extra_result=None):
+    def submit(self, records, gaps=None, extra_result=None, *, advance_coverage=True):
         records = json.loads(json.dumps(records))
         records.setdefault(
             "asta_call_receipts",
@@ -237,15 +277,64 @@ class LandscapeWorkflowTest(unittest.TestCase):
             result.update(extra_result)
         path = self.root / f"landscape-{len(list(self.root.glob('landscape-*')))}.json"
         path.write_text(json.dumps(result), encoding="utf-8")
-        return core.submit(self.root, path)
+        status = core.submit(self.root, path)
+        if advance_coverage and status["next_task"] == "pathology_coverage_expansion":
+            action = core.next_action(self.root)
+            coverage_result = {
+                "stage": "pathology_coverage_expansion",
+                "item_id": None,
+                "packet_id": action["packet_id"],
+                "status": "complete",
+                "records": {
+                    "documents": [],
+                    "coverage_proposals": [],
+                },
+                "gaps": [],
+            }
+            coverage_path = self.root / "coverage-empty.json"
+            coverage_path.write_text(json.dumps(coverage_result), encoding="utf-8")
+            status = core.submit(self.root, coverage_path)
+        return status
 
     def accepted_results(self):
         return run_state._load_results(self.root)
+
+    def coverage_action(self, landscape_records=None):
+        self.submit(
+            landscape_records or {"documents": [], "landscape_proposals": []},
+            advance_coverage=False,
+        )
+        action = core.next_action(self.root)
+        self.assertEqual(action["next_task"], "pathology_coverage_expansion")
+        return action
+
+    def submit_coverage(self, action, records, gaps=None):
+        records = json.loads(json.dumps(records))
+        for row in records.get("documents", []):
+            row.setdefault("evidence_passages", [{
+                "text": f"Inspectable pathology evidence from {row['title']}.",
+                "locator": "results",
+            }])
+        result = {
+            "stage": "pathology_coverage_expansion",
+            "item_id": None,
+            "packet_id": action["packet_id"],
+            "status": "complete",
+            "records": records,
+            "gaps": [] if gaps is None else gaps,
+        }
+        path = self.root / "coverage-submission.json"
+        path.write_text(json.dumps(result), encoding="utf-8")
+        return core.submit(self.root, path)
 
     def test_stage_appears_once_before_curation_and_packet_has_no_secret(self):
         self.assertEqual(contracts.STAGES.count("pathology_landscape_scan"), 1)
         self.assertEqual(
             contracts.STAGES.index("pathology_landscape_scan") + 1,
+            contracts.STAGES.index("pathology_coverage_expansion"),
+        )
+        self.assertEqual(
+            contracts.STAGES.index("pathology_coverage_expansion") + 1,
             contracts.STAGES.index("pathology_curation"),
         )
         self.assertEqual(self.action["next_task"], "pathology_landscape_scan")
@@ -305,9 +394,146 @@ class LandscapeWorkflowTest(unittest.TestCase):
         )
         self.assertIn("coverage_checklist", packet["context"])
         self.assertTrue(any("embedded" in rule for rule in packet["rules"]))
-        self.assertTrue(any(
-            "Literal research-document example" in rule for rule in packet["rules"]
-        ))
+
+    def test_undermind_packet_receives_complete_post_asta_index(self):
+        action = self.coverage_action({
+            "documents": [document("PMID:101", "Asta mechanism")],
+            "landscape_proposals": [proposal(
+                "Asta mechanism",
+                "A disease-linked molecular defect impairs cellular function.",
+                "PMID:101",
+            )],
+        })
+        packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
+        self.assertNotIn("TEST-SECRET-MUST-NOT-LEAK", json.dumps(packet))
+        self.assertEqual(packets._secret_paths(packet), [])
+        nodes = packet["context"]["source_node_index"]
+        self.assertEqual({row["source_adapter"] for row in nodes if "source_adapter" in row}, {"Asta"})
+        self.assertEqual({row["node_id"] for row in nodes}, {
+            "NODE:1", pathology._landscape_source_nodes(self.accepted_results())[0]["node_id"],
+        })
+        self.assertEqual(
+            set(packet["result_contract"]["records"]),
+            {"documents", "coverage_proposals"},
+        )
+        rules = " ".join(packet["rules"])
+        self.assertIn("one treatment-blind deep search", rules)
+        self.assertIn("complete ranked result", rules)
+        self.assertIn("at most 20 papers", rules)
+
+    def test_undermind_proposal_becomes_equal_provenance_curation_input(self):
+        action = self.coverage_action()
+        status = self.submit_coverage(action, {
+            "documents": [document("PMID:201", "Missing pathology")],
+            "coverage_proposals": [proposal(
+                "Missing pathology",
+                "Loss of a disease-linked repair complex causes persistent molecular damage.",
+                "PMID:201",
+            )],
+        })
+        self.assertEqual(status["next_task"], "pathology_curation")
+        results = self.accepted_results()
+        node = pathology._coverage_source_nodes(results)[0]
+        self.assertTrue(node["node_id"].startswith("UNDERMIND-NODE-"))
+        self.assertEqual(node["source_adapter"], "Undermind")
+        packet = json.loads(
+            Path(core.next_action(self.root)["packet_path"]).read_text(encoding="utf-8")
+        )
+        supplied = {row["node_id"]: row for row in packet["context"]["source_nodes"]}
+        self.assertIn(node["node_id"], supplied)
+        self.assertEqual(supplied[node["node_id"]]["source_ids"], ["PMID:201"])
+
+    def test_excluded_undermind_document_does_not_enter_frozen_graph(self):
+        action = self.coverage_action()
+        self.submit_coverage(action, {
+            "documents": [document("PMID:201", "Missing pathology")],
+            "coverage_proposals": [proposal(
+                "Missing pathology",
+                "Loss of a disease-linked repair complex causes persistent molecular damage.",
+                "PMID:201",
+            )],
+        })
+        results = self.accepted_results()
+        undermind_id = pathology._coverage_source_nodes(results)[0]["node_id"]
+        results["pathology_curation"] = {"records": {"concepts": [
+            {
+                "concept_id": "NODE:1",
+                "preferred_label": "Broad process",
+                "concept_type": "mechanism",
+                "member_node_ids": ["NODE:1"],
+                "aliases": [],
+                "disposition": "research",
+                "reason": "Distinct supported pathology.",
+                "related_concept_ids": [],
+                "atomicity": curation_atomicity(),
+            },
+            {
+                "concept_id": undermind_id,
+                "preferred_label": "Missing pathology",
+                "concept_type": "mechanism",
+                "member_node_ids": [undermind_id],
+                "aliases": [],
+                "disposition": "exclude",
+                "reason": "Not retained after curation.",
+                "related_concept_ids": [],
+                "atomicity": None,
+            },
+        ]}}
+        graph = graph_rules._assemble_graph_result(
+            results,
+            [{
+                "node_id": "NODE:1",
+                "node_type": "mechanism",
+                "source_ids": ["SRC:1"],
+            }],
+            [],
+            [],
+            [],
+        )
+        self.assertNotIn(
+            "PMID:201",
+            {row["document_id"] for row in graph["records"]["documents"]},
+        )
+
+    def test_undermind_rejects_treatment_framing(self):
+        action = self.coverage_action()
+        with self.assertRaisesRegex(core.ProgramError, "treatment-framed"):
+            self.submit_coverage(action, {
+                "documents": [document("PMID:201", "Missing pathology")],
+                "coverage_proposals": [proposal(
+                    "Therapeutic rescue",
+                    "A treatment improves disease-linked molecular damage.",
+                    "PMID:201",
+                )],
+            })
+
+    def test_undermind_failure_gap_is_nonblocking(self):
+        action = self.coverage_action()
+        records = {
+            "documents": [],
+            "coverage_proposals": [],
+        }
+        status = self.submit_coverage(
+            action, records, gaps=["Undermind authentication was unavailable."]
+        )
+        self.assertEqual(status["next_task"], "pathology_curation")
+
+    def test_stop_decision_waits_for_undermind_coverage(self):
+        sparse = source_result()
+        sparse["records"]["source_nodes"] = sparse["records"]["source_nodes"][:1]
+        results = {
+            "pathology_sources": sparse,
+            "pathology_landscape_scan": {"records": {"landscape_proposals": []}},
+        }
+        self.assertIsNone(run_state._stop_reason(results))
+        results["pathology_coverage_expansion"] = {
+            "records": {"coverage_proposals": []}
+        }
+        self.assertIn("Undermind", run_state._stop_reason(results))
+        results["pathology_coverage_expansion"]["records"]["coverage_proposals"] = [
+            {"label": "Rescue"}
+        ]
+        self.assertIsNone(run_state._stop_reason(results))
 
     def test_packet_describes_the_simple_asta_discovery_and_curation_flow(self):
         packet = json.loads(Path(self.action["packet_path"]).read_text(encoding="utf-8"))
@@ -315,29 +541,45 @@ class LandscapeWorkflowTest(unittest.TestCase):
         field_rules = " ".join(packet["result_contract"]["field_rules"])
         runtime_rules = " ".join(packet["rules"])
 
-        self.assertIn("search_papers_by_relevance", task)
-        self.assertIn("get_citations", task)
-        self.assertIn("snippet_search", task)
-        self.assertIn("every related citation retained for evaluation", task)
+        self.assertIn("Asta landscape scan", task)
+        self.assertIn("absent or materially more specific", task)
+        self.assertIn("atomic proposals", task)
         self.assertIn("following curation agent", task)
+        self.assertNotIn("limit=", task)
+        self.assertNotIn("positive", task)
+        self.assertNotIn("get_citations", task)
         self.assertNotIn("180 seconds", task)
         self.assertNotIn("request_profile", task)
         self.assertNotIn("asta_call_receipts", task)
         self.assertNotIn("provisional_type", task)
 
         self.assertIn("https://allenai.org/asta/resources/mcp", runtime_rules)
-        self.assertIn("calls sequentially", runtime_rules)
+        self.assertIn("one Asta call per orchestration step", runtime_rules)
+        self.assertIn("never batch, loop, or buffer", runtime_rules)
         self.assertIn("180 seconds", runtime_rules)
         self.assertIn("smallest useful limit", runtime_rules)
+        self.assertIn("stable broad disease-mechanism relevance search", runtime_rules)
+        self.assertIn("1 to 3 short searches", runtime_rules)
+        self.assertIn("finish a cycle before starting the next search", runtime_rules)
+        self.assertIn("limit=50", runtime_rules)
+        self.assertIn("limit=3", runtime_rules)
+        self.assertIn("structuredContent.result[].citingPaper", runtime_rules)
+        self.assertIn("at most 30 unique originals", runtime_rules)
+        self.assertIn("no cross-search pending paper queue", runtime_rules)
+        self.assertIn("if an ID is no longer visible", runtime_rules)
+        self.assertIn("duplicate, refinement, or new", runtime_rules)
+        self.assertIn("Title-only or explicitly hypothetical evidence", runtime_rules)
         self.assertIn("untrusted evidence", runtime_rules)
         self.assertIn("block submission", runtime_rules)
         self.assertIn("raw MCP responses are transient", runtime_rules)
-        self.assertNotIn("source_node_index", runtime_rules)
+        self.assertIn("source_node_index", runtime_rules)
 
         self.assertIn("exactly one row per actual Asta call", field_rules)
+        self.assertIn("at least one search_papers_by_relevance", field_rules)
         self.assertIn("same tool and paper_id", field_rules)
         self.assertIn("no_response", field_rules)
-        self.assertIn("every paper passed to get_citations", field_rules)
+        self.assertIn("every relevance paper passed to get_citations", field_rules)
+        self.assertIn("every distinct citingPaper returned", field_rules)
         self.assertIn("positive completed relevance search", field_rules)
         self.assertIn("if no relevance search completes", field_rules)
         self.assertIn("terminal call failure", field_rules)
@@ -444,7 +686,10 @@ class LandscapeWorkflowTest(unittest.TestCase):
         ):
             resumed_action = core.next_action(self.root)
             self.assertEqual(resumed_action["packet_id"], self.action["packet_id"])
-            self.submit({"documents": [], "landscape_proposals": []})
+            self.submit(
+                {"documents": [], "landscape_proposals": []},
+                advance_coverage=False,
+            )
 
         self.assertEqual(packet_path.read_bytes(), issued)
 
@@ -515,8 +760,16 @@ class LandscapeWorkflowTest(unittest.TestCase):
             self.submit({
                 "documents": [],
                 "landscape_proposals": [],
-                "asta_call_receipts": completed_asta_receipts(1)[:1],
+                "asta_call_receipts": completed_asta_receipts(1)[:2],
             })
+
+    def test_original_validator_accepts_one_completed_empty_search(self):
+        status = self.submit({
+            "documents": [],
+            "landscape_proposals": [],
+            "asta_call_receipts": completed_asta_receipts(0)[:1],
+        })
+        self.assertEqual(status["next_task"], "pathology_curation")
 
     def test_no_response_requires_full_wait_and_one_minimal_retry(self):
         too_early = unavailable_asta_receipts()
@@ -537,7 +790,7 @@ class LandscapeWorkflowTest(unittest.TestCase):
             }, gaps=["Search did not respond."])
 
     def test_terminal_citation_failure_still_requires_snippet_and_gap(self):
-        receipts = completed_asta_receipts(1)[:1]
+        receipts = completed_asta_receipts(1)[:2]
         receipts.extend([
             asta_receipt(
                 "ASTA-OP-CITATIONS-1",
@@ -606,7 +859,7 @@ class LandscapeWorkflowTest(unittest.TestCase):
 
     def test_receipts_reject_malformed_paper_ids(self):
         receipts = completed_asta_receipts(1)
-        receipts[1]["paper_id"] = "not-an-asta-paper-id"
+        receipts[2]["paper_id"] = "not-an-asta-paper-id"
         with self.assertRaisesRegex(core.ProgramError, "documented Asta paper identifier"):
             self.submit({
                 "documents": [],
@@ -663,6 +916,7 @@ class LandscapeWorkflowTest(unittest.TestCase):
                 "disposition": "research",
                 "reason": "Distinct modifiable disease mechanism.",
                 "related_concept_ids": [],
+                "atomicity": curation_atomicity(),
             }]
         }
         result = {
@@ -1018,6 +1272,9 @@ class LandscapeWorkflowTest(unittest.TestCase):
         self.assertNotIn("PMID:102", document_ids)
 
     def _submit_curation(self, action, concepts):
+        concepts = json.loads(json.dumps(concepts))
+        for concept in concepts:
+            concept.setdefault("atomicity", curation_atomicity(concept["disposition"]))
         result = {
             "stage": "pathology_curation",
             "item_id": None,
@@ -1076,6 +1333,10 @@ class DocumentationContractTest(unittest.TestCase):
         )
         self.assertLess(
             skill.index("`pathology_landscape_scan`"),
+            skill.index("`pathology_coverage_expansion`"),
+        )
+        self.assertLess(
+            skill.index("`pathology_coverage_expansion`"),
             skill.index("one constrained curation packet"),
         )
         self.assertLess(
@@ -1084,11 +1345,17 @@ class DocumentationContractTest(unittest.TestCase):
         )
         self.assertLess(
             architecture.index("`pathology_landscape_scan`"),
+            architecture.index("`pathology_coverage_expansion`"),
+        )
+        self.assertLess(
+            architecture.index("`pathology_coverage_expansion`"),
             architecture.index("`pathology_curation`"),
         )
         self.assertIn("Zero proposals are valid", packet_contract)
         self.assertIn("S2:` followed by 40 hexadecimal characters", packet_contract)
         self.assertIn("Asta is not a Python source adapter", adapters)
+        self.assertIn("Undermind is also an agent-used MCP service", adapters)
+        self.assertIn("up to twenty decision-relevant PDFs", packet_contract)
         self.assertIn("ASTA_AI2_API_KEY", skill)
         self.assertIn("ASTA_AI2_API_KEY", adapters)
 
@@ -1134,6 +1401,22 @@ class SparseSourceWorkflowTest(unittest.TestCase):
             path = root / "landscape.json"
             path.write_text(json.dumps(result), encoding="utf-8")
             status = core.submit(root, path)
+            self.assertEqual(status["next_task"], "pathology_coverage_expansion")
+            action = core.next_action(root)
+            coverage = {
+                "stage": "pathology_coverage_expansion",
+                "item_id": None,
+                "packet_id": action["packet_id"],
+                "status": "complete",
+                "records": {
+                    "documents": [],
+                    "coverage_proposals": [],
+                },
+                "gaps": [],
+            }
+            coverage_path = root / "coverage.json"
+            coverage_path.write_text(json.dumps(coverage), encoding="utf-8")
+            status = core.submit(root, coverage_path)
             self.assertEqual(status["next_task"], "pathology_curation")
 
 

@@ -55,6 +55,17 @@ def _assessment_source_uses(row: Mapping[str, Any]) -> set[tuple[str, str]]:
     return uses
 
 
+def _source_scope(value: Any) -> str:
+    scope = str(value)
+    prefix = "component_scores."
+    component = scope[len(prefix):]
+    return (
+        component
+        if scope.startswith(prefix) and component in SCORE_COMPONENTS
+        else scope
+    )
+
+
 def _validate_source_integrity(
     value: Any,
     *,
@@ -73,7 +84,7 @@ def _validate_source_integrity(
             check, {"source_id", "scope", "verdict", "finding"}, check_label
         )
         source_id = str(check["source_id"])
-        scope = str(check["scope"])
+        scope = _source_scope(check["scope"])
         verdict = str(check["verdict"])
         finding = str(check["finding"]).strip()
         if verdict not in _SOURCE_CHECK_VERDICTS:
@@ -190,7 +201,7 @@ def _validate_candidate_audit(
             verdicts = {
                 str(check["verdict"])
                 for check in row["source_integrity"]["checks"]
-                if str(check["scope"]) == component
+                if _source_scope(check["scope"]) == component
             }
             if not verdicts & {"supports", "partly_supports"}:
                 raise ProgramError(

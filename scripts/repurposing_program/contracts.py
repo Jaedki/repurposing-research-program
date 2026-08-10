@@ -61,16 +61,12 @@ RESEARCH_DOCUMENT_CONTRACT = {
         }
     },
 }
-RESEARCH_DOCUMENT_EXAMPLE = (
-    '{"document_id":"PMID:12345678","title":"Example paper",'
-    '"source":"PubMed","evidence_passages":'
-    '[{"text":"Exact inspectable evidence.","locator":"Results, paragraph 2"}]}'
-)
 STAGES = (
     "pathology_source_screening",
     "pathology_source_adjudication",
     "pathology_sources",
     "pathology_landscape_scan",
+    "pathology_coverage_expansion",
     "pathology_curation",
     "evidence_graph",
     "candidate_seed_generation",
@@ -87,6 +83,18 @@ PATHOLOGY_ASSERTION_ENDPOINT_RULE = (
     "Assertions are optional and may use only node_id values listed in "
     "context.allowed_assertion_nodes; never use aliases, cross-references, or newly researched "
     "entities as endpoints, and keep mechanisms without two allowed endpoints in the profile."
+)
+NESTED_MECHANISM_RESEARCH_RULE = (
+    "When the focal concept appears to contain nested mechanisms, compare each semantically "
+    "with context.allowed_assertion_nodes and its atomicity metadata. If indexed, do not "
+    "duplicate it; retain its supported relationship to the focal concept, using an assertion "
+    "when both endpoints are allowed. If absent, research each mechanism distinctly within the "
+    "profile without conflating siblings; when it has an independent focal or desired state, "
+    "causal level, or compartment, also flag it in gaps as a possible missing atomic concept. "
+    "Preserve the focal identity and desired state; do not create additional graph nodes."
+)
+CURATION_ATOMICITY_FIELDS = (
+    "focal_abnormal_state", "causal_level", "biological_direction", "compartment", "primary_desired_biological_state", "atomicity_rationale",
 )
 _CITATION_FIELDS = frozenset({"source_ids", "pathology_source_ids", "mechanism_source_ids"})
 _SOURCE_CHECK_VERDICTS = frozenset({
@@ -167,9 +175,12 @@ AUDIT_EXCLUSION_POLICY = {
         "The retained corpus establishes that the exact candidate is already an established "
         "therapeutic use for the exact disease."
     ),
-    "human_intervention": (
-        "The retained corpus establishes a registered or published human interventional study "
-        "of the exact candidate in the exact disease; observational or preclinical work does not qualify."
+    "qualifying_exact_disease_experiment": (
+        "The retained corpus establishes that the exact candidate was administered in the exact "
+        "disease or a disease-specific model in a therapeutic experiment with relevant exposure, "
+        "a credible counterfactual, and a disease-relevant outcome, making the result interpretable "
+        "whether favorable or unfavorable. Mere registration, an uncontrolled anecdote, or an "
+        "unsuitable or inadequately controlled experiment does not qualify."
     ),
     "unsupported_action": (
         "The retained corpus contains no credible direct support that the exact candidate has the "
@@ -196,6 +207,10 @@ LANDSCAPE_PROPOSAL_TYPES = frozenset({
 ASTA_CALL_TOOLS = frozenset({
     "search_papers_by_relevance", "get_citations", "snippet_search",
 })
+ASTA_RELEVANCE_SEARCH_MAX = 4
+ASTA_RELEVANCE_SEARCH_LIMIT = 50
+ASTA_ORIGINAL_LIMIT = 30
+ASTA_CITATION_LIMIT = 3
 ASTA_OPERATION_ID_PATTERN = r"(?i)^ASTA-OP-[A-Z0-9][A-Z0-9_-]*$"
 ASTA_PAPER_ID_PATTERN = (
     r"(?i)^(?:[A-F0-9]{40}|CorpusId:\d+|DOI:\S+|ARXIV:\S+|MAG:\d+|ACL:\S+|"
@@ -208,6 +223,7 @@ ASTA_CALL_ERROR_TYPES = frozenset({
     "timeout", "unknown",
 })
 ASTA_NO_RESPONSE_SECONDS = 180
+UNDERMIND_PDF_BATCH_LIMIT = 20
 
 STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
     "pathology_source_adjudication": {
@@ -227,23 +243,35 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
     "pathology_landscape_scan": {
         "role": "treatment-blind disease pathology landscape researcher",
         "task": (
-            "Perform one shallow, treatment-blind Asta landscape scan. Search for disease-"
-            "pathology papers with search_papers_by_relevance. For each relevance result retained "
-            "for evaluation, inspect related citing papers with get_citations and run paper-"
-            "restricted snippet_search on that result and every related citation retained for "
-            "evaluation. Use directly supported claims to identify coverage gaps in the supplied "
-            "source_node_index for the following curation agent; that agent decides whether a "
-            "proposal is distinct, and Python assigns node IDs. Do not perform deep node research, "
-            "candidate research, or recursive citation traversal."
+            "Perform one shallow, treatment-blind Asta landscape scan against the supplied source-node index. "
+            "Discover directly supported disease-linked abnormal biological claims that are absent or materially more specific. "
+            "Return separate atomic proposals when a broad finding contains independently normalisable states; these are decomposition candidates only for the following curation agent, which alone owns splits, merges, final identity, and eligibility. "
+            "Do not perform deep node research, candidate research, or recursive citation traversal."
         ),
         "collections": ["documents", "landscape_proposals", "asta_call_receipts"],
+    },
+    "pathology_coverage_expansion": {
+        "role": "treatment-blind disease pathology coverage challenger",
+        "task": (
+            "Use the host-configured Undermind MCP service for one comprehensive, treatment-blind "
+            "coverage challenge against the complete post-Asta pathology index. Identify directly "
+            "supported missing atomic pathology states and material refinements of overly broad "
+            "indexed claims. Inspect the complete ranked deep-search result, then use one parallel "
+            "PDF-reading batch for every decision-relevant paper needed to test distinct gaps, up "
+            "to the service's native batch maximum. Return evidence-backed decomposition candidates "
+            "only; the following curation agent alone decides splits, merges, identity, eligibility, "
+            "and desired biological states. Do not search for or discuss treatments, candidates, or "
+            "repurposing, and do not perform deep node research."
+        ),
+        "collections": ["documents", "coverage_proposals"],
     },
     "pathology_curation": {
         "role": "disease pathology concept curator",
         "task": (
             "Use only the supplied packet; do not search or perform deep research. Convert the "
-            "supplied Monarch, DisMech, and Asta pathology nodes into coherent run-local concepts "
-            "before research; Asta proposals have no privileged status over source-adapter claims; "
+            "supplied Monarch, DisMech, Asta, and Undermind pathology nodes into coherent run-local "
+            "concepts before research; literature-service proposals have no privileged status over "
+            "source-adapter claims; "
             "do not merge distinct claims merely to reduce concept count, but concept distinctness "
             "does not create a research job. Treat concept type and disposition as separate judgments: "
             "researchability follows the supplied disease claim, not its provisional label. Keep each "
@@ -253,6 +281,10 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "levels separate even when one causes another; distinct abnormal processes or desired "
             "biological states remain separate. A broad mechanism and a supported molecular "
             "submechanism remain separate when each implies a distinct desired biological state. "
+            "For every research concept, report one focal abnormal state, causal level, biological direction, compartment, primary desired biological state, and atomicity rationale. "
+            "Set atomicity to null for context_only and exclude concepts; do not invent state metadata for claims that do not support a research route. "
+            "Keep separately supplied states separate when independently normalisable, at different causal levels or compartments, or materially differently evidenced. "
+            "A lone bundled source node without supported separate proposals is context_only plus a gap; do not fabricate subclaims. "
             "Shared genes, ontology IDs, pathways, anatomy, or "
             "causal relationships do not establish equivalence; represent overlap or causality with "
             "the supplied source edges or later researched assertions, not by merging concepts. Keep bare entities, disease "
@@ -273,7 +305,7 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "concept is research only when the supplied packet already establishes a specific "
             "abnormal biological state or process, a specific well-supported causal lesion that "
             "defines its own pathology route and non-generic compensatory direction, or a major "
-            "phenotype defining a distinct intervention objective. A bare gene or gene-disease "
+            "phenotype defining a distinct intervention objective. Every research reason must name its abnormal state and distinct intervention variable; generic eligibility wording is invalid. A bare gene or gene-disease "
             "association, risk factor, model genotype, broad pathway, terminal outcome, or mutation "
             "label without supplied functional pathology is normally context_only. Generic gene "
             "and lesion-specific claims do not both create research routes unless each supplies a "
@@ -302,16 +334,17 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
         "task": (
             "Research this one curated pathology concept in exceptional disease-specific "
             "depth. Explain its normal state, pathological change, causal role, mechanisms, "
-            "biological context, uncertainty, contradictions, and gaps. Define one concise, "
-            "evidence-grounded primary desired biological state containing one biological "
-            "variable and one desired direction. For an irreversible driver, define the specific "
+            "biological context, uncertainty, contradictions, and gaps. Document the supplied "
+            "primary desired biological state, which contains one biological variable and one "
+            "desired direction. For an irreversible driver, retain the specific "
             "compensatory state rather than generic improvement. Put other atomic biological "
             "states in secondary_desired_states and keep phenotype outcomes out of both state "
-            "fields. Define phenotype_objective separately as the disease-relevant phenotype "
+            "fields. Preserve the supplied curation atomicity boundary and primary desired state; "
+            "do not split, merge, or redefine the concept during research. Define "
+            "phenotype_objective separately as the disease-relevant phenotype "
             "change sought, not an assay, stage, population, or treatment. Label synthesis as "
-            "inference and cite the directional evidence it follows from. Record important "
-            "bundled or missing submechanisms as explicit gaps; do not create additional graph "
-            "nodes. "
+            "inference and cite the directional evidence it follows from. "
+            f"{NESTED_MECHANISM_RESEARCH_RULE} "
             f"{PATHOLOGY_ASSERTION_ENDPOINT_RULE} Express each "
             "researched graph assertion as a biological triple with one or "
             "more evidence_context entries that preserve evidence type, model, stage, polarity, "
@@ -385,6 +418,8 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "A long or unconventional bridge remains a valid hypothesis when its assumptions are "
             "clear. Only after constructing the mechanism, check exact-disease prior art and classify "
             "it as none found, preclinical only, human intervention, established use, or unclear. "
+            "For reported experiments, retain the design, exposure, counterfactual, model, and outcome "
+            "details needed for the auditor to judge whether the result is interpretable. "
             "Preserve decision-changing negative evidence. Report safety only when it opposes the "
             "desired phenotype, prevents relevant exposure, confounds the readout, or changes "
             "prioritisation. Record only drug names or salt forms explicitly used in cited evidence."
@@ -398,10 +433,10 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "inspect the supplied evidence passages, abstracts, structured source content, raw-source "
             "references, and frozen graph rather than restating each dossier. Partition every candidate exactly "
             "once into a scored assessment or a cited exclusion. Exclude only established exact-"
-            "disease use, exact-disease human intervention, unsupported proposed drug action, action "
+            "disease use, a qualifying exact-disease experiment, unsupported proposed drug action, action "
             "clearly opposite to the desired state without compensation, demonstrated impossibility "
             "of relevant action or exposure, or an invalid candidate class. Unresolved identity, "
-            "weak evidence, long causal distance, uncertain exposure, preclinical-only evidence, and "
+            "weak evidence, long causal distance, uncertain exposure, nonqualifying prior evidence, and "
             "material assumptions remain scored with explicit why-not findings. For every assessment and "
             "exclusion, decide whether each cited source supports, partly supports, does not support, or "
             "contradicts the exact place it is used. Do not defer this judgment or request re-verification. "
@@ -431,6 +466,12 @@ ROW_SCHEMAS = {
         "additional_fields": True,
     },
     "landscape_proposals": {
+        "required_fields": [
+            "label", "provisional_type", "claim", "index_comparison", "source_ids",
+        ],
+        "additional_fields": False,
+    },
+    "coverage_proposals": {
         "required_fields": [
             "label", "provisional_type", "claim", "index_comparison", "source_ids",
         ],
@@ -515,7 +556,7 @@ ROW_SCHEMAS = {
     "concepts": {
         "required_fields": [
             "concept_id", "preferred_label", "concept_type", "member_node_ids",
-            "aliases", "disposition", "reason", "related_concept_ids",
+            "aliases", "disposition", "reason", "related_concept_ids", "atomicity",
         ],
         "additional_fields": False,
     },
@@ -607,8 +648,9 @@ FIELD_RULES = {
         "rows sharing operation_id keep the same tool and paper_id; a completed attempt 1 has no "
         "retry, while a failed attempt 1 requires exactly one attempt 2 with request_profile=minimal",
         "no_response uses error_type=timeout, result_count=null, and elapsed_seconds of at least 180",
-        "every paper passed to get_citations also receives paper-restricted snippet_search, "
-        "including after a terminal citation failure",
+        "every relevance paper passed to get_citations receives paper-restricted snippet_search, "
+        "including after a terminal citation failure; every distinct citingPaper returned by a "
+        "completed get_citations call also receives paper-restricted snippet_search",
         "a positive completed relevance search includes get_citations and snippet_search operations; "
         "documents or proposals require a completed snippet_search with a positive result_count",
         "if no relevance search completes, documents and landscape_proposals are empty; every "
@@ -624,8 +666,22 @@ FIELD_RULES = {
         "frame a proposal as a drug, treatment, therapeutic, or candidate response",
         "zero proposals are valid after a receipt-verified scan",
     ],
+    "pathology_coverage_expansion": [
+        "run one treatment-blind Undermind deep search against the complete post-Asta index, "
+        "inspect its complete ranked result, and read decision-relevant full texts in one native "
+        f"parallel batch of at most {UNDERMIND_PDF_BATCH_LIMIT} papers",
+        "provisional_type is driver, mechanism, phenotype, biomarker, or context",
+        "each proposal is a specific disease-linked abnormal biological claim absent from or "
+        "materially more specific than the supplied post-Asta index",
+        "each proposal contains one pathological state or process at one causal level and cites a "
+        "returned canonical document whose full text was inspected through read_pdfs",
+        "every returned document is cited by at least one proposal; zero proposals are valid, and "
+        "service failure is reported as an explicit gap with empty scientific collections",
+        "retain only directly supported pathology and no therapeutic interpretation; Undermind "
+        "proposals are decomposition candidates and cannot create IDs or curate concepts",
+    ],
     "pathology_curation": [
-        "partition every supplied non-anchor Monarch, DisMech, and Asta node exactly once across concepts",
+        "partition every supplied non-anchor Monarch, DisMech, Asta, and Undermind node exactly once across concepts",
         "concept_id is one member_node_id; choose an authoritative member ID only after same-level "
         "equivalence is established and the ID denotes the curated concept",
         "keep each mechanism atomic at one causal level and keep source-supported claims at different "
@@ -640,6 +696,20 @@ FIELD_RULES = {
         "repeat-, model-, and mechanism-specific claims remain separate, but this identity rule "
         "does not determine disposition",
         "merge true duplicate records into a retained concept; do not exclude their evidence",
+        "atomicity is null for context_only and exclude; for research it contains exactly focal_abnormal_state, "
+        "causal_level, biological_direction, compartment, primary_desired_biological_state, and "
+        "atomicity_rationale as non-empty single strings",
+        "focal_abnormal_state names one source-supported changed biological variable or process; "
+        "causal_level names the level actually supported by the claim; biological_direction states "
+        "the observed change rather than saying only abnormal or dysregulated; compartment gives "
+        "the supported subcellular, cell-type, tissue, anatomical, or systemic context",
+        "primary_desired_biological_state reverses or specifically compensates the same focal state; "
+        "atomicity_rationale explains why it is one intervention variable and distinguishes linked "
+        "causes, consequences, assays, biomarkers, and outcomes; unsupported specificity makes the "
+        "concept context_only rather than supplying a placeholder",
+        "the concepts partition and member_node_ids are the sole split/merge record; a bundled lone "
+        "source node is context_only plus a gap, not fabricated subclaims; do not return proposed_splits, "
+        "merge_targets, or parallel identity metadata",
         "concept_type is driver, mechanism, phenotype, or context",
         "disposition is research, context_only, or exclude; every decision has a concise reason",
         "concept distinctness does not create a research job, and researchability may not be "
@@ -665,7 +735,7 @@ FIELD_RULES = {
         "secondary_desired_states contains only distinct atomic biological states and may be "
         "empty; phenotype_objective is a separate disease-phenotype change, not a biological "
         "state, assay, stage, population, or treatment",
-        "record important bundled or missing submechanisms in gaps; do not invent graph nodes",
+        NESTED_MECHANISM_RESEARCH_RULE,
         PATHOLOGY_ASSERTION_ENDPOINT_RULE,
         "established_pathology_observations is a list of observation and source_ids objects; "
         "use an empty list rather than inventing an assay, threshold, or biomarker",
@@ -744,7 +814,8 @@ FIELD_RULES = {
         "source_integrity has exactly checks; do not return a summary status or generic declaration",
         "each source-integrity check has source_id, scope, verdict, and finding and covers exactly "
         "one source use in a component score, net assessment, indexed alias, indexed why-not "
-        "finding, or exclusion",
+        "finding, or exclusion; use the bare component name for component scope "
+        "(component_scores.<name> remains an accepted compatibility alias)",
         "verdict is supports, partly_supports, does_not_support, or contradicts; inspect the supplied "
         "passage, abstract, structured source content, or raw source record and make the decision now; "
         "never defer the decision as needing re-verification",
@@ -764,8 +835,11 @@ FIELD_RULES = {
         "fields that may enter final cards",
         "excluded_candidates use a source-backed reason_code from the bounded exclusion policy and "
         "verify every cited source under the exclusion scope",
+        "apply every qualifying_exact_disease_experiment criterion; favorable and unfavorable human "
+        "or preclinical results are treated alike, while mere registration, uncontrolled anecdotes, "
+        "and uninterpretable experiments remain scored with one concise cited why_not finding",
         "do not exclude a candidate merely for unresolved identity, weak evidence, long causal "
-        "distance, uncertain exposure, preclinical-only evidence, or material assumptions",
+        "distance, uncertain exposure, nonqualifying prior evidence, or material assumptions",
     ],
 }
 

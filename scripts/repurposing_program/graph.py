@@ -166,10 +166,15 @@ def _assemble_graph_result(
     landscape_documents = (
         _cited_documents(landscape) if isinstance(landscape, Mapping) else []
     )
+    coverage = results.get("pathology_coverage_expansion", {}).get("records")
+    coverage_documents = (
+        _cited_documents(coverage) if isinstance(coverage, Mapping) else []
+    )
     records["documents"] = _select_cited_documents(
         _merge_documents([
             *_cited_documents(source),
             *landscape_documents,
+            *coverage_documents,
             *item_documents,
         ]),
         records,
