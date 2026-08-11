@@ -28,17 +28,17 @@ Install the pinned runtime dependencies once with `python -m pip install -r requ
    `controller_progress`, call `next` again. Otherwise Python writes exactly one content packet
    and returns its path and worker prompt.
 
-3. Start one new agent per packet with only this `SKILL.md`, the returned worker prompt, the current packet, and any read-only graph context explicitly retrieved through that packet—never prior packet content or a previous worker thread. Research workers investigate to evidence saturation with primary or authoritative sources and return in `records.documents` only the canonical documents directly cited by submitted claims, counterclaims, identity decisions, or limitations. Every returned document includes at least one concise `evidence_passages` entry with exact inspectable text and a locator. For PMID, PMCID, and DOI records, the controller retrieves and caches authoritative bibliographic metadata, rejects an ID/title mismatch, and supplies canonical publication identity in downstream source projections. The final auditor instead uses only the retained corpus supplied in its packet and returns no new documents. Every agent writes one JSON result matching `result_contract`; submit it unchanged:
+3. Start one new agent per packet with only this `SKILL.md`, the returned worker prompt, the current packet, and any read-only graph context explicitly retrieved through that packet—never prior packet content or a previous worker thread. Research workers investigate to evidence saturation with primary or authoritative sources and return in `records.documents` only the canonical documents directly cited by submitted claims, counterclaims, identity decisions, or limitations. Every returned document includes at least one concise `evidence_passages` entry with exact inspectable text and a locator. For PMID, PMCID, and DOI records, the controller retrieves and caches authoritative bibliographic metadata, rejects an ID/title mismatch, and supplies canonical publication identity in downstream source projections. The final auditor instead uses only the retained corpus supplied in its packet and returns no new documents. Every agent starts from `result_contract.result_template`, copies the nested row templates it needs, and validates before submission:
 
    ```powershell
+   python scripts/orchestrate_program.py validate <run-folder> <result.json>
    python scripts/orchestrate_program.py submit <run-folder> <result.json>
    ```
 
-   If validation rejects the result, stop and report the exact validation error. A rejected result
-   is noncanonical and does not invalidate the run. Do not retry automatically or repair research
-   JSON in the controller. If the user explicitly asks to continue, call `status` and start a new
-   isolated worker for the same ready packet; do not start a fresh run unless the case or source
-   inputs changed or the user requests one.
+   If validation rejects a noncanonical result, preserve its research, amend only the reported
+   invalid field and direct dependants, and validate the same ready packet again. Validation never
+   accepts or mutates a result. Escalate only a controller defect, unavailable authorized transport,
+   or a scientific gap that cannot satisfy the contract; no user `continue` round trip is required.
 
 4. Repeat `next -> new agent -> submit` as foreground actions. Do not replace this loop with a persistent or background supervisor. The controller progresses through:
 
@@ -52,6 +52,8 @@ Install the pinned runtime dependencies once with `python -m pip install -r requ
    - one constrained curation packet that partitions every non-anchor Monarch, DisMech, and
      projected Asta or Undermind node into run-local research, context-only, or excluded concepts;
    - one deep pathology-research packet per curated research concept;
+   - one no-search reconciliation packet when deep research finds independently supported atomic
+     biology absent from the index, followed by research only for retained new concepts;
    - a frozen, content-addressed living evidence graph;
    - one mechanism-directed candidate-seed packet per researched pathology concept, with a compact frozen-graph index and read-only context lookup;
    - deterministic UniChem lookup for every raw candidate seed, followed by one identity-review
@@ -79,13 +81,11 @@ should investigate each packet as deeply as the evidence permits.
   only packet allowed to contain flagged source sentences; it cannot create nodes or propagate
   into pathology context. All subsequent pathology packets must not contain drug, compound,
   treatment, therapeutic, or candidate fields or interpretations.
-- Candidate generation starts only after curation and every required pathology-concept result are accepted and Python freezes the graph snapshot.
+- Candidate generation starts only after curation, reconciliation, and every required pathology-concept result are accepted and Python freezes the graph snapshot.
 - The Asta landscape scan is a single treatment-blind discovery packet between normalized sources
-  and curation. It runs one stable broad relevance search plus one to three short searches for
-  broad or under-covered indexed concepts, screens compact search metadata, and evaluates no more
-  than thirty unique originals. It completes each selected original and its citations within the
-  current search cycle, keeps no cross-search pending-paper queue, uses completed receipts to avoid
-  duplicates, and maintains a live mechanism index. Before searching, it builds an ordered register
+  and curation. It runs one stable broad relevance search plus focused searches for every distinct
+  open coverage gap, uses completed receipts to avoid duplicates, preserves pending originals
+  across search cycles, and maintains a live mechanism index. Before searching, it builds an ordered register
   of distinct high-priority coverage gaps from the source-node index and coverage checklist; a gap
   is either a missing disease process or an indexed concept too broad to express one abnormal state.
   The broad cycle may resolve several gaps, and each focused cycle targets the highest-priority
@@ -93,8 +93,8 @@ should investigate each packet as deeply as the evidence permits.
   the targeted gap as filled or refined, already covered, or searched but unresolved. Coverage is
   saturated only when every registered gap has been searched or merged into a searched equivalent
   and the updated index exposes no new distinct in-scope gap. A fixed paper count, an empty result,
-  or a streak of duplicates alone never establishes saturation. If the search or thirty-original cap is
-  reached with a gap left, it stops at the cap and reports that gap rather than claiming saturation.
+  or a streak of duplicates alone never establishes saturation. There is no fixed search, proposal,
+  or original-paper cap; unresolved gaps remain explicit rather than being hidden by a numerical stop.
   A material refinement must change the abnormal state, causal step or level, biological direction,
   or disease-relevant context enough to change the atomic pathology concept or its later desired
   biological state; a new model, assay, population, biomarker, or wording alone is not material.
@@ -104,22 +104,27 @@ should investigate each packet as deeply as the evidence permits.
   `https://allenai.org/asta/resources/mcp` and cannot create final concept IDs, perform deep node
   research, or replace curation. A pending call is not terminated before 180 seconds; a retryable
   failure receives one minimal same-operation retry. Citation-endpoint failure is partial and does
-  not suppress snippet evaluation of the original relevance paper; Asta is unavailable only when
-  all attempted relevance searches fail their retries.
+  not suppress snippet evaluation of the original relevance paper. At least one relevance search
+  must complete, and every coverage check must end as resolved, searched-unresolved, or merged.
 - At curation, projected Asta additions join the same `source_nodes` collection and shared disease
   context as all other pathology claims; projected Undermind additions join identically, and source
   origin is provenance rather than a separate evidence tier.
 - The Undermind coverage expansion is one treatment-blind discovery packet after Asta and before
-  curation. It challenges the complete post-Asta index with one comprehensive deep search, inspects
+  curation. It follows the host MCP orientation, workspace, named-search, launch, poll, paginated
+  inspection, and PDF-read flow. Launch is asynchronous and is never interrupted; after a lost
+  response the worker inspects the named search and relaunches the same name only if none was
+  created. It challenges the complete post-Asta index, inspects
   the full ranked result, and reads decision-relevant papers in one native parallel batch of up to
   twenty. It returns only full-text-supported missing or materially refined atomic pathology
   proposals; reports, rankings, abstracts, goals, queries, and raw responses remain transient. The
-  final curator alone decides splits, merges, identity, eligibility, and desired state. Service
-  failure returns empty scientific collections and an explicit non-blocking gap.
+  final curator alone decides splits, merges, identity, eligibility, and desired state. A completed
+  non-secret search receipt is mandatory; operational failure keeps the same packet active.
 - Candidate generation keeps `pathology element -> focal primary desired biological state -> established drug mode of action` as its main anchor. Secondary desired states and the phenotype objective remain context and do not create additional discovery routes by themselves. A supplied linked graph node may support a symptomatic or compensatory candidate only when its relationship to the focal concept and candidate hypothesis is mechanistically justified.
 - Monarch associations are pathology-category allowlisted. DisMech treatment-oriented sections
   and fields are excluded unconditionally. Flagged free text is batched once, classified without
   search or rewriting, and retained only when the complete sentence is adjudicated pathology-only.
+  If focal MONDO coverage is absent, gene-and-disease-matched DisMech spectrum entries are labelled
+  discovery leads for literature coverage only; they never become focal source evidence.
 - Workers create research content only. Python controls source receipts, task order, item cursors, packet lineage, validation, persistence, candidate aggregation, ranking order, and outputs.
 
 ## Evidence safeguards
@@ -129,9 +134,8 @@ should investigate each packet as deeply as the evidence permits.
   scan, search by relevance, inspect related citing papers, and run paper-restricted snippet search
   on each paper retained for evaluation. Return only canonical papers cited by an actual proposal, each with an
   inspectable evidence passage. Return non-secret call receipts containing only operation metadata,
-  outcomes, elapsed time, and result counts. Asta is unavailable only when all attempted relevance searches
-  fail their standard and minimal attempts; endpoint-specific terminal failures remain explicit gaps
-  and do not block valid Monarch/DisMech curation.
+  outcomes, elapsed time, and result counts. Endpoint-specific terminal failures remain explicit
+  gaps, but the scan cannot advance without one completed relevance search and a terminal coverage register.
 - Configure Asta in the MCP host with `ASTA_AI2_API_KEY`. The controller never reads that variable
   or persists keys, headers, authentication data, or raw MCP exchanges.
 - Configure and authenticate Undermind in the MCP host. The controller does not persist account or
@@ -141,8 +145,10 @@ should investigate each packet as deeply as the evidence permits.
   that complete index and its atomicity metadata. Do not duplicate indexed mechanisms; research
   unindexed mechanisms distinctly in the focal profile, and flag one in `gaps` as a possible
   missing atomic concept when it has an independent focal or desired state, causal level, or
-  compartment. This does not change focal identity or desired state or create additional graph
-  nodes.
+  compartment. Return an independently supported and independently normalisable missing state in
+  `atomic_addition_proposals`. Python assigns its identity and a no-search reconciliation classifies
+  it as new research, context, existing detail, or unsupported without reopening focal identity.
+  Supplemental research for an accepted addition cannot propose another expansion.
 - Curation alone owns pathology splits, merges, concept identity, and research eligibility. Asta
   and Undermind may expose a broad claim by returning separate evidence-backed atomic proposals,
   but those are decomposition candidates rather than ontology decisions. Every research concept records one
@@ -193,10 +199,15 @@ should investigate each packet as deeply as the evidence permits.
   selected assertions plus a bounded source-edge projection for the selected nodes and cited
   pathology sources; the full graph remains available to the audit.
 - Candidate evidence reviews use the frozen graph as disease context, retrieve primary or authoritative drug facts, and build cited dossiers without scoring, ranking, or excluding candidates.
+- Exact-disease prior-art research must complete through an authorized transport before a dossier
+  can be accepted; an operational search failure is not scientific `unclear` status.
 - The independent audit receives the frozen graph, candidate-identity result, dossiers, and retained source content. It reads and weighs that evidence rather than restating a review and may not search, add evidence, or send a candidate for re-review.
+- Before scoring, the audit classifies every controller-indexed candidate/source pair, including
+  candidate evidence retained under a different dossier. Qualifying use or experimentation forces
+  the corresponding bounded exclusion.
 - Audit source integrity is decided at the exact point of use. Every source cited by a score component, net assessment, indexed alias, indexed reservation, or exclusion receives one concrete `supports`, `partly_supports`, `does_not_support`, or `contradicts` finding based on retained content. A generic integrity status or a direction to re-verify later is invalid; Python checks complete non-overlapping coverage, prevents publication aliases from being counted as independent support in one scope, and summarizes the results.
 - Long or uncertain hypotheses remain rankable with explicit reservations. Audit exclusion is limited to established exact-disease use, a qualifying exact-disease experiment, unsupported or opposite proposed action, demonstrated impossibility of relevant action or exposure, or an entity established not to be a repurposable drug or administered intervention. A qualifying experiment may be human or preclinical and favorable or unfavorable, but the retained corpus must establish relevant exposure, a credible counterfactual, and a disease-relevant outcome; mere registration, uncontrolled anecdote, or an unsuitable or inadequately controlled experiment remains ranked with a concise cited reservation. The audit packet supplies exact definitions; uncertainty or missing data never establishes an exclusion.
-- Each assessed candidate receives four cited component scores of 5, 10, 15, or 20: drug-action confidence, disease-mechanism relevance, mechanistic-bridge plausibility, and translational feasibility. The audit packet supplies category-specific anchors for every level. Counterevidence never earns points: it lowers each component whose premise it directly challenges and otherwise remains an unscored reservation. Python sums the four components without weighting to a transparent score out of 80 and applies deterministic dense ranking.
+- Each assessed candidate receives four cited integer component scores from 1 through 20: drug-action confidence, disease-mechanism relevance, mechanistic-bridge plausibility, and translational feasibility. Counterevidence never earns points: it lowers each component whose premise it directly challenges and otherwise remains an unscored reservation. Python sums the four components without weighting to a transparent score out of 80 and applies deterministic dense ranking.
 - Never persist API keys, access tokens, authorization headers, or secrets.
 - Placebo, vehicle, and sham are comparators, not candidates.
 - Unresolved identity stays visible and may be reviewed; it must not silently erase the programme.

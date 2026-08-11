@@ -36,6 +36,7 @@ from .pathology import (
     _validate_curation,
     _validate_landscape_scan,
     _validate_pathology_item,
+    _validate_reconciliation,
     _validate_source_adjudication,
     _validate_source_result,
     _validate_source_screening,
@@ -103,7 +104,9 @@ def next_action(root: str | Path) -> dict[str, Any]:
             f"one JSON object matching result_contract to {result_path}. Use this exact header: "
             f"stage={json.dumps(task)}, item_id={json.dumps(item_id)}, "
             f"packet_id={json.dumps(packet['packet_id'])}, status=\"complete\". "
-            "Return the result path to the controller."
+            "Run the packet's validate command before submission. If validation rejects a "
+            "noncanonical result, preserve its research and amend only the reported invalid "
+            "field and direct dependants, then validate again. Return the result path."
         ),
     }
 
@@ -277,7 +280,7 @@ def _advance_controller(
     if stage == "pathology_source_screening":
         try:
             result = screen_pathology_sources(
-                root, str(case["disease"]), case.get("mondo")
+                root, str(case["disease"]), case.get("mondo"), case.get("gene")
             )
         except SourceError as exc:
             raise ProgramError(str(exc)) from exc
@@ -310,6 +313,7 @@ def _advance_controller(
                 str(case["disease"]),
                 case.get("mondo"),
                 decisions,
+                case.get("gene"),
             )
         except SourceError as exc:
             raise ProgramError(str(exc)) from exc
@@ -319,6 +323,12 @@ def _advance_controller(
             verify_titles=False,
         )
         _validate_source_result(result)
+    elif stage == "pathology_reconciliation":
+        result = {
+            "stage": stage, "status": "complete",
+            "records": {"atomic_additions": [], "addition_decisions": []},
+            "gaps": [], "notes": ["No independent atomic additions required reconciliation."],
+        }
     elif stage == "evidence_graph":
         result = _build_graph_result(root, results)
     elif stage == "candidate_seed_generation":
@@ -380,14 +390,20 @@ def _validate_result(
             result["records"], prior
         ),
         "pathology_landscape_scan": lambda: _validate_landscape_scan(
-            result["records"], result["gaps"]
+            result["records"], result["gaps"], packet["context"]["coverage_checklist"]
         ),
         "pathology_coverage_expansion": lambda: _validate_coverage_expansion(
-            result["records"], result["gaps"]
+            result["records"], result["gaps"],
+            str(packet["context"]["undermind_search_name"]),
         ),
         "pathology_curation": lambda: _validate_curation(result["records"], prior),
+        "pathology_reconciliation": lambda: _validate_reconciliation(
+            result["records"], prior, packet["context"]["atomic_additions"]
+        ),
         "pathology_node_research": lambda: _validate_pathology_item(
-            result["records"], str(item_id), prior
+            result["records"], str(item_id), prior,
+            packet["context"]["prior_research_document_ids"],
+            packet["context"]["atomic_additions_allowed"],
         ),
         "candidate_seed_research": lambda: _validate_seed_item(
             result["records"], str(item_id), prior
@@ -399,13 +415,16 @@ def _validate_result(
             result["records"], str(item_id), prior
         ),
         "candidate_audit": lambda: _validate_candidate_audit(
-            result["records"], prior, packet["context"]["source_index"]
+            result["records"], prior, packet["context"]["source_index"],
+            packet["context"]["candidate_evidence_index"],
         ),
     }
     validators[task]()
 
 
-def submit(root: str | Path, result_path: str | Path) -> dict[str, Any]:
+def _validated_submission(
+    root: str | Path, result_path: str | Path
+) -> tuple[Path, dict[str, Any], dict[str, Any], str, str | None]:
     run_root = Path(root).expanduser().resolve()
     case, prior = _case(run_root), _load_results(run_root)
     current = _program_status(run_root, case, prior)
@@ -420,6 +439,18 @@ def submit(root: str | Path, result_path: str | Path) -> dict[str, Any]:
     _validate_result(task, item_id, result, packet, prior)
     if "documents" in STAGE_GUIDANCE[task]["collections"]:
         _validate_bibliographic_documents(run_root, result["records"])
+    return run_root, case, result, task, item_id
+
+
+def validate_submission(root: str | Path, result_path: str | Path) -> dict[str, Any]:
+    _run_root, _case_data, _result, task, item_id = _validated_submission(
+        root, result_path
+    )
+    return {"valid": True, "stage": task, "item_id": item_id}
+
+
+def submit(root: str | Path, result_path: str | Path) -> dict[str, Any]:
+    run_root, case, result, task, item_id = _validated_submission(root, result_path)
     destination = (
         _item_result_path(run_root, task, str(item_id))
         if item_id is not None

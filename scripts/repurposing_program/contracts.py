@@ -68,6 +68,7 @@ STAGES = (
     "pathology_landscape_scan",
     "pathology_coverage_expansion",
     "pathology_curation",
+    "pathology_reconciliation",
     "evidence_graph",
     "candidate_seed_generation",
     "candidate_identity",
@@ -100,62 +101,36 @@ _CITATION_FIELDS = frozenset({"source_ids", "pathology_source_ids", "mechanism_s
 _SOURCE_CHECK_VERDICTS = frozenset({
     "supports", "partly_supports", "does_not_support", "contradicts",
 })
-SCORE_VALUES = frozenset({5, 10, 15, 20})
+SCORE_MIN = 1
+SCORE_MAX = 20
 SCORE_COMPONENT_RUBRIC = {
     "drug_action_confidence": {
         "label": "Drug-action confidence",
         "question": "How securely is the proposed action established for this exact drug?",
-        "anchors": {
-            5: "Weak or indirect support for the action, but it is not unsupported or opposite.",
-            10: "Credible action with limited, model-specific, or concentration-relevance evidence.",
-            15: "Direct, good-quality pharmacology with one material target, direction, or dose uncertainty.",
-            20: "Direct, convergent evidence establishes the exact target, direction, and relevant action.",
-        },
     },
     "disease_mechanism_relevance": {
         "label": "Disease-mechanism relevance",
         "question": "Independent of the drug, how securely does the focal mechanism belong to disease pathology?",
-        "anchors": {
-            5: "An indirect but coherent disease link supports testing the mechanism.",
-            10: "Disease association is credible but causal role or desired direction is limited.",
-            15: "Strong disease evidence supports the mechanism and direction with one material uncertainty.",
-            20: "Convergent disease evidence establishes a causal role and the desired biological direction.",
-        },
     },
     "mechanistic_bridge_plausibility": {
         "label": "Mechanistic-bridge plausibility",
         "question": "How well does the drug action connect directionally to the desired disease state?",
-        "anchors": {
-            5: "A long or speculative bridge remains coherent and testable despite major stated assumptions.",
-            10: "A multi-step bridge has partial support and several material assumptions.",
-            15: "A short, directionally coherent bridge has direct support and one material assumption.",
-            20: "Direct evidence links the drug action to the desired state with no material unsupported step.",
-        },
     },
     "translational_feasibility": {
         "label": "Translational feasibility",
         "question": "Can relevant action plausibly be achieved in the needed tissue, dose, route, and timing?",
-        "anchors": {
-            5: "Delivery or exposure is highly uncertain or difficult, but not demonstrated impossible.",
-            10: "Major exposure, dosing, tissue, route, or timing limitations may be surmountable.",
-            15: "Relevant exposure and use are plausible with one material translational uncertainty.",
-            20: "Established human use supports relevant exposure, formulation, route, and timing.",
-        },
     },
 }
 SCORE_COMPONENTS = tuple(SCORE_COMPONENT_RUBRIC)
-MAX_SCORE = max(SCORE_VALUES) * len(SCORE_COMPONENTS)
+MAX_SCORE = SCORE_MAX * len(SCORE_COMPONENTS)
 SCORE_RUBRIC = {
     "method": (
-        f"Score each of the {len(SCORE_COMPONENTS)} distinct components from its anchors, then "
+        f"Score each of the {len(SCORE_COMPONENTS)} distinct components with any integer from "
+        f"{SCORE_MIN} (weakest) through {SCORE_MAX} (strongest), then "
         f"sum the values without weighting. The total is a prioritisation score out of "
         f"{MAX_SCORE}, not a probability of efficacy. Counterevidence earns no points: lower "
         "any component whose premise it directly challenges, and otherwise retain it as an "
         "unscored reservation."
-    ),
-    "zero_policy": (
-        "Zero is not a scored level. Use a bounded exclusion only when the evidence establishes "
-        "an exclusion condition; otherwise retain the candidate at 5 with the reservation stated."
     ),
     "components": SCORE_COMPONENT_RUBRIC,
 }
@@ -201,16 +176,19 @@ AUDIT_EXCLUSION_POLICY = {
     ),
 }
 AUDIT_EXCLUSION_REASONS = frozenset(AUDIT_EXCLUSION_POLICY)
+EVIDENCE_DISPOSITIONS = frozenset({
+    "qualifying_use", "qualifying_experiment", "relevant_not_qualifying",
+    "name_collision", "irrelevant",
+})
 LANDSCAPE_PROPOSAL_TYPES = frozenset({
     "driver", "mechanism", "phenotype", "biomarker", "context",
 })
 ASTA_CALL_TOOLS = frozenset({
     "search_papers_by_relevance", "get_citations", "snippet_search",
 })
-ASTA_RELEVANCE_SEARCH_MAX = 4
 ASTA_RELEVANCE_SEARCH_LIMIT = 50
-ASTA_ORIGINAL_LIMIT = 30
 ASTA_CITATION_LIMIT = 3
+ASTA_COVERAGE_STATUSES = frozenset({"resolved", "searched_unresolved", "merged"})
 ASTA_OPERATION_ID_PATTERN = r"(?i)^ASTA-OP-[A-Z0-9][A-Z0-9_-]*$"
 ASTA_PAPER_ID_PATTERN = (
     r"(?i)^(?:[A-F0-9]{40}|CorpusId:\d+|DOI:\S+|ARXIV:\S+|MAG:\d+|ACL:\S+|"
@@ -248,7 +226,9 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "Return separate atomic proposals when a broad finding contains independently normalisable states; these are decomposition candidates only for the following curation agent, which alone owns splits, merges, final identity, and eligibility. "
             "Do not perform deep node research, candidate research, or recursive citation traversal."
         ),
-        "collections": ["documents", "landscape_proposals", "asta_call_receipts"],
+        "collections": [
+            "documents", "landscape_proposals", "asta_call_receipts", "coverage_checks"
+        ],
     },
     "pathology_coverage_expansion": {
         "role": "treatment-blind disease pathology coverage challenger",
@@ -263,7 +243,9 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "and desired biological states. Do not search for or discuss treatments, candidates, or "
             "repurposing, and do not perform deep node research."
         ),
-        "collections": ["documents", "coverage_proposals"],
+        "collections": [
+            "documents", "coverage_proposals", "undermind_search_receipts"
+        ],
     },
     "pathology_curation": {
         "role": "disease pathology concept curator",
@@ -356,7 +338,19 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "causal biology and pathology; do not use its therapeutic interpretation, efficacy, "
             "candidate status, or trial history to construct profiles or assertions."
         ),
-        "collections": ["documents", "profiles", "assertions"],
+        "collections": [
+            "documents", "profiles", "assertions", "atomic_addition_proposals"
+        ],
+    },
+    "pathology_reconciliation": {
+        "role": "pathology atomic-addition reconciler",
+        "task": (
+            "Use only the supplied independently supported atomic additions and current concept "
+            "index. Partition every addition once as new_research_concept, context_only, "
+            "existing_concept_detail, or unsupported. Do not search, rewrite evidence, or alter "
+            "the copied atomic_additions collection."
+        ),
+        "collections": ["atomic_additions", "addition_decisions"],
     },
     "candidate_seed_research": {
         "role": "mechanism-directed candidate seed researcher",
@@ -442,14 +436,14 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "contradicts the exact place it is used. Do not defer this judgment or request re-verification. "
             "Counterevidence earns no points: lower any component whose premise "
             "it directly challenges; if it does not challenge a scored premise, retain it only as an "
-            "unscored why-not finding. Assign one cited 5, 10, 15, or 20 score "
+            "unscored why-not finding. Assign one cited integer score from 1 through 20 "
             "for each of drug-action confidence, disease-mechanism relevance, mechanistic-bridge "
             "plausibility, and translational feasibility; and give a concise cited net assessment of why "
             "the candidate remains worth ranking without repeating component reasons or why-not findings. "
             "Python computes the raw total "
             "and ranking. Return only audited aliases and why-not findings that may enter final output."
         ),
-        "collections": ["assessments", "excluded_candidates"],
+        "collections": ["assessments", "excluded_candidates", "evidence_dispositions"],
     },
 }
 
@@ -536,6 +530,19 @@ ROW_SCHEMAS = {
             },
         },
     },
+    "coverage_checks": {
+        "required_fields": ["gap", "status", "reason"],
+        "additional_fields": False,
+        "field_contracts": {"status": {"allowed_values": sorted(ASTA_COVERAGE_STATUSES)}},
+    },
+    "undermind_search_receipts": {
+        "required_fields": [
+            "workspace_id", "search_name", "search_path", "outcome",
+            "ranked_result_count", "pdf_count",
+        ],
+        "additional_fields": False,
+        "field_contracts": {"outcome": {"allowed_values": ["completed"]}},
+    },
     "source_nodes": {
         "required_fields": ["node_id", "label", "node_type", "source_ids"],
         "additional_fields": True,
@@ -568,6 +575,27 @@ ROW_SCHEMAS = {
             "established_pathology_observations", "causal_role", "mechanisms", "cell_types",
             "anatomical_context", "temporal_context", "upstream_causes",
             "downstream_consequences", "contradictions", "gaps", "uncertainty", "source_ids",
+        ],
+        "additional_fields": False,
+    },
+    "atomic_addition_proposals": {
+        "required_fields": [
+            "label", "provisional_type", "claim", "index_comparison",
+            "independence_rationale", "source_ids",
+        ],
+        "additional_fields": False,
+    },
+    "atomic_additions": {
+        "required_fields": [
+            "addition_id", "origin_concept_id", "label", "provisional_type", "claim",
+            "index_comparison", "independence_rationale", "source_ids",
+        ],
+        "additional_fields": False,
+    },
+    "addition_decisions": {
+        "required_fields": [
+            "addition_id", "disposition", "preferred_label", "concept_type", "reason",
+            "related_concept_id", "atomicity",
         ],
         "additional_fields": False,
     },
@@ -626,6 +654,13 @@ ROW_SCHEMAS = {
         ],
         "additional_fields": False,
     },
+    "evidence_dispositions": {
+        "required_fields": ["candidate_id", "source_id", "disposition", "reason"],
+        "additional_fields": False,
+        "field_contracts": {
+            "disposition": {"allowed_values": sorted(EVIDENCE_DISPOSITIONS)}
+        },
+    },
 }
 
 PATHOLOGY_PROFILE_LIST_FIELDS = (
@@ -654,8 +689,9 @@ FIELD_RULES = {
         "completed get_citations call also receives paper-restricted snippet_search",
         "a positive completed relevance search includes get_citations and snippet_search operations; "
         "documents or proposals require a completed snippet_search with a positive result_count",
-        "if no relevance search completes, documents and landscape_proposals are empty; every "
-        "terminal call failure has a non-empty gap",
+        "at least one relevance search completes; every terminal call failure has a non-empty gap",
+        "coverage_checks includes every context.coverage_checklist area exactly once, may add "
+        "distinct discovered gaps, and marks each resolved, searched_unresolved, or merged with a reason",
         "provisional_type is driver, mechanism, phenotype, biomarker, or context",
         "each proposal is a specific disease-linked abnormal biological claim that is missing from "
         "or more specific than the supplied index",
@@ -676,8 +712,8 @@ FIELD_RULES = {
         "materially more specific than the supplied post-Asta index",
         "each proposal contains one pathological state or process at one causal level and cites a "
         "returned canonical document whose full text was inspected through read_pdfs",
-        "every returned document is cited by at least one proposal; zero proposals are valid, and "
-        "service failure is reported as an explicit gap with empty scientific collections",
+        "every returned document is cited by at least one proposal; zero proposals are valid only "
+        "with the completed supplied logical-search receipt",
         "retain only directly supported pathology and no therapeutic interpretation; Undermind "
         "proposals are decomposition candidates and cannot create IDs or curate concepts",
     ],
@@ -745,6 +781,13 @@ FIELD_RULES = {
         "each evidence_context cites retained sources and records evidence_type as human, animal, "
         "cell, biochemical, or inferred; model; stage; polarity as supports or contradicts; and "
         "one context-specific summary; no treatment content",
+        "atomic_addition_proposals contains only newly researched, independently normalisable states absent from the supplied index; each cites retained evidence and states its distinct direction, compartment, causal level, or desired state in independence_rationale; Python assigns addition IDs",
+    ],
+    "pathology_reconciliation": [
+        "copy context.atomic_additions exactly and partition every addition_id once",
+        "new_research_concept requires one atomicity object and no related_concept_id",
+        "context_only or existing_concept_detail identifies one existing research concept; unsupported has no related concept",
+        "do not search, add evidence, paraphrase additions, or reconsider existing concept identity",
     ],
     "candidate_seed_research": [
         "candidate discovery keeps the focal primary desired_biological_state as its main anchor; "
@@ -805,18 +848,21 @@ FIELD_RULES = {
         "why_not is a list of finding and source_ids objects containing only counterevidence "
         "encountered during the existing review; use an empty list when absent and do not search "
         "merely to populate it",
-        "prior_art has exactly status, summary, and findings; status is none_found, preclinical_only, "
+        "prior_art has exactly search_status, status, summary, and findings; search_status must be "
+        "completed after exact-disease research through an authorized transport; operational "
+        "failure is repaired and retried rather than submitted as scientific uncertainty; status is none_found, preclinical_only, "
         "human_intervention, established_use, or unclear; positive statuses cite at least one finding",
         "the reviewer does not score, rank, or exclude candidates",
     ],
     "candidate_audit": [
         "assessments and excluded_candidates form a complete non-overlapping partition of every "
         "reviewed candidate",
+        "evidence_dispositions covers every candidate-source pair in context.candidate_evidence_index exactly once; qualifying_use or qualifying_experiment requires the matching bounded exclusion",
         "source_integrity has exactly checks; do not return a summary status or generic declaration",
         "each source-integrity check has source_id, scope, verdict, and finding and covers exactly "
         "one source use in a component score, net assessment, indexed alias, indexed why-not "
         "finding, or exclusion; use the bare component name for component scope "
-        "(component_scores.<name> remains an accepted compatibility alias)",
+        "and do not prefix it with component_scores.",
         "verdict is supports, partly_supports, does_not_support, or contradicts; inspect the supplied "
         "passage, abstract, structured source content, or raw source record and make the decision now; "
         "never defer the decision as needing re-verification",
@@ -824,8 +870,8 @@ FIELD_RULES = {
         "must not be cited as independent support within the same scope",
         "component_scores has exactly drug_action_confidence, disease_mechanism_relevance, "
         "mechanistic_bridge_plausibility, and translational_feasibility",
-        "each component has exactly value, reason, and source_ids; value is 5, 10, 15, or 20; "
-        "Python sums the four values without weighting",
+        "each component has exactly value, reason, and source_ids; value is any integer from "
+        "1 through 20 and Python sums the four values without weighting",
         "each component has at least one supports or partly_supports source-integrity check; "
         "a 20-point component has no does_not_support or contradicts checks",
         "counterevidence never earns positive scoring credit; lower every component whose premise "

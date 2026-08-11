@@ -15,6 +15,7 @@ from program_core import (
     next_action,
     status,
     submit,
+    validate_submission,
 )
 
 
@@ -32,6 +33,9 @@ def _parser() -> argparse.ArgumentParser:
     submit_command = commands.add_parser("submit", help="validate and accept one agent result")
     submit_command.add_argument("run_folder")
     submit_command.add_argument("result_path")
+    validate_command = commands.add_parser("validate", help="validate without accepting a result")
+    validate_command.add_argument("run_folder")
+    validate_command.add_argument("result_path")
     graph_command = commands.add_parser(
         "graph-context", help="return one bounded context from a frozen evidence graph"
     )
@@ -50,6 +54,8 @@ def main(argv: list[str] | None = None) -> int:
                 result = next_action(args.run_folder)
             case "submit":
                 result = submit(args.run_folder, args.result_path)
+            case "validate":
+                result = validate_submission(args.run_folder, args.result_path)
             case "status":
                 result = status(args.run_folder)
             case "build":

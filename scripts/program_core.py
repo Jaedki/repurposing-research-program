@@ -7,7 +7,7 @@ from repurposing_program.contracts import (
     STAGES,
 )
 from repurposing_program.errors import ProgramError
-from repurposing_program.orchestration import next_action, submit
+from repurposing_program.orchestration import next_action, submit, validate_submission
 from repurposing_program.outputs import build_outputs
 from repurposing_program.run_state import graph_context, initialize, status
 
@@ -23,4 +23,5 @@ __all__ = [
     "next_action",
     "status",
     "submit",
+    "validate_submission",
 ]

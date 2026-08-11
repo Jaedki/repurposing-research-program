@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping
 
-from .audit import _source_scope
 from .contracts import (
     MAX_SCORE,
     SCORE_COMPONENTS,
@@ -44,6 +43,7 @@ def _evidence_card_rows(
         cards.append(
             {
                 "drug_id": candidate_id,
+                "name": str(ranked_row["name"]).strip(),
                 "aliases": aliases,
                 "score": _final_score(assessment),
                 "components": {
@@ -73,10 +73,7 @@ def _evidence_card_rows(
                 },
                 "why_not": why_not,
                 "source_integrity": {
-                    "checks": [
-                        {**check, "scope": _source_scope(check["scope"])}
-                        for check in assessment["source_integrity"]["checks"]
-                    ]
+                    "checks": [dict(check) for check in assessment["source_integrity"]["checks"]]
                 },
             }
         )
@@ -114,7 +111,7 @@ def _source_verification_summary(checks: Iterable[Mapping[str, Any]]) -> str:
 def _cards_bytes(cards: list[dict[str, Any]]) -> bytes:
     lines: list[str] = []
     for card in cards:
-        lines.extend([f"## {_single_line(card['drug_id'])}", ""])
+        lines.extend([f"## {_single_line(card['name'])}", ""])
         if card["aliases"]:
             lines.append("Aliases:")
             lines.extend(

@@ -28,6 +28,7 @@ class PublicContractTest(unittest.TestCase):
                 "next_action",
                 "status",
                 "submit",
+                "validate_submission",
             },
         )
 
@@ -57,6 +58,19 @@ class PublicContractTest(unittest.TestCase):
             json.loads(stderr.getvalue()),
             {"ok": False, "error": "baseline failure"},
         )
+
+    def test_cli_validate_dispatches_without_submission(self):
+        expected = {"valid": True, "stage": "candidate_audit", "item_id": None}
+        stdout = io.StringIO()
+        with (
+            patch.object(cli, "validate_submission", return_value=expected) as validate,
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = cli.main(["validate", "RUN", "result.json"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(json.loads(stdout.getvalue()), {"ok": True, "result": expected})
+        validate.assert_called_once_with("RUN", "result.json")
 
 
 if __name__ == "__main__":

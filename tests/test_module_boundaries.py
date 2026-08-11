@@ -261,6 +261,7 @@ class FinishedArchitectureBoundaryTest(unittest.TestCase):
             "next_action",
             "status",
             "submit",
+            "validate_submission",
         }
         self.assertEqual(set(core.__all__), expected)
         self.assertEqual(

@@ -7,8 +7,10 @@ from typing import Any, Iterable, Mapping
 
 from .contracts import (
     AUDIT_EXCLUSION_REASONS,
+    EVIDENCE_DISPOSITIONS,
+    SCORE_MAX,
+    SCORE_MIN,
     SCORE_COMPONENTS,
-    SCORE_VALUES,
     _SOURCE_CHECK_VERDICTS,
 )
 from .errors import ProgramError
@@ -22,8 +24,8 @@ from .validation import (
 )
 
 def _component_score(value: Any, label: str) -> int:
-    if type(value) is not int or value not in SCORE_VALUES:
-        raise ProgramError(f"{label} must be one of {sorted(SCORE_VALUES)}")
+    if type(value) is not int or not SCORE_MIN <= value <= SCORE_MAX:
+        raise ProgramError(f"{label} must be an integer from {SCORE_MIN} through {SCORE_MAX}")
     return value
 
 
@@ -55,17 +57,6 @@ def _assessment_source_uses(row: Mapping[str, Any]) -> set[tuple[str, str]]:
     return uses
 
 
-def _source_scope(value: Any) -> str:
-    scope = str(value)
-    prefix = "component_scores."
-    component = scope[len(prefix):]
-    return (
-        component
-        if scope.startswith(prefix) and component in SCORE_COMPONENTS
-        else scope
-    )
-
-
 def _validate_source_integrity(
     value: Any,
     *,
@@ -84,7 +75,7 @@ def _validate_source_integrity(
             check, {"source_id", "scope", "verdict", "finding"}, check_label
         )
         source_id = str(check["source_id"])
-        scope = _source_scope(check["scope"])
+        scope = str(check["scope"])
         verdict = str(check["verdict"])
         finding = str(check["finding"]).strip()
         if verdict not in _SOURCE_CHECK_VERDICTS:
@@ -137,6 +128,7 @@ def _validate_candidate_audit(
     records: Mapping[str, Any],
     results: Mapping[str, Mapping[str, Any]],
     source_index: Iterable[Mapping[str, Any]] | None = None,
+    candidate_evidence_index: Iterable[Mapping[str, Any]] | None = None,
 ) -> None:
     assessments = _contract_rows(records, "assessments", "candidate_id")
     exclusions = _contract_rows(records, "excluded_candidates", "candidate_id")
@@ -152,6 +144,36 @@ def _validate_candidate_audit(
     corpus = source_index if source_index is not None else _all_documents(results)
     documents = {str(row["document_id"]): row for row in corpus}
     source_ids = set(documents)
+    dispositions = _contract_rows(records, "evidence_dispositions")
+    expected_pairs = {
+        (str(row["candidate_id"]), str(source_id))
+        for row in (candidate_evidence_index or [])
+        for source_id in row.get("source_ids", [])
+    }
+    actual_pairs: list[tuple[str, str]] = []
+    qualifying: dict[str, dict[str, set[str]]] = {}
+    for index, row in enumerate(dispositions):
+        label = f"evidence_dispositions[{index}]"
+        candidate_id, source_id = str(row["candidate_id"]), str(row["source_id"])
+        if candidate_id not in candidate_ids or source_id not in source_ids:
+            raise ProgramError(f"{label} refers to an unknown candidate or retained source")
+        if row["disposition"] not in EVIDENCE_DISPOSITIONS:
+            raise ProgramError(
+                f"{label}.disposition must be one of {sorted(EVIDENCE_DISPOSITIONS)}"
+            )
+        if not str(row["reason"]).strip():
+            raise ProgramError(f"{label}.reason must be non-empty")
+        actual_pairs.append((candidate_id, source_id))
+        if row["disposition"] in {"qualifying_use", "qualifying_experiment"}:
+            qualifying.setdefault(candidate_id, {}).setdefault(
+                str(row["disposition"]), set()
+            ).add(source_id)
+    if len(actual_pairs) != len(set(actual_pairs)) or set(actual_pairs) != expected_pairs:
+        raise ProgramError(
+            "evidence_dispositions must cover candidate_evidence_index exactly; "
+            f"missing={sorted(expected_pairs - set(actual_pairs))}, "
+            f"unknown={sorted(set(actual_pairs) - expected_pairs)}"
+        )
     for index, row in enumerate(assessments):
         label = f"assessments[{index}]"
         components = _validate_exact_object(
@@ -216,14 +238,14 @@ def _validate_candidate_audit(
             verdicts = {
                 str(check["verdict"])
                 for check in row["source_integrity"]["checks"]
-                if _source_scope(check["scope"]) == component
+                if str(check["scope"]) == component
             }
             if not verdicts & {"supports", "partly_supports"}:
                 raise ProgramError(
                     f"{label}.component_scores.{component} must have at least one "
                     "supports or partly_supports source-integrity check"
                 )
-            if components[component]["value"] == 20 and verdicts & {
+            if components[component]["value"] == SCORE_MAX and verdicts & {
                 "does_not_support", "contradicts"
             }:
                 raise ProgramError(
@@ -246,3 +268,23 @@ def _validate_candidate_audit(
             documents=documents,
             label=f"{label}.source_integrity",
         )
+        required_disposition = {
+            "exact_disease_use": "qualifying_use",
+            "qualifying_exact_disease_experiment": "qualifying_experiment",
+        }.get(str(row["reason_code"]))
+        if required_disposition and not (
+            set(map(str, row["source_ids"]))
+            & qualifying.get(str(row["candidate_id"]), {}).get(required_disposition, set())
+        ):
+            raise ProgramError(f"{label} lacks its qualifying evidence disposition")
+    excluded_by_id = {str(row["candidate_id"]): row for row in exclusions}
+    for candidate_id, kinds in qualifying.items():
+        exclusion = excluded_by_id.get(candidate_id)
+        expected_reason = (
+            "exact_disease_use" if "qualifying_use" in kinds
+            else "qualifying_exact_disease_experiment"
+        )
+        if exclusion is None or exclusion["reason_code"] != expected_reason:
+            raise ProgramError(
+                f"Candidate {candidate_id} has qualifying exact-disease evidence and must be excluded"
+            )

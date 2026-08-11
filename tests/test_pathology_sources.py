@@ -15,6 +15,28 @@ from repurposing_program import evidence, pathology  # noqa: E402
 
 
 class DisMechNormalizationTest(unittest.TestCase):
+    def test_missing_focal_entry_exposes_only_gene_and_disease_matched_leads(self):
+        table = (
+            "mondo_id\tname\tdismech_url\tgenes\n"
+            "MONDO:2\tFamilial hemiplegic migraine type 1 FHM1\t"
+            "https://example.org/fhm1\tCACNA1A\n"
+            "MONDO:3\tUnrelated channelopathy\thttps://example.org/other\tCACNA1A\n"
+        ).encode()
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(sources, "_fetch_json", return_value={"sha": "abc123"}),
+            patch.object(sources, "_fetch", return_value=table),
+        ):
+            raw, metadata, gaps = sources._load_dismech(
+                Path(directory), "MONDO:1",
+                "Familial hemiplegic migraine type 1 (FHM1)", "CACNA1A",
+            )
+
+        self.assertIsNone(raw)
+        self.assertIsNone(metadata)
+        self.assertEqual(sum("Related DisMech lead only" in gap for gap in gaps), 1)
+        self.assertIn("MONDO:2", gaps[1])
+
     def test_reference_collection_title_is_normalized_before_identity_validation(self):
         documents = {}
 

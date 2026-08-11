@@ -800,7 +800,7 @@ def _normalize_dismech_sections(
 
 
 def _load_dismech(
-    cache: Path, mondo_id: str
+    cache: Path, mondo_id: str, disease: str = "", gene: str | None = None
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, list[str]]:
     gaps: list[str] = []
     commit = _fetch_json(
@@ -811,10 +811,33 @@ def _load_dismech(
         raise SourceError("DisMech did not return a commit SHA")
     export_url = f"{DISMECH_RAW}/{commit_sha}/exports/mondo_emc.tsv"
     export_payload = _fetch(export_url, cache / "dismech_mondo_emc.tsv")
-    reader = csv.DictReader(io.StringIO(export_payload.decode("utf-8-sig")), delimiter="\t")
-    match = next((row for row in reader if row.get("mondo_id") == mondo_id), None)
+    rows = list(csv.DictReader(
+        io.StringIO(export_payload.decode("utf-8-sig")), delimiter="\t"
+    ))
+    match = next((row for row in rows if row.get("mondo_id") == mondo_id), None)
     if match is None:
         gaps.append(f"DisMech has no MONDO-mapped disorder entry for {mondo_id}")
+        aliases = {
+            disease.split("(", 1)[0].strip().casefold(),
+            *(value.casefold() for value in re.findall(r"\b[A-Z][A-Z0-9]{2,}\b", disease)),
+        } - {""}
+        if gene:
+            gene_pattern = re.compile(rf"(?<!\w){re.escape(gene)}(?!\w)", re.I)
+            alias_patterns = [
+                re.compile(rf"(?<!\w){re.escape(alias)}(?!\w)", re.I) for alias in aliases
+            ]
+            leads = []
+            for row in rows:
+                text = " ".join(str(value or "") for value in row.values())
+                if gene_pattern.search(text) and any(
+                    pattern.search(text) for pattern in alias_patterns
+                ):
+                    leads.append(row)
+            for row in leads[:3]:
+                gaps.append(
+                    "Related DisMech lead only—not focal evidence: "
+                    f"{row.get('mondo_id')} {row.get('name')} ({row.get('dismech_url')})"
+                )
         return None, None, gaps
 
     page = str(match.get("dismech_url", ""))
@@ -847,6 +870,8 @@ def _dismech(
     cache: Path,
     mondo_id: str,
     sentence_decisions: Mapping[str, str],
+    disease: str = "",
+    gene: str | None = None,
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -855,7 +880,7 @@ def _dismech(
     dict[str, Any] | None,
     list[str],
 ]:
-    raw, metadata, gaps = _load_dismech(cache, mondo_id)
+    raw, metadata, gaps = _load_dismech(cache, mondo_id, disease, gene)
     if raw is None or metadata is None:
         if sentence_decisions:
             raise SourceError("Sentence adjudication was supplied without a DisMech record")
@@ -963,12 +988,13 @@ def screen_pathology_sources(
     run_root: Path,
     disease: str,
     mondo_hint: str | None = None,
+    gene: str | None = None,
 ) -> dict[str, Any]:
     """Collect one compact, deduplicated sentence batch for bounded adjudication."""
     cache = run_root / "sources" / "raw"
     entity, _, _, _, _ = _monarch(cache, disease, mondo_hint)
     mondo_id = str(entity["id"])
-    raw, _, _ = _load_dismech(cache, mondo_id)
+    raw, _, _ = _load_dismech(cache, mondo_id, disease, gene)
     flagged = _flagged_sentences(raw, _treatment_terms(raw)) if raw is not None else []
     return {
         "stage": "pathology_source_screening",
@@ -991,6 +1017,7 @@ def fetch_pathology_sources(
     disease: str,
     mondo_hint: str | None,
     sentence_decisions: Mapping[str, str],
+    gene: str | None = None,
 ) -> dict[str, Any]:
     """Fetch and normalize pathology-only source records for one immutable run."""
     cache = run_root / "sources" / "raw"
@@ -1005,7 +1032,7 @@ def fetch_pathology_sources(
         dismech_context,
         dismech_receipt,
         gaps,
-    ) = _dismech(cache, mondo_id, sentence_decisions)
+    ) = _dismech(cache, mondo_id, sentence_decisions, disease, gene)
 
     documents: dict[str, dict[str, Any]] = {}
     for row in [*monarch_docs, *dismech_docs]:

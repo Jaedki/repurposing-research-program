@@ -180,8 +180,14 @@ def _validate_review_item(
             source_ids=source_ids,
         )
         prior_art = _validate_exact_object(
-            row["prior_art"], {"status", "summary", "findings"}, f"{label}.prior_art"
+            row["prior_art"], {"search_status", "status", "summary", "findings"},
+            f"{label}.prior_art"
         )
+        if prior_art["search_status"] != "completed":
+            raise ProgramError(
+                f"{label}.prior_art.search_status must be completed; operational failures "
+                "must be retried through an authorized research transport"
+            )
         if prior_art["status"] not in PRIOR_ART_STATUSES:
             raise ProgramError(
                 f"{label}.prior_art.status must be one of {sorted(PRIOR_ART_STATUSES)}"

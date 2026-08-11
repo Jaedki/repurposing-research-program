@@ -36,7 +36,11 @@ def _write_output_files(
 ) -> list[Path]:
     outputs = run_root / "outputs"
     graph = results["evidence_graph"]["records"]
-    _write_once(outputs / "candidates.csv", _csv_bytes(rows, list(rows[0])))
+    csv_rows = [
+        {key: value for key, value in row.items() if key != "candidate_id"}
+        for row in rows
+    ]
+    _write_once(outputs / "candidates.csv", _csv_bytes(csv_rows, list(csv_rows[0])))
     card_rows = _evidence_card_rows(rows, results)
     _write_once(outputs / "candidate_cards.md", _cards_bytes(card_rows))
     excluded_rows = _excluded_candidate_rows(results, candidates)

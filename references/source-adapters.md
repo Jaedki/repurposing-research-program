@@ -10,15 +10,14 @@ Normalized non-anchor nodes remain source records until the curation barrier ass
 ## Asta pathology landscape scan
 
 Asta is not a Python source adapter and has no controller transport. After normalized Monarch and
-DisMech acquisition, one global worker uses the host-configured Asta MCP tools for bounded
+DisMech acquisition, one global worker uses the host-configured Asta MCP tools for coverage-driven
 literature discovery, following the official signatures at
 `https://allenai.org/asta/resources/mcp`. The packet carries a compact initial index, source edges, compact disease
-context, and coverage checklist. The worker runs one stable broad relevance search and one to three
-short searches for broad or under-covered indexed concepts. It screens compact metadata, evaluates
-at most thirty unique originals, and applies the coverage-saturation rule defined in
-[SKILL.md](../SKILL.md#hard-boundaries). Each search is processed
-as a complete cycle with no cross-search pending-paper queue; completed receipts provide exact-ID
-deduplication while a live index tracks duplicate/refinement/new mechanisms. For every retained original it retrieves
+context, and coverage checklist. The worker runs one stable broad relevance search and focused
+searches for every open coverage gap. It preserves pending originals across cycles and applies the
+coverage-saturation rule defined in [SKILL.md](../SKILL.md#hard-boundaries), with no fixed search,
+paper, or proposal count. Completed receipts provide exact-ID deduplication while a live index tracks
+duplicate/refinement/new mechanisms. For every retained original it retrieves
 at most three citing papers and runs one paper-specific snippet search per distinct paper. It does not recurse
 through citations, pathways, or authors.
 
@@ -33,7 +32,7 @@ smallest useful limit; a minimal snippet retry uses a concise query and limit 1.
 invalid-request errors are blocking defects, not outages. A terminal `get_citations` failure is
 endpoint-specific: the worker still performs paper-restricted `snippet_search` on the original
 relevance paper and records a partial gap. One failed relevance-search operation also records a
-gap; Asta is unavailable only if all attempted relevance searches fail their retries.
+gap. At least one relevance search must complete before the scan can be accepted.
 
 The worker returns only canonical papers cited by an actual missing or more-specific pathology
 proposal, with inspectable evidence passages from the underlying paper. Search results, citation
@@ -45,9 +44,8 @@ papers and proposals and assigns stable `ASTA-NODE` identities; the existing cur
 the projected proposals on equal terms with Monarch and DisMech claims and decides whether each is
 truly distinct. Only documents attached to proposals surviving curation can enter the frozen graph.
 Receipt validation rejects early no-response claims, missing retries, citation abandonment without
-snippet evaluation, blocking request/authentication defects mislabeled as outages, and terminal
-failures without an explicit gap. Verified two-search unavailability produces empty
-scientific collections and an explicit gap, leaving source-derived curation available.
+snippet evaluation, blocking request/authentication defects, and a scan with no completed relevance
+search. The coverage register must classify every gap as resolved, searched-unresolved, or merged.
 
 Configure `ASTA_AI2_API_KEY` in the MCP host. The controller never reads it, constructs Asta
 requests, writes authentication headers, or caches raw MCP exchanges.
@@ -56,16 +54,19 @@ requests, writes authentication headers, or caches raw MCP exchanges.
 
 Undermind is also an agent-used MCP service rather than a Python source adapter. After the Asta
 result is accepted, one global worker receives the complete projected post-Asta node index, source
-edges, disease context, coverage checklist, and upstream gaps. It runs one comprehensive,
-treatment-blind deep search for missing or materially refined atomic pathology, inspects the full
-ranked result, and reads up to twenty decision-relevant papers in one native parallel batch. Only
+edges, disease context, coverage checklist, upstream gaps, and a stable logical search name. It
+calls `get_orientation`, lists and reuses or creates a workspace, inspects named searches, launches only when absent,
+polls the asynchronous search without interrupting it, inspects every ranked-result page, and reads
+selected papers in one native batch. A lost launch response is recovered by inspecting first and
+relaunching the same logical name only if no search exists. Only
 canonical underlying papers cited by an actual proposal are returned, with inspectable full-text
 passages; search and account data remain transient.
 
-`coverage_proposals` use the same scientific shape as Asta proposals. Python validates their
+`coverage_proposals` use the same scientific shape as Asta proposals. One non-secret completion
+receipt records workspace, search name and path, ranked-result count, and PDF count. Python validates their
 evidence and assigns `UNDERMIND-NODE-<hash>` IDs; the final curator treats them on the same terms as
-all other source nodes and alone decides concept identity. Service failure yields empty scientific
-collections plus an explicit gap and does not block curation.
+all other source nodes and alone decides concept identity. Operational failure cannot masquerade as
+scientific completion and leaves the same packet ready for recovery.
 
 ## Monarch Initiative
 
@@ -100,7 +101,10 @@ sentence exactly once. Python restores only exact sentences classified `retain_p
 Treatment sentences are excluded, while mixed or ambiguous sentences fail closed and create an
 explicit gap. Raw YAML remains cached unchanged for provenance.
 
-If no MONDO-mapped DisMech entry exists, the adapter records an explicit gap and continues with Monarch rather than treating source coverage as programme failure.
+If no MONDO-mapped DisMech entry exists, the adapter records an explicit gap and continues with
+Monarch. When both disease wording and a gene are supplied, up to three related spectrum entries
+matching both are added as clearly labelled discovery leads for Asta or Undermind; they are never
+normalized as focal nodes, context, or evidence.
 
 ## Invariants
 

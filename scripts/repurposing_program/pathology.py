@@ -15,6 +15,7 @@ from .contracts import (
     ASTA_CALL_OUTCOMES,
     ASTA_CALL_PROFILES,
     ASTA_CALL_TOOLS,
+    ASTA_COVERAGE_STATUSES,
     ASTA_NO_RESPONSE_SECONDS,
     ASTA_OPERATION_ID_PATTERN,
     ASTA_PAPER_ID_PATTERN,
@@ -116,15 +117,76 @@ def _coverage_source_nodes(
     )
 
 
+def _project_atomic_additions(
+    item_results: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    additions = []
+    for origin_id, result in sorted(item_results.items()):
+        for proposal in _rows(result["records"], "atomic_addition_proposals"):
+            basis = {
+                key: _normalized_landscape_text(proposal[key])
+                for key in ("label", "provisional_type", "claim")
+            } | {"source_ids": sorted(set(map(str, proposal["source_ids"])))}
+            additions.append({
+                "addition_id": _stable_id("RESEARCH-NODE", {"origin": origin_id, **basis}),
+                "origin_concept_id": origin_id,
+                **proposal,
+            })
+    return additions
+
+
+def _reconciliation_concepts(
+    results: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    result = results.get("pathology_reconciliation")
+    if not result:
+        return []
+    additions = {str(row["addition_id"]): row for row in _rows(
+        result["records"], "atomic_additions"
+    )}
+    concepts = []
+    for decision in _rows(result["records"], "addition_decisions"):
+        if decision["disposition"] not in {"new_research_concept", "context_only"}:
+            continue
+        addition_id = str(decision["addition_id"])
+        disposition = "research" if decision["disposition"] == "new_research_concept" else "context_only"
+        concepts.append({
+            "concept_id": addition_id, "preferred_label": decision["preferred_label"],
+            "concept_type": decision["concept_type"], "member_node_ids": [addition_id],
+            "aliases": [], "disposition": disposition, "reason": decision["reason"],
+            "related_concept_ids": ([decision["related_concept_id"]]
+                                    if disposition == "context_only" else []),
+            "atomicity": decision["atomicity"], "source_ids": additions[addition_id]["source_ids"],
+        })
+    return concepts
+
+
 def _combined_source_records(
     results: Mapping[str, Mapping[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     source = results["pathology_sources"]["records"]
+    addition_nodes = []
+    if "pathology_reconciliation" in results:
+        accepted_ids = {
+            str(row["addition_id"])
+            for row in _rows(results["pathology_reconciliation"]["records"], "addition_decisions")
+            if row["disposition"] in {"new_research_concept", "context_only"}
+        }
+        for row in _rows(results["pathology_reconciliation"]["records"], "atomic_additions"):
+            if str(row["addition_id"]) not in accepted_ids:
+                continue
+            addition_nodes.append({
+                "node_id": row["addition_id"], "label": row["label"],
+                "node_type": row["provisional_type"], "description": row["claim"],
+                "source_ids": row["source_ids"], "source_adapter": "node_research",
+                "index_comparison": row["index_comparison"],
+            })
     return (
         [
             *_rows(source, "source_nodes"),
             *_landscape_source_nodes(results),
             *_coverage_source_nodes(results),
+            *addition_nodes,
         ],
         _rows(source, "source_edges"),
     )
@@ -136,7 +198,10 @@ def _curation_concepts(
     result = results.get("pathology_curation")
     if not isinstance(result, Mapping) or not isinstance(result.get("records"), Mapping):
         raise ProgramError("Pathology curation result is missing")
-    return _contract_rows(result["records"], "concepts", "concept_id")
+    return [
+        *_contract_rows(result["records"], "concepts", "concept_id"),
+        *_reconciliation_concepts(results),
+    ]
 
 
 def _research_concepts(
@@ -525,6 +590,10 @@ def _validate_asta_call_receipts(
     completed_searches = [
         row for row in search_operations if row["outcome"] == "completed"
     ]
+    if not completed_searches:
+        raise ProgramError(
+            "Asta coverage cannot complete until at least one relevance search succeeds"
+        )
     snippet_operations = [
         (paper_id, terminal)
         for tool, paper_id, terminal in operation_summaries
@@ -553,12 +622,7 @@ def _validate_asta_call_receipts(
             "Every paper passed to get_citations must also receive paper-restricted "
             f"snippet_search; missing={sorted(unevaluated_citation_targets)}"
         )
-    if not completed_searches:
-        if has_documents or has_proposals:
-            raise ProgramError(
-                "An unavailable relevance search cannot produce landscape documents or proposals"
-            )
-    elif any(row["result_count"] > 0 for row in completed_searches):
+    if any(row["result_count"] > 0 for row in completed_searches):
         tools_attempted = {tool for tool, _paper_id, _terminal in operation_summaries}
         missing = {"get_citations", "snippet_search"} - tools_attempted
         if missing:
@@ -639,7 +703,9 @@ def _validate_pathology_proposals(
     return documents, proposals
 
 
-def _validate_landscape_scan(records: Mapping[str, Any], gaps: list[Any]) -> None:
+def _validate_landscape_scan(
+    records: Mapping[str, Any], gaps: list[Any], required_gaps: list[str]
+) -> None:
     documents, proposals = _validate_pathology_proposals(
         records, "landscape_proposals", "the pathology landscape scan"
     )
@@ -649,12 +715,47 @@ def _validate_landscape_scan(records: Mapping[str, Any], gaps: list[Any]) -> Non
         has_documents=bool(documents),
         has_proposals=bool(proposals),
     )
+    checks = _contract_rows(records, "coverage_checks")
+    if not checks:
+        raise ProgramError("pathology_landscape_scan requires a completed coverage register")
+    seen: set[str] = set()
+    for index, check in enumerate(checks):
+        label = f"coverage_checks[{index}]"
+        gap = str(check["gap"]).strip()
+        if not gap or not str(check["reason"]).strip():
+            raise ProgramError(f"{label}.gap and reason must be non-empty")
+        if check["status"] not in ASTA_COVERAGE_STATUSES:
+            raise ProgramError(f"{label}.status must be one of {sorted(ASTA_COVERAGE_STATUSES)}")
+        normalized = " ".join(gap.split()).casefold()
+        if normalized in seen:
+            raise ProgramError("coverage_checks contains duplicate gaps")
+        seen.add(normalized)
+    missing = {" ".join(value.split()).casefold() for value in required_gaps} - seen
+    if missing:
+        raise ProgramError(f"coverage_checks omits required coverage areas: {sorted(missing)}")
 
 
-def _validate_coverage_expansion(records: Mapping[str, Any], gaps: list[Any]) -> None:
-    _validate_pathology_proposals(
+def _validate_coverage_expansion(
+    records: Mapping[str, Any], gaps: list[Any], expected_search_name: str
+) -> None:
+    documents, proposals = _validate_pathology_proposals(
         records, "coverage_proposals", "the pathology coverage expansion"
     )
+    receipts = _contract_rows(records, "undermind_search_receipts")
+    if len(receipts) != 1:
+        raise ProgramError("pathology_coverage_expansion requires one search completion receipt")
+    receipt = receipts[0]
+    if receipt["search_name"] != expected_search_name or receipt["outcome"] != "completed":
+        raise ProgramError("Undermind receipt must identify the completed supplied logical search")
+    for field in ("workspace_id", "search_path"):
+        if not isinstance(receipt[field], str) or not receipt[field].strip():
+            raise ProgramError(f"undermind_search_receipts[0].{field} must be non-empty")
+    for field in ("ranked_result_count", "pdf_count"):
+        value = receipt[field]
+        if type(value) is not int or value < 0:
+            raise ProgramError(f"undermind_search_receipts[0].{field} must be non-negative")
+    if documents and receipt["pdf_count"] < len(documents):
+        raise ProgramError("Undermind receipt pdf_count cannot omit retained full-text documents")
 
 
 def _validate_curation(
@@ -761,8 +862,55 @@ def _validate_curation(
         raise ProgramError(f"Treatment fields are forbidden in pathology curation: {forbidden}")
 
 
+def _validate_reconciliation(
+    records: Mapping[str, Any], results: Mapping[str, Mapping[str, Any]],
+    supplied_additions: list[Mapping[str, Any]],
+) -> None:
+    additions = _contract_rows(records, "atomic_additions", "addition_id")
+    if additions != supplied_additions:
+        raise ProgramError("atomic_additions must exactly copy the controller-supplied collection")
+    decisions = _contract_rows(records, "addition_decisions", "addition_id")
+    expected = {str(row["addition_id"]) for row in additions}
+    if {str(row["addition_id"]) for row in decisions} != expected:
+        raise ProgramError("addition_decisions must partition every supplied addition exactly once")
+    existing = {str(row["concept_id"]) for row in _research_concepts(results)}
+    research_refs = existing | {
+        str(row["addition_id"]) for row in decisions
+        if row["disposition"] == "new_research_concept"
+    }
+    for index, row in enumerate(decisions):
+        label = f"addition_decisions[{index}]"
+        if row["disposition"] not in {
+            "new_research_concept", "context_only", "existing_concept_detail", "unsupported"
+        }:
+            raise ProgramError(f"{label}.disposition is invalid")
+        if row["concept_type"] not in {"driver", "mechanism", "phenotype", "context"}:
+            raise ProgramError(f"{label}.concept_type is invalid")
+        if not str(row["preferred_label"]).strip() or not str(row["reason"]).strip():
+            raise ProgramError(f"{label}.preferred_label and reason must be non-empty")
+        related = row["related_concept_id"]
+        if row["disposition"] in {"context_only", "existing_concept_detail"}:
+            if str(related) not in research_refs or row["atomicity"] is not None:
+                raise ProgramError(f"{label} must reference one existing research concept")
+        elif related is not None:
+            raise ProgramError(f"{label}.related_concept_id must be null")
+        if row["disposition"] == "new_research_concept":
+            if row["concept_type"] == "context":
+                raise ProgramError(f"{label} cannot make a context type a research concept")
+            atomicity = _validate_exact_object(
+                row["atomicity"], set(CURATION_ATOMICITY_FIELDS), f"{label}.atomicity"
+            )
+            if not all(isinstance(atomicity[field], str) and atomicity[field].strip()
+                       for field in CURATION_ATOMICITY_FIELDS):
+                raise ProgramError(f"{label}.atomicity fields must be non-empty")
+        elif row["atomicity"] is not None:
+            raise ProgramError(f"{label}.atomicity must be null")
+
+
 def _validate_pathology_item(
-    records: Mapping[str, Any], item_id: str, results: Mapping[str, Mapping[str, Any]]
+    records: Mapping[str, Any], item_id: str, results: Mapping[str, Mapping[str, Any]],
+    prior_research_document_ids: list[str] | None = None,
+    atomic_additions_allowed: bool = True,
 ) -> None:
     documents = _validate_documents(records, canonical_ids=True)
     upstream_documents = [
@@ -783,7 +931,9 @@ def _validate_pathology_item(
     }
     if "" in upstream_document_ids:
         raise ProgramError("upstream documents.document_id is required")
-    if not {str(row["document_id"]) for row in documents} - upstream_document_ids:
+    if not {str(row["document_id"]) for row in documents} - (
+        upstream_document_ids | set(prior_research_document_ids or [])
+    ):
         raise ProgramError("pathology node research must retain newly researched evidence")
     profiles = _contract_rows(records, "profiles", "node_id")
     assertions = _contract_rows(records, "assertions")
@@ -808,9 +958,10 @@ def _validate_pathology_item(
         if not isinstance(profile[field], str) or not profile[field].strip():
             raise ProgramError(f"profiles[0].{field} must be non-empty text")
     curated_state = node["atomicity"]["primary_desired_biological_state"]
-    submitted_state = " ".join(profile["desired_biological_state"].split()).casefold()
-    if submitted_state != " ".join(curated_state.split()).casefold():
-        raise ProgramError("profile.desired_biological_state must preserve the curated primary desired state")
+    if profile["desired_biological_state"] != curated_state:
+        raise ProgramError(
+            "profiles[0].desired_biological_state must exactly copy the result-contract template"
+        )
     for field in PATHOLOGY_PROFILE_LIST_FIELDS:
         if not isinstance(profile[field], list):
             raise ProgramError(f"profiles[0].{field} must be a list")
@@ -834,9 +985,35 @@ def _validate_pathology_item(
     node_ids = {str(row["node_id"]) for row in source_nodes}
     source_ids = {
         *upstream_document_ids,
+        *map(str, node.get("source_ids", [])),
         *(str(row["document_id"]) for row in documents),
     }
     _references(profiles[0], "source_ids", source_ids, "profiles[0]")
+    additions = _contract_rows(records, "atomic_addition_proposals")
+    if additions and not atomic_additions_allowed:
+        raise ProgramError("supplemental research cannot reopen atomic reconciliation")
+    normalized_additions: set[tuple[str, str, str]] = set()
+    for index, addition in enumerate(additions):
+        label = f"atomic_addition_proposals[{index}]"
+        for field in (
+            "label", "provisional_type", "claim", "index_comparison",
+            "independence_rationale",
+        ):
+            if not isinstance(addition[field], str) or not addition[field].strip():
+                raise ProgramError(f"{label}.{field} must be non-empty text")
+        if addition["provisional_type"] not in LANDSCAPE_PROPOSAL_TYPES:
+            raise ProgramError(f"{label}.provisional_type is invalid")
+        key = tuple(_normalized_landscape_text(addition[field]) for field in (
+            "provisional_type", "label", "claim"
+        ))
+        if key in normalized_additions:
+            raise ProgramError("atomic_addition_proposals contains duplicates")
+        normalized_additions.add(key)
+        cited = _references(addition, "source_ids", source_ids, label)
+        if len(cited) != len(addition["source_ids"]):
+            raise ProgramError(f"{label}.source_ids must be unique")
+        if _LANDSCAPE_TREATMENT_PATTERN.search(" ".join(map(str, addition.values()))):
+            raise ProgramError(f"{label} is treatment-framed")
     observations = profile["established_pathology_observations"]
     if not isinstance(observations, list) or any(
         not isinstance(row, dict) for row in observations

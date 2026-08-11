@@ -205,47 +205,6 @@ def completed_asta_receipts(result_count=0):
     return receipts
 
 
-def unavailable_asta_receipts():
-    return [
-        asta_receipt(
-            "ASTA-OP-SEARCH-1",
-            "search_papers_by_relevance",
-            outcome="no_response",
-            elapsed_seconds=180,
-            result_count=None,
-            error_type="timeout",
-        ),
-        asta_receipt(
-            "ASTA-OP-SEARCH-2",
-            "search_papers_by_relevance",
-            outcome="no_response",
-            elapsed_seconds=180,
-            result_count=None,
-            error_type="timeout",
-        ),
-        asta_receipt(
-            "ASTA-OP-SEARCH-2",
-            "search_papers_by_relevance",
-            attempt=2,
-            request_profile="minimal",
-            outcome="no_response",
-            elapsed_seconds=180,
-            result_count=None,
-            error_type="timeout",
-        ),
-        asta_receipt(
-            "ASTA-OP-SEARCH-1",
-            "search_papers_by_relevance",
-            attempt=2,
-            request_profile="minimal",
-            outcome="no_response",
-            elapsed_seconds=180,
-            result_count=None,
-            error_type="timeout",
-        ),
-    ]
-
-
 class UniChemTransportTest(unittest.TestCase):
     def test_request_batches_cache_progress_and_resume(self):
         bodies = [{"compound": str(value), "type": "uci"} for value in range(3)]
@@ -570,14 +529,14 @@ class InstructionContractTest(unittest.TestCase):
         self.assertEqual(agents.casefold().count("commentary"), 1)
         self.assertNotIn("visible controller chat", skill)
 
-    def test_validation_failure_stops_instead_of_retrying_automatically(self):
+    def test_validation_failure_uses_targeted_same_packet_repair(self):
         skill = (Path(__file__).resolve().parents[1] / "SKILL.md").read_text(
             encoding="utf-8"
         )
         normalized = " ".join(skill.split())
-        self.assertIn("stop and report the exact validation error", normalized)
-        self.assertIn("Do not retry automatically", normalized)
-        self.assertNotIn("give the same packet to another new agent", normalized)
+        self.assertIn("amend only the reported invalid field and direct dependants", normalized)
+        self.assertIn("Validation never accepts or mutates a result", normalized)
+        self.assertIn("no user `continue` round trip is required", normalized)
 
 
 class SourceAdjudicationWorkflowTest(unittest.TestCase):
@@ -684,9 +643,15 @@ class SourceAdjudicationWorkflowTest(unittest.TestCase):
                 "records": {
                     "documents": [],
                     "landscape_proposals": [],
-                    "asta_call_receipts": unavailable_asta_receipts(),
+                    "asta_call_receipts": completed_asta_receipts(),
+                    "coverage_checks": [
+                        {"gap": gap, "status": "searched_unresolved",
+                         "reason": "The completed search found no additional mechanism."}
+                        for gap in json.loads(Path(action["packet_path"]).read_text())
+                        ["context"]["coverage_checklist"]
+                    ],
                 },
-                "gaps": ["Asta was unavailable in this test fixture."],
+                "gaps": [],
             }
             landscape_submission = root / "landscape.json"
             landscape_submission.write_text(
@@ -704,6 +669,16 @@ class SourceAdjudicationWorkflowTest(unittest.TestCase):
                 "records": {
                     "documents": [],
                     "coverage_proposals": [],
+                    "undermind_search_receipts": [{
+                        "workspace_id": "workspace-1",
+                        "search_name": json.loads(Path(action["packet_path"]).read_text())[
+                            "context"
+                        ]["undermind_search_name"],
+                        "search_path": "/workspaces/workspace-1/deep-searches/test",
+                        "outcome": "completed",
+                        "ranked_result_count": 0,
+                        "pdf_count": 0,
+                    }],
                 },
                 "gaps": [],
             }
@@ -764,6 +739,7 @@ class WorkflowTest(unittest.TestCase):
 
     def submit(self, action, records, *, add_evidence_passages=True):
         records = json.loads(json.dumps(records))
+        packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
         if action["next_task"] == "pathology_curation":
             for concept in records.get("concepts", []):
                 concept.setdefault(
@@ -776,13 +752,50 @@ class WorkflowTest(unittest.TestCase):
                     1 if records.get("documents") or records.get("landscape_proposals") else 0
                 ),
             )
+            records.setdefault("coverage_checks", [
+                {"gap": gap, "status": "searched_unresolved",
+                 "reason": "The completed searches resolved or bounded this coverage area."}
+                for gap in packet["context"]["coverage_checklist"]
+            ])
+        if action["next_task"] == "pathology_coverage_expansion":
+            records.setdefault("undermind_search_receipts", [{
+                "workspace_id": "workspace-1",
+                "search_name": packet["context"]["undermind_search_name"],
+                "search_path": "/workspaces/workspace-1/deep-searches/test",
+                "outcome": "completed",
+                "ranked_result_count": len(records.get("documents", [])),
+                "pdf_count": len(records.get("documents", [])),
+            }])
+        if action["next_task"] == "pathology_node_research":
+            records.setdefault("atomic_addition_proposals", [])
+        for review in records.get("reviews", []):
+            review.get("prior_art", {}).setdefault("search_status", "completed")
         if add_evidence_passages:
             for document in records.get("documents", []):
                 document.setdefault("evidence_passages", [{
                     "text": f"Inspectable evidence from {document['title']}",
                     "locator": "test fixture",
                 }])
-        packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
+        if action["next_task"] == "candidate_audit":
+            excluded = {str(row["candidate_id"]): row for row in records.get(
+                "excluded_candidates", [])}
+            dispositions = []
+            for entry in packet["context"]["candidate_evidence_index"]:
+                candidate_id = str(entry["candidate_id"])
+                exclusion = excluded.get(candidate_id, {})
+                for source_id in entry["source_ids"]:
+                    disposition = "irrelevant"
+                    if source_id in exclusion.get("source_ids", []):
+                        disposition = {
+                            "exact_disease_use": "qualifying_use",
+                            "qualifying_exact_disease_experiment": "qualifying_experiment",
+                        }.get(exclusion.get("reason_code"), disposition)
+                    dispositions.append({
+                        "candidate_id": candidate_id, "source_id": source_id,
+                        "disposition": disposition,
+                        "reason": "The retained source was classified against the exact-disease gate.",
+                    })
+            records.setdefault("evidence_dispositions", dispositions)
         result = {
             "stage": action["next_task"],
             "item_id": packet["item_id"],
@@ -815,6 +828,83 @@ class WorkflowTest(unittest.TestCase):
                 ]
             },
         )
+
+    def reach_reconciliation(self):
+        self.curate_single_process()
+        action = core.next_action(self.root)
+        packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
+        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
+        records["atomic_addition_proposals"] = [{
+            "label": "Distinct downstream repair defect",
+            "provisional_type": "mechanism",
+            "claim": "A separately variable repair defect contributes to pathology.",
+            "index_comparison": "No supplied concept represents the repair variable.",
+            "independence_rationale": "Repair and signalling have distinct biological directions.",
+            "source_ids": ["PMID:1"],
+        }]
+        self.submit(action, records)
+        action = core.next_action(self.root)
+        self.assertEqual(action["next_task"], "pathology_reconciliation")
+        return action, json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
+
+    def test_reconciliation_schedules_only_new_atomic_research(self):
+        action, packet = self.reach_reconciliation()
+        addition = packet["context"]["atomic_additions"][0]
+        self.submit(action, {
+            "atomic_additions": packet["context"]["atomic_additions"],
+            "addition_decisions": [{
+                "addition_id": addition["addition_id"],
+                "disposition": "new_research_concept",
+                "preferred_label": addition["label"],
+                "concept_type": "mechanism",
+                "reason": "The evidence supports an independent normalisable variable.",
+                "related_concept_id": None,
+                "atomicity": curation_atomicity(),
+            }],
+        })
+        research = core.next_action(self.root)
+        self.assertEqual(research["next_task"], "pathology_node_research")
+        self.assertEqual(research["next_item_id"], addition["addition_id"])
+        research_packet = json.loads(Path(research["packet_path"]).read_text())
+        self.assertEqual(research_packet["context"]["prior_research_document_ids"], ["PMID:1"])
+        self.assertEqual(
+            research_packet["result_contract"]["records"]["profiles"]["template"]
+            ["desired_biological_state"],
+            "restore the normal process",
+        )
+
+        records = self.profile(addition["addition_id"], "mechanism")
+        with self.assertRaisesRegex(core.ProgramError, "newly researched evidence"):
+            self.submit(research, records)
+        records["documents"][0]["document_id"] = "PMID:4"
+        records["profiles"][0]["source_ids"] = ["PMID:1", "PMID:4"]
+        records["atomic_addition_proposals"] = [{
+            "label": "Recursive addition", "provisional_type": "mechanism",
+            "claim": "A recursive claim.", "index_comparison": "Absent after reconciliation.",
+            "independence_rationale": "A second variable.", "source_ids": ["PMID:4"],
+        }]
+        with self.assertRaisesRegex(core.ProgramError, "cannot reopen atomic reconciliation"):
+            self.submit(research, records)
+        records["atomic_addition_proposals"] = []
+        self.submit(research, records)
+        self.assertEqual(core.next_action(self.root)["next_task"], "candidate_seed_research")
+
+    def test_reconciliation_existing_detail_does_not_create_an_item(self):
+        action, packet = self.reach_reconciliation()
+        addition = packet["context"]["atomic_additions"][0]
+        self.submit(action, {
+            "atomic_additions": packet["context"]["atomic_additions"],
+            "addition_decisions": [{
+                "addition_id": addition["addition_id"],
+                "disposition": "existing_concept_detail",
+                "preferred_label": addition["label"],
+                "concept_type": "mechanism",
+                "reason": "The detail belongs within the existing signalling concept.",
+                "related_concept_id": "NODE:1",
+                "atomicity": None,
+            }],
+        })
+        self.assertEqual(core.next_action(self.root)["next_task"], "candidate_seed_research")
 
     def test_pathology_research_source_index_has_canonical_publication_metadata(self):
         source = source_result()
@@ -1022,9 +1112,10 @@ class WorkflowTest(unittest.TestCase):
         packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
         candidate_contract = packet["result_contract"]["records"]["candidates"]
         self.assertEqual(
-            candidate_contract,
-            {"type": "list of objects", **contracts.ROW_SCHEMAS["candidates"]},
+            {key: candidate_contract[key] for key in contracts.ROW_SCHEMAS["candidates"]},
+            contracts.ROW_SCHEMAS["candidates"],
         )
+        self.assertIn("template", candidate_contract)
         self.assertIn("identifiers", candidate_contract["required_fields"])
         self.assertIn("assertion_ids", candidate_contract["required_fields"])
         self.assertIn("graph_rationale", candidate_contract["required_fields"])
@@ -1267,19 +1358,18 @@ class WorkflowTest(unittest.TestCase):
             },
         )
         rubric = audit_packet["result_contract"]["score_rubric"]
+        self.assertEqual(
+            audit_packet["result_contract"]["records"]["assessments"]["template"]
+            ["source_integrity"],
+            {"checks": []},
+        )
         self.assertIn("without weighting", rubric["method"])
         self.assertIn("not a probability", rubric["method"])
         self.assertIn("Counterevidence earns no points", rubric["method"])
         self.assertEqual(set(rubric["components"]), set(contracts.SCORE_COMPONENTS))
         self.assertEqual(contracts.MAX_SCORE, 80)
-        self.assertEqual(
-            set(rubric["components"]["mechanistic_bridge_plausibility"]["anchors"]),
-            {"5", "10", "15", "20"},
-        )
-        self.assertIn(
-            "long or speculative",
-            rubric["components"]["mechanistic_bridge_plausibility"]["anchors"]["5"],
-        )
+        self.assertIn("any integer from 1", rubric["method"])
+        self.assertNotIn("anchors", rubric["components"]["mechanistic_bridge_plausibility"])
         exclusion_policy = audit_packet["result_contract"]["exclusion_policy"]
         self.assertEqual(set(exclusion_policy), set(contracts.AUDIT_EXCLUSION_REASONS))
         qualifying_policy = exclusion_policy["qualifying_exact_disease_experiment"]
@@ -1365,8 +1455,15 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(provenance[0]["assertion_ids"], [selected_assertion_id])
         self.assertNotIn(assertions_by_relation["precedes"], provenance[0]["assertion_ids"])
         self.assertIn("contributes_to assertion", provenance[0]["graph_rationale"])
+        csv_lines = (self.root / "outputs" / "candidates.csv").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        self.assertNotIn("candidate_id", csv_lines[0].split(","))
+        self.assertEqual(csv_lines[0].split(",")[1], "name")
+        self.assertEqual(csv_lines[1].split(",")[1], "Drug")
         cards = (self.root / "outputs" / "candidate_cards.md").read_text(encoding="utf-8")
-        self.assertIn("## UNICHEM:1", cards)
+        self.assertIn("## Drug", cards)
+        self.assertNotIn("UNICHEM:1", cards)
         self.assertIn(
             "Aliases:\n- Drug hydrochloride (References: PMID:3)\n"
             "- Drug (References: PMID:2)",
@@ -1928,7 +2025,7 @@ class WorkflowTest(unittest.TestCase):
 
         records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
         records["profiles"][0]["desired_biological_state"] = "change a different state"
-        with self.assertRaisesRegex(core.ProgramError, "preserve the curated primary desired state"):
+        with self.assertRaisesRegex(core.ProgramError, "exactly copy the result-contract template"):
             self.submit(action, records)
 
         records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
@@ -1999,6 +2096,38 @@ class WorkflowTest(unittest.TestCase):
         )
         resumed_action = core.next_action(self.root)
         self.assertEqual(resumed_action["next_task"], "candidate_seed_research")
+
+    def test_preflight_reuses_the_ready_packet_and_does_not_accept(self):
+        self.curate_single_process()
+        action = core.next_action(self.root)
+        packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
+        expected_state = packet["result_contract"]["records"]["profiles"]["template"][
+            "desired_biological_state"
+        ]
+        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
+        records["atomic_addition_proposals"] = []
+        records["documents"][0]["evidence_passages"] = [{
+            "text": "Inspectable research evidence.", "locator": "results"
+        }]
+        records["profiles"][0]["desired_biological_state"] = "paraphrased state"
+        result = {
+            "stage": action["next_task"], "item_id": action["next_item_id"],
+            "packet_id": action["packet_id"], "status": "complete",
+            "records": records, "gaps": [], "notes": [],
+        }
+        path = self.root / "preflight.json"
+        path.write_text(json.dumps(result), encoding="utf-8")
+        with self.assertRaisesRegex(core.ProgramError, "exactly copy"):
+            core.validate_submission(self.root, path)
+        self.assertFalse(storage._item_result_path(
+            self.root, "pathology_node_research", action["next_item_id"]
+        ).exists())
+
+        result["records"]["profiles"][0]["desired_biological_state"] = expected_state
+        path.write_text(json.dumps(result), encoding="utf-8")
+        self.assertEqual(core.validate_submission(self.root, path)["valid"], True)
+        self.assertEqual(core.next_action(self.root)["packet_id"], action["packet_id"])
+        core.submit(self.root, path)
 
     def test_canonical_document_identifier_families(self):
         for document_id in (
@@ -2518,6 +2647,10 @@ class WorkflowTest(unittest.TestCase):
         batch = [{"concept_id": "NODE:A", "candidate_ids": ["DRUG-A", "DRUG-B"]}]
         with patch.object(candidate_rules, "_review_batches", return_value=batch):
             candidate_rules._validate_review_item(records, "NODE:A", {})
+            records["reviews"][0]["prior_art"]["search_status"] = "operational_failure"
+            with self.assertRaisesRegex(core.ProgramError, "authorized research transport"):
+                candidate_rules._validate_review_item(records, "NODE:A", {})
+            records["reviews"][0]["prior_art"]["search_status"] = "completed"
             records["reviews"][0]["aliases"] = [{"name": "Drug salt", "source_ids": []}]
             with self.assertRaisesRegex(core.ProgramError, "must be a non-empty list"):
                 candidate_rules._validate_review_item(records, "NODE:A", {})
@@ -2555,6 +2688,7 @@ class WorkflowTest(unittest.TestCase):
     def test_audit_validation_is_review_independent_and_preserves_longshots(self):
         second_review = self.review("DRUG-B")
         second_review["prior_art"] = {
+            "search_status": "completed",
             "status": "human_intervention",
             "summary": "An exact-disease human study was identified.",
             "findings": [{
@@ -2581,6 +2715,7 @@ class WorkflowTest(unittest.TestCase):
         )
         records = {
             "assessments": [longshot],
+            "evidence_dispositions": [],
             "excluded_candidates": [{
                 "candidate_id": "DRUG-B",
                 "reason_code": "unsupported_action",
@@ -2600,6 +2735,7 @@ class WorkflowTest(unittest.TestCase):
 
         all_excluded = {
             "assessments": [],
+            "evidence_dispositions": [],
             "excluded_candidates": [
                 {
                     "candidate_id": "DRUG-A",
@@ -2617,10 +2753,12 @@ class WorkflowTest(unittest.TestCase):
             "the audit excluded every reviewed candidate",
         )
 
-        invalid = json.loads(json.dumps(records))
-        invalid["assessments"][0]["component_scores"]["drug_action_confidence"]["value"] = 12
-        with self.assertRaisesRegex(core.ProgramError, "must be one of"):
-            audit._validate_candidate_audit(invalid, results)
+        arbitrary = json.loads(json.dumps(records))
+        arbitrary["assessments"][0]["component_scores"]["drug_action_confidence"]["value"] = 12
+        audit._validate_candidate_audit(arbitrary, results)
+        arbitrary["assessments"][0]["component_scores"]["drug_action_confidence"]["value"] = 21
+        with self.assertRaisesRegex(core.ProgramError, "integer from 1 through 20"):
+            audit._validate_candidate_audit(arbitrary, results)
 
         invalid = json.loads(json.dumps(records))
         invalid["excluded_candidates"] = []
@@ -2634,6 +2772,69 @@ class WorkflowTest(unittest.TestCase):
         second_review["prior_art"]["status"] = "established_use"
         audit._validate_candidate_audit(records, results)
         audit._validate_candidate_audit(independently_assessed, results)
+
+    def test_cross_dossier_candidate_evidence_forces_the_exclusion_gate(self):
+        documents = [
+            {"document_id": "PMID:1", "title": "Candidate action", "source": "test",
+             "evidence_passages": [{"text": "Action evidence.", "locator": "abstract"}]},
+            {"document_id": "PMID:2", "title": "Pregabalin exact-disease experiment", "source": "test",
+             "evidence_passages": [{"text": "Pregabalin was administered in a controlled disease model.", "locator": "results"}]},
+        ]
+        results = {
+            "evidence_graph": {"records": {}},
+            "candidate_identity": {"records": {}},
+            "candidate_seed_generation": {"records": {}},
+            "candidate_review": {"records": {
+                "documents": documents,
+                "reviews": [self.review("DRUG-PREG", "PMID:1"),
+                            self.review("DRUG-OTHER", "PMID:2")],
+            }},
+        }
+        candidates = [
+            {"candidate_id": "DRUG-PREG", "name": "Pregabalin"},
+            {"candidate_id": "DRUG-OTHER", "name": "Unrelated agent"},
+        ]
+        with patch.object(packets, "_canonical_candidates", return_value=candidates):
+            context = packets._packet_context(self.root, "candidate_audit", None, results)
+        preg_sources = next(
+            row["source_ids"] for row in context["candidate_evidence_index"]
+            if row["candidate_id"] == "DRUG-PREG"
+        )
+        self.assertIn("PMID:2", preg_sources)
+        dispositions = [
+            {"candidate_id": row["candidate_id"], "source_id": source_id,
+             "disposition": (
+                 "qualifying_experiment"
+                 if row["candidate_id"] == "DRUG-PREG" and source_id == "PMID:2"
+                 else "irrelevant"
+             ), "reason": "Classified against the exact-disease experiment gate."}
+            for row in context["candidate_evidence_index"] for source_id in row["source_ids"]
+        ]
+        records = {
+            "assessments": [], "evidence_dispositions": dispositions,
+            "excluded_candidates": [
+                {"candidate_id": "DRUG-PREG", "reason_code": "unsupported_action",
+                 "finding": "Wrong bounded disposition.", "source_ids": ["PMID:1"],
+                 "source_integrity": self.exclusion_integrity(["PMID:1"])},
+                {"candidate_id": "DRUG-OTHER", "reason_code": "unsupported_action",
+                 "finding": "No supported action.", "source_ids": ["PMID:2"],
+                 "source_integrity": self.exclusion_integrity(["PMID:2"])},
+            ],
+        }
+        with self.assertRaisesRegex(core.ProgramError, "must be excluded"):
+            audit._validate_candidate_audit(
+                records, results, context["source_index"], context["candidate_evidence_index"]
+            )
+        preg = records["excluded_candidates"][0]
+        preg.update({
+            "reason_code": "qualifying_exact_disease_experiment",
+            "finding": "The cross-dossier paper establishes a qualifying experiment.",
+            "source_ids": ["PMID:2"],
+            "source_integrity": self.exclusion_integrity(["PMID:2"]),
+        })
+        audit._validate_candidate_audit(
+            records, results, context["source_index"], context["candidate_evidence_index"]
+        )
 
     def test_counterevidence_is_unscored_and_cannot_restore_robustness_points(self):
         results = {
@@ -2659,7 +2860,8 @@ class WorkflowTest(unittest.TestCase):
         }]
         assessment["source_integrity"] = self.source_integrity(assessment)
         audit._validate_candidate_audit(
-            {"assessments": [assessment], "excluded_candidates": []}, results
+            {"assessments": [assessment], "excluded_candidates": [],
+             "evidence_dispositions": []}, results
         )
         self.assertEqual(ranking._final_score(assessment), baseline_score)
 
@@ -2671,7 +2873,8 @@ class WorkflowTest(unittest.TestCase):
         redundant["source_integrity"] = self.source_integrity(redundant)
         with self.assertRaisesRegex(core.ProgramError, "must not repeat"):
             audit._validate_candidate_audit(
-                {"assessments": [redundant], "excluded_candidates": []}, results
+                {"assessments": [redundant], "excluded_candidates": [],
+                 "evidence_dispositions": []}, results
             )
 
         redundant = json.loads(json.dumps(assessment))
@@ -2682,7 +2885,8 @@ class WorkflowTest(unittest.TestCase):
         redundant["source_integrity"] = self.source_integrity(redundant)
         with self.assertRaisesRegex(core.ProgramError, "must not repeat"):
             audit._validate_candidate_audit(
-                {"assessments": [redundant], "excluded_candidates": []}, results
+                {"assessments": [redundant], "excluded_candidates": [],
+                 "evidence_dispositions": []}, results
             )
 
         invalid = json.loads(json.dumps(assessment))
@@ -2693,7 +2897,8 @@ class WorkflowTest(unittest.TestCase):
         }
         with self.assertRaisesRegex(core.ProgramError, "unexpected fields"):
             audit._validate_candidate_audit(
-                {"assessments": [invalid], "excluded_candidates": []}, results
+                {"assessments": [invalid], "excluded_candidates": [],
+                 "evidence_dispositions": []}, results
             )
 
     def test_component_scores_require_minimal_verdict_coherence(self):
@@ -2726,12 +2931,14 @@ class WorkflowTest(unittest.TestCase):
         )["verdict"] = "contradicts"
 
         audit._validate_candidate_audit(
-            {"assessments": [assessment], "excluded_candidates": []}, results
+            {"assessments": [assessment], "excluded_candidates": [],
+             "evidence_dispositions": []}, results
         )
         assessment["component_scores"][component]["value"] = 20
         with self.assertRaisesRegex(core.ProgramError, "20-point component"):
             audit._validate_candidate_audit(
-                {"assessments": [assessment], "excluded_candidates": []}, results
+                {"assessments": [assessment], "excluded_candidates": [],
+                 "evidence_dispositions": []}, results
             )
 
         unsupported = self.assessment("DRUG-A")
@@ -2741,7 +2948,8 @@ class WorkflowTest(unittest.TestCase):
         )["verdict"] = "does_not_support"
         with self.assertRaisesRegex(core.ProgramError, "supports or partly_supports"):
             audit._validate_candidate_audit(
-                {"assessments": [unsupported], "excluded_candidates": []}, results
+                {"assessments": [unsupported], "excluded_candidates": [],
+                 "evidence_dispositions": []}, results
             )
 
     def test_source_integrity_checks_every_cited_use_and_cannot_defer_judgment(self):
@@ -2763,7 +2971,8 @@ class WorkflowTest(unittest.TestCase):
         ]
         assessment["source_integrity"] = self.source_integrity(assessment)
         audit._validate_candidate_audit(
-            {"assessments": [assessment], "excluded_candidates": []}, results
+            {"assessments": [assessment], "excluded_candidates": [],
+             "evidence_dispositions": []}, results
         )
         scopes = {
             check["scope"] for check in assessment["source_integrity"]["checks"]
@@ -2771,21 +2980,23 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("aliases[0]", scopes)
         self.assertIn("aliases[1]", scopes)
 
+        not_object = json.loads(json.dumps(assessment))
+        not_object["source_integrity"] = []
+        with self.assertRaisesRegex(core.ProgramError, "source_integrity must be an object"):
+            audit._validate_candidate_audit(
+                {"assessments": [not_object], "excluded_candidates": [],
+                 "evidence_dispositions": []}, results
+            )
+
         prefixed = json.loads(json.dumps(assessment))
         for check in prefixed["source_integrity"]["checks"]:
             if check["scope"] in contracts.SCORE_COMPONENTS:
                 check["scope"] = f"component_scores.{check['scope']}"
-        audit._validate_candidate_audit(
-            {"assessments": [prefixed], "excluded_candidates": []}, results
-        )
-        cards = evidence_cards._evidence_card_rows(
-            [{"candidate_id": "DRUG-A"}],
-            {"candidate_audit": {"records": {"assessments": [prefixed]}}},
-        )
-        self.assertNotIn(
-            "component_scores.",
-            " ".join(check["scope"] for check in cards[0]["source_integrity"]["checks"]),
-        )
+        with self.assertRaisesRegex(core.ProgramError, "cover every cited source use"):
+            audit._validate_candidate_audit(
+                {"assessments": [prefixed], "excluded_candidates": [],
+                 "evidence_dispositions": []}, results
+            )
 
         generic = json.loads(json.dumps(assessment))
         generic["source_integrity"] = {
@@ -2795,14 +3006,16 @@ class WorkflowTest(unittest.TestCase):
         }
         with self.assertRaisesRegex(core.ProgramError, "missing fields: checks"):
             audit._validate_candidate_audit(
-                {"assessments": [generic], "excluded_candidates": []}, results
+                {"assessments": [generic], "excluded_candidates": [],
+                 "evidence_dispositions": []}, results
             )
 
         missing = json.loads(json.dumps(assessment))
         missing["source_integrity"]["checks"].pop()
         with self.assertRaisesRegex(core.ProgramError, "cover every cited source use"):
             audit._validate_candidate_audit(
-                {"assessments": [missing], "excluded_candidates": []}, results
+                {"assessments": [missing], "excluded_candidates": [],
+                 "evidence_dispositions": []}, results
             )
 
         deferred = json.loads(json.dumps(assessment))
@@ -2811,7 +3024,8 @@ class WorkflowTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(core.ProgramError, "not defer verification"):
             audit._validate_candidate_audit(
-                {"assessments": [deferred], "excluded_candidates": []}, results
+                {"assessments": [deferred], "excluded_candidates": [],
+                 "evidence_dispositions": []}, results
             )
 
         deferred["source_integrity"]["checks"][0]["finding"] = (
@@ -2819,14 +3033,16 @@ class WorkflowTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(core.ProgramError, "not defer verification"):
             audit._validate_candidate_audit(
-                {"assessments": [deferred], "excluded_candidates": []}, results
+                {"assessments": [deferred], "excluded_candidates": [],
+                 "evidence_dispositions": []}, results
             )
 
         no_content = json.loads(json.dumps(results))
         del no_content["candidate_review"]["records"]["documents"][0]["evidence_passages"]
         with self.assertRaisesRegex(core.ProgramError, "no inspectable content"):
             audit._validate_candidate_audit(
-                {"assessments": [assessment], "excluded_candidates": []}, no_content
+                {"assessments": [assessment], "excluded_candidates": [],
+                 "evidence_dispositions": []}, no_content
             )
 
         null_content = json.loads(json.dumps(results))
@@ -2835,7 +3051,8 @@ class WorkflowTest(unittest.TestCase):
         ] = [{"text": None, "locator": None}]
         with self.assertRaisesRegex(core.ProgramError, "no inspectable content"):
             audit._validate_candidate_audit(
-                {"assessments": [assessment], "excluded_candidates": []}, null_content
+                {"assessments": [assessment], "excluded_candidates": [],
+                 "evidence_dispositions": []}, null_content
             )
 
         duplicate_publication = json.loads(json.dumps(assessment))
@@ -2859,7 +3076,8 @@ class WorkflowTest(unittest.TestCase):
         ]
         with self.assertRaisesRegex(core.ProgramError, "more than once"):
             audit._validate_candidate_audit(
-                {"assessments": [duplicate_publication], "excluded_candidates": []},
+                {"assessments": [duplicate_publication], "excluded_candidates": [],
+                 "evidence_dispositions": []},
                 results,
                 source_index,
             )
@@ -2877,7 +3095,7 @@ class WorkflowTest(unittest.TestCase):
             for candidate_id in ("DRUG-A", "DRUG-B", "DRUG-C")
         ]
         high = {component: 20 for component in contracts.SCORE_COMPONENTS}
-        medium = {component: 10 for component in contracts.SCORE_COMPONENTS}
+        medium = dict(zip(contracts.SCORE_COMPONENTS, (12, 17, 9, 14)))
         results = {
             "candidate_audit": {"records": {
                 "assessments": [
@@ -2893,7 +3111,7 @@ class WorkflowTest(unittest.TestCase):
 
         self.assertEqual(
             [(row["candidate_id"], row["rank"], row["final_score"]) for row in rows],
-            [("DRUG-A", 1, 80), ("DRUG-B", 1, 80), ("DRUG-C", 2, 40)],
+            [("DRUG-A", 1, 80), ("DRUG-B", 1, 80), ("DRUG-C", 2, 52)],
         )
 
     def test_card_renderer_uses_actual_id_and_omits_empty_optional_sections(self):
@@ -2907,6 +3125,7 @@ class WorkflowTest(unittest.TestCase):
         }
         payload = evidence_cards._cards_bytes([{
             "drug_id": "CANDIDATE-UNRESOLVED",
+            "name": "Candidate drug",
             "aliases": [],
             "score": 40,
             "components": components,
@@ -2925,7 +3144,8 @@ class WorkflowTest(unittest.TestCase):
             },
         }]).decode("utf-8")
 
-        self.assertIn("## CANDIDATE-UNRESOLVED", payload)
+        self.assertIn("## Candidate drug", payload)
+        self.assertNotIn("CANDIDATE-UNRESOLVED", payload)
         self.assertIn("Score: 40/80", payload)
         self.assertIn("Source verification: 5 cited uses checked (4 supports, 1 partly supports)", payload)
         self.assertIn(
@@ -3103,6 +3323,7 @@ class WorkflowTest(unittest.TestCase):
             "aliases": [],
             "why_not": [],
             "prior_art": {
+                "search_status": "completed",
                 "status": "none_found",
                 "summary": "No exact-disease experimentation was found in the bounded search.",
                 "findings": [],

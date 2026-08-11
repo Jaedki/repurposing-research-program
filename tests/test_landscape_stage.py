@@ -258,6 +258,12 @@ class LandscapeWorkflowTest(unittest.TestCase):
 
     def submit(self, records, gaps=None, extra_result=None, *, advance_coverage=True):
         records = json.loads(json.dumps(records))
+        packet = json.loads(Path(self.action["packet_path"]).read_text(encoding="utf-8"))
+        records.setdefault("coverage_checks", [
+            {"gap": gap, "status": "searched_unresolved",
+             "reason": "The completed searches explicitly bounded this coverage area."}
+            for gap in packet["context"]["coverage_checklist"]
+        ])
         records.setdefault(
             "asta_call_receipts",
             completed_asta_receipts(
@@ -280,6 +286,9 @@ class LandscapeWorkflowTest(unittest.TestCase):
         status = core.submit(self.root, path)
         if advance_coverage and status["next_task"] == "pathology_coverage_expansion":
             action = core.next_action(self.root)
+            coverage_packet = json.loads(
+                Path(action["packet_path"]).read_text(encoding="utf-8")
+            )
             coverage_result = {
                 "stage": "pathology_coverage_expansion",
                 "item_id": None,
@@ -288,6 +297,14 @@ class LandscapeWorkflowTest(unittest.TestCase):
                 "records": {
                     "documents": [],
                     "coverage_proposals": [],
+                    "undermind_search_receipts": [{
+                        "workspace_id": "workspace-1",
+                        "search_name": coverage_packet["context"]["undermind_search_name"],
+                        "search_path": "/workspaces/workspace-1/deep-searches/test",
+                        "outcome": "completed",
+                        "ranked_result_count": 0,
+                        "pdf_count": 0,
+                    }],
                 },
                 "gaps": [],
             }
@@ -310,11 +327,20 @@ class LandscapeWorkflowTest(unittest.TestCase):
 
     def submit_coverage(self, action, records, gaps=None):
         records = json.loads(json.dumps(records))
+        packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
         for row in records.get("documents", []):
             row.setdefault("evidence_passages", [{
                 "text": f"Inspectable pathology evidence from {row['title']}.",
                 "locator": "results",
             }])
+        records.setdefault("undermind_search_receipts", [{
+            "workspace_id": "workspace-1",
+            "search_name": packet["context"]["undermind_search_name"],
+            "search_path": "/workspaces/workspace-1/deep-searches/test",
+            "outcome": "completed",
+            "ranked_result_count": len(records.get("documents", [])),
+            "pdf_count": len(records.get("documents", [])),
+        }])
         result = {
             "stage": "pathology_coverage_expansion",
             "item_id": None,
@@ -348,7 +374,7 @@ class LandscapeWorkflowTest(unittest.TestCase):
         )
         self.assertEqual(
             set(packet["result_contract"]["records"]),
-            {"documents", "landscape_proposals", "asta_call_receipts"},
+            {"documents", "landscape_proposals", "asta_call_receipts", "coverage_checks"},
         )
         self.assertEqual(
             packet["result_contract"]["allowed_top_level_fields"],
@@ -376,9 +402,10 @@ class LandscapeWorkflowTest(unittest.TestCase):
         ))
         document_contract = packet["result_contract"]["records"]["documents"]
         self.assertEqual(
-            document_contract,
-            {"type": "list of objects", **contracts.RESEARCH_DOCUMENT_CONTRACT},
+            {key: document_contract[key] for key in contracts.RESEARCH_DOCUMENT_CONTRACT},
+            contracts.RESEARCH_DOCUMENT_CONTRACT,
         )
+        self.assertIn("template", document_contract)
         self.assertEqual(
             document_contract["required_fields"],
             ["document_id", "title", "source", "evidence_passages"],
@@ -393,6 +420,11 @@ class LandscapeWorkflowTest(unittest.TestCase):
             },
         )
         self.assertIn("coverage_checklist", packet["context"])
+        self.assertEqual(
+            [row["gap"] for row in packet["result_contract"]["result_template"]
+             ["records"]["coverage_checks"]],
+            packet["context"]["coverage_checklist"],
+        )
         self.assertTrue(any("embedded" in rule for rule in packet["rules"]))
 
     def test_undermind_packet_receives_complete_post_asta_index(self):
@@ -414,12 +446,22 @@ class LandscapeWorkflowTest(unittest.TestCase):
         })
         self.assertEqual(
             set(packet["result_contract"]["records"]),
-            {"documents", "coverage_proposals"},
+            {"documents", "coverage_proposals", "undermind_search_receipts"},
         )
+        receipt_template = packet["result_contract"]["records"][
+            "undermind_search_receipts"
+        ]["template"]
+        self.assertEqual(receipt_template["search_name"], packet["context"]["undermind_search_name"])
+        self.assertEqual(receipt_template["outcome"], "completed")
         rules = " ".join(packet["rules"])
-        self.assertIn("one treatment-blind deep search", rules)
-        self.assertIn("complete ranked result", rules)
-        self.assertIn("at most 20 papers", rules)
+        self.assertIn("get_orientation", rules)
+        self.assertIn("create_workspace", rules)
+        self.assertIn("inspect_deep_searches", rules)
+        self.assertIn("it is asynchronous and should return immediately", rules)
+        self.assertIn("Never interrupt", rules)
+        self.assertIn("relaunch the same logical name", rules)
+        self.assertIn("created no search does not consume", rules)
+        self.assertIn("one read_pdfs call", rules)
 
     def test_undermind_proposal_becomes_equal_provenance_curation_input(self):
         action = self.coverage_action()
@@ -507,16 +549,17 @@ class LandscapeWorkflowTest(unittest.TestCase):
                 )],
             })
 
-    def test_undermind_failure_gap_is_nonblocking(self):
+    def test_undermind_failure_cannot_advance_without_completion_receipt(self):
         action = self.coverage_action()
         records = {
             "documents": [],
             "coverage_proposals": [],
+            "undermind_search_receipts": [],
         }
-        status = self.submit_coverage(
-            action, records, gaps=["Undermind authentication was unavailable."]
-        )
-        self.assertEqual(status["next_task"], "pathology_curation")
+        with self.assertRaisesRegex(core.ProgramError, "completion receipt"):
+            self.submit_coverage(
+                action, records, gaps=["Undermind authentication was unavailable."]
+            )
 
     def test_stop_decision_waits_for_undermind_coverage(self):
         sparse = source_result()
@@ -559,13 +602,13 @@ class LandscapeWorkflowTest(unittest.TestCase):
         self.assertIn("180 seconds", runtime_rules)
         self.assertIn("smallest useful limit", runtime_rules)
         self.assertIn("stable broad disease-mechanism relevance search", runtime_rules)
-        self.assertIn("1 to 3 short searches", runtime_rules)
-        self.assertIn("finish a cycle before starting the next search", runtime_rules)
+        self.assertIn("focused searches for each gap", runtime_rules)
+        self.assertIn("pending queue", runtime_rules)
         self.assertIn("limit=50", runtime_rules)
         self.assertIn("limit=3", runtime_rules)
         self.assertIn("structuredContent.result[].citingPaper", runtime_rules)
-        self.assertIn("at most 30 unique originals", runtime_rules)
-        self.assertIn("no cross-search pending paper queue", runtime_rules)
+        self.assertIn("there is no fixed focused-search or proposal count", runtime_rules)
+        self.assertIn("preserve the remaining queue", runtime_rules)
         self.assertIn("if an ID is no longer visible", runtime_rules)
         self.assertIn("duplicate, refinement, or new", runtime_rules)
         self.assertIn("Title-only or explicitly hypothetical evidence", runtime_rules)
@@ -581,7 +624,8 @@ class LandscapeWorkflowTest(unittest.TestCase):
         self.assertIn("every relevance paper passed to get_citations", field_rules)
         self.assertIn("every distinct citingPaper returned", field_rules)
         self.assertIn("positive completed relevance search", field_rules)
-        self.assertIn("if no relevance search completes", field_rules)
+        self.assertIn("at least one relevance search completes", field_rules)
+        self.assertIn("coverage_checks includes every context.coverage_checklist area", field_rules)
         self.assertIn("terminal call failure", field_rules)
         self.assertNotIn("calls sequentially", field_rules)
         self.assertNotIn("smallest useful limit", field_rules)
@@ -618,6 +662,24 @@ class LandscapeWorkflowTest(unittest.TestCase):
 
         self.assertRegex(first["node_id"], r"^ASTA-NODE-[A-F0-9]{24}$")
         self.assertEqual(first["node_id"], second["node_id"])
+
+    def test_landscape_accepts_more_than_four_supported_mechanism_nodes(self):
+        records = {
+            "documents": [
+                document(f"PMID:{300 + index}", f"Mechanism evidence {index}")
+                for index in range(1, 7)
+            ],
+            "landscape_proposals": [
+                proposal(
+                    f"Distinct mechanism {index}",
+                    f"Disease-linked abnormal process {index} impairs cellular function.",
+                    f"PMID:{300 + index}",
+                )
+                for index in range(1, 7)
+            ],
+        }
+        self.submit(records)
+        self.assertEqual(len(pathology._landscape_source_nodes(self.accepted_results())), 6)
 
     def test_document_evidence_shape_and_supported_asta_identifiers_validate(self):
         semantic_scholar_id = "S2:" + "a" * 40
@@ -741,17 +803,16 @@ class LandscapeWorkflowTest(unittest.TestCase):
                 ],
             })
 
-    def test_empty_scan_continues_existing_source_workflow(self):
-        status = self.submit(
-            {
-                "documents": [],
-                "landscape_proposals": [],
-                "asta_call_receipts": unavailable_asta_receipts(),
-            },
-            gaps=["Asta was unavailable; Monarch and DisMech remain available."],
-        )
-        self.assertEqual(status["state"], "needs_agent")
-        self.assertEqual(status["next_task"], "pathology_curation")
+    def test_empty_scan_requires_one_completed_search(self):
+        with self.assertRaisesRegex(core.ProgramError, "at least one relevance search succeeds"):
+            self.submit(
+                {
+                    "documents": [],
+                    "landscape_proposals": [],
+                    "asta_call_receipts": unavailable_asta_receipts(),
+                },
+                gaps=["Asta was unavailable; Monarch and DisMech remain available."],
+            )
 
     def test_positive_search_cannot_abandon_citation_and_snippet_work(self):
         with self.assertRaisesRegex(
@@ -768,6 +829,24 @@ class LandscapeWorkflowTest(unittest.TestCase):
             "documents": [],
             "landscape_proposals": [],
             "asta_call_receipts": completed_asta_receipts(0)[:1],
+        })
+        self.assertEqual(status["next_task"], "pathology_curation")
+
+    def test_coverage_drives_more_than_four_searches_and_requires_terminal_checks(self):
+        receipts = [
+            asta_receipt(
+                f"ASTA-OP-SEARCH-{index}", "search_papers_by_relevance", result_count=0
+            )
+            for index in range(1, 7)
+        ]
+        with self.assertRaisesRegex(core.ProgramError, "completed coverage register"):
+            self.submit({
+                "documents": [], "landscape_proposals": [],
+                "asta_call_receipts": receipts, "coverage_checks": [],
+            })
+        status = self.submit({
+            "documents": [], "landscape_proposals": [],
+            "asta_call_receipts": receipts,
         })
         self.assertEqual(status["next_task"], "pathology_curation")
 
@@ -1167,6 +1246,7 @@ class LandscapeWorkflowTest(unittest.TestCase):
                     "source_ids": ["PMID:101"],
                 }],
                 "assertions": [],
+                "atomic_addition_proposals": [],
             },
             "gaps": [],
         }
@@ -1355,7 +1435,7 @@ class DocumentationContractTest(unittest.TestCase):
         self.assertIn("S2:` followed by 40 hexadecimal characters", packet_contract)
         self.assertIn("Asta is not a Python source adapter", adapters)
         self.assertIn("Undermind is also an agent-used MCP service", adapters)
-        self.assertIn("up to twenty decision-relevant PDFs", packet_contract)
+        self.assertIn("interrupts the asynchronous launch", packet_contract)
         self.assertIn("ASTA_AI2_API_KEY", skill)
         self.assertIn("ASTA_AI2_API_KEY", adapters)
 
@@ -1395,6 +1475,11 @@ class SparseSourceWorkflowTest(unittest.TestCase):
                         )
                     ],
                     "asta_call_receipts": completed_asta_receipts(1),
+                    "coverage_checks": [
+                        {"gap": gap, "status": "resolved",
+                         "reason": "The completed search covered this pathology area."}
+                        for gap in packet["context"]["coverage_checklist"]
+                    ],
                 },
                 "gaps": [],
             }
@@ -1403,6 +1488,9 @@ class SparseSourceWorkflowTest(unittest.TestCase):
             status = core.submit(root, path)
             self.assertEqual(status["next_task"], "pathology_coverage_expansion")
             action = core.next_action(root)
+            coverage_packet = json.loads(
+                Path(action["packet_path"]).read_text(encoding="utf-8")
+            )
             coverage = {
                 "stage": "pathology_coverage_expansion",
                 "item_id": None,
@@ -1411,6 +1499,14 @@ class SparseSourceWorkflowTest(unittest.TestCase):
                 "records": {
                     "documents": [],
                     "coverage_proposals": [],
+                    "undermind_search_receipts": [{
+                        "workspace_id": "workspace-1",
+                        "search_name": coverage_packet["context"]["undermind_search_name"],
+                        "search_path": "/workspaces/workspace-1/deep-searches/test",
+                        "outcome": "completed",
+                        "ranked_result_count": 0,
+                        "pdf_count": 0,
+                    }],
                 },
                 "gaps": [],
             }
