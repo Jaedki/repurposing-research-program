@@ -536,7 +536,6 @@ class InstructionContractTest(unittest.TestCase):
         normalized = " ".join(skill.split())
         self.assertIn("amend only the reported invalid field and direct dependants", normalized)
         self.assertIn("Validation never accepts or mutates a result", normalized)
-        self.assertIn("no user `continue` round trip is required", normalized)
 
 
 class SourceAdjudicationWorkflowTest(unittest.TestCase):
@@ -1603,6 +1602,12 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("do not create additional graph nodes", pathology_guidance)
         self.assertIn("evidence_context", pathology_guidance)
         self.assertIn("Python assigns the final assertion ID", pathology_guidance)
+        self.assertIn("Life Science Research skills: Reactome", pathology_guidance)
+        self.assertIn("Use NCBI Entrez and PMC", pathology_guidance)
+        landscape_guidance = contracts.STAGE_GUIDANCE["pathology_landscape_scan"]["task"]
+        self.assertIn("coverage-gap register from the Monarch and DisMech index", landscape_guidance)
+        self.assertIn("Turn the resulting questions into the", landscape_guidance)
+        self.assertIn("prescribed broad and focused Asta searches", landscape_guidance)
         seed_guidance = contracts.STAGE_GUIDANCE["candidate_seed_research"]["task"]
         self.assertIn("assertion_ids", seed_guidance)
         self.assertIn("graph_rationale", seed_guidance)
@@ -1610,6 +1615,9 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("neighbouring node", seed_guidance)
         self.assertIn("cross-node use is never mandatory", seed_guidance)
         self.assertIn("do not use disease-specific drug literature", seed_guidance)
+        self.assertIn("Life Science Research Reactome and UniProt skills", seed_guidance)
+        self.assertIn("Use ChEMBL", seed_guidance)
+        self.assertIn("BindingDB", seed_guidance)
         self.assertIn(
             "evidence dossier", contracts.STAGE_GUIDANCE["candidate_evidence_review"]["task"]
         )
@@ -1617,6 +1625,11 @@ class WorkflowTest(unittest.TestCase):
             "exact-disease prior art",
             contracts.STAGE_GUIDANCE["candidate_evidence_review"]["task"],
         )
+        review_guidance = contracts.STAGE_GUIDANCE["candidate_evidence_review"]["task"]
+        self.assertIn("Life Science Research ChEMBL skill", review_guidance)
+        self.assertIn("Use NCBI Entrez", review_guidance)
+        self.assertIn("use ClinicalTrials.gov", review_guidance)
+        self.assertIn("PharmGKB", review_guidance)
         self.assertIn(
             "unresolved identity", " ".join(contracts.FIELD_RULES["candidate_audit"])
         )

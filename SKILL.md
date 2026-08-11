@@ -37,8 +37,8 @@ Install the pinned runtime dependencies once with `python -m pip install -r requ
 
    If validation rejects a noncanonical result, preserve its research, amend only the reported
    invalid field and direct dependants, and validate the same ready packet again. Validation never
-   accepts or mutates a result. Escalate only a controller defect, unavailable authorized transport,
-   or a scientific gap that cannot satisfy the contract; no user `continue` round trip is required.
+   accepts or mutates a result. Escalate a controller defect or a scientific gap that cannot satisfy
+   the contract. If authorized transport is unavailable, keep the packet active and report the blocker.
 
 4. Repeat `next -> new agent -> submit` as foreground actions. Do not replace this loop with a persistent or background supervisor. The controller progresses through:
 
@@ -70,10 +70,10 @@ Install the pinned runtime dependencies once with `python -m pip install -r requ
    python scripts/orchestrate_program.py build <run-folder>
    ```
 
-Use `status` at any time. To resume a run created under the current objective and stage sequence,
-call `next` on its run folder. Start a fresh run after either contract changes. Accepted results are
-immutable and content-addressed. Lean orchestration is not a limit on research depth: workers
-should investigate each packet as deeply as the evidence permits.
+Use `status` at any time. Resume only a run whose objective, stage sequence, and result contracts
+match the current controller; otherwise start a fresh run. Accepted results are immutable and
+content-addressed. Lean orchestration is not a limit on research depth: workers should investigate
+each packet as deeply as the evidence permits.
 
 ## Hard boundaries
 
@@ -93,8 +93,8 @@ should investigate each packet as deeply as the evidence permits.
   the targeted gap as filled or refined, already covered, or searched but unresolved. Coverage is
   saturated only when every registered gap has been searched or merged into a searched equivalent
   and the updated index exposes no new distinct in-scope gap. A fixed paper count, an empty result,
-  or a streak of duplicates alone never establishes saturation. There is no fixed search, proposal,
-  or original-paper cap; unresolved gaps remain explicit rather than being hidden by a numerical stop.
+  or a streak of duplicates alone never establishes saturation. No fixed search, proposal, or
+  original-paper cap applies; unresolved gaps remain explicit.
   A material refinement must change the abnormal state, causal step or level, biological direction,
   or disease-relevant context enough to change the atomic pathology concept or its later desired
   biological state; a new model, assay, population, biomarker, or wording alone is not material.
@@ -200,7 +200,7 @@ should investigate each packet as deeply as the evidence permits.
   pathology sources; the full graph remains available to the audit.
 - Candidate evidence reviews use the frozen graph as disease context, retrieve primary or authoritative drug facts, and build cited dossiers without scoring, ranking, or excluding candidates.
 - Exact-disease prior-art research must complete through an authorized transport before a dossier
-  can be accepted; an operational search failure is not scientific `unclear` status.
+  can be accepted. Until then, keep the packet active and leave `prior_art.search_status` incomplete.
 - The independent audit receives the frozen graph, candidate-identity result, dossiers, and retained source content. It reads and weighs that evidence rather than restating a review and may not search, add evidence, or send a candidate for re-review.
 - Before scoring, the audit classifies every controller-indexed candidate/source pair, including
   candidate evidence retained under a different dossier. Qualifying use or experimentation forces

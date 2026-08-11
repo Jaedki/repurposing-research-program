@@ -65,8 +65,8 @@ passages; search and account data remain transient.
 `coverage_proposals` use the same scientific shape as Asta proposals. One non-secret completion
 receipt records workspace, search name and path, ranked-result count, and PDF count. Python validates their
 evidence and assigns `UNDERMIND-NODE-<hash>` IDs; the final curator treats them on the same terms as
-all other source nodes and alone decides concept identity. Operational failure cannot masquerade as
-scientific completion and leaves the same packet ready for recovery.
+all other source nodes and alone decides concept identity. The packet remains active until its
+search receipt records a completed outcome.
 
 ## Monarch Initiative
 
