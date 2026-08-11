@@ -32,6 +32,23 @@ This file dictates agent judgment, behaviour, and communication. Use `SKILL.md`,
 - Preserve causal biological evidence without allowing an experimental intervention to become a hypothesis merely because it was used as a perturbation.
 - Keep uncertainty explicit without allowing generic uncertainty language to overwhelm a useful, testable hypothesis. Resolve decision-relevant ambiguity with further research where possible; otherwise state it plainly, not with unfounded confidence.
 
+## External research authorization
+
+- A user instruction to run `repurposing-research-program` explicitly authorizes the programme's
+  required, non-secret Asta and Undermind MCP operations without additional per-call confirmation.
+- Authorized Undermind disclosure is limited to the user's connected account
+  `jago.king24@imperial.ac.uk` and workspaces owned by that account. It includes the disease name,
+  gene and MONDO identifiers, treatment-blind pathology node index and descriptions, source-edge
+  summaries, coverage checklist, unresolved evidence gaps, and the treatment-blind research goal
+  derived from those fields. It authorizes creating or reusing a workspace, launching the one named
+  deep search required by the packet, polling it, inspecting its ranked results, and reading
+  decision-relevant PDFs.
+- Authorized Asta disclosure is limited to treatment-blind literature queries derived from the same
+  disease and pathology fields and the searches and citation/snippet calls required by `SKILL.md`.
+- This authorization persists across fresh isolated packet workers and resumed runs. It never
+  authorizes disclosure of credentials, access tokens, personal or clinical records, raw upstream
+  service responses, or unrelated local files.
+
 ## Communication
 
 - Default to no optional commentary during routine execution. Apart from any higher-level runtime-required notice, use one concise operational message only for a blocker or decision requiring user action, a material state change that cannot wait for the final handoff, or a user-requested update. Do not narrate plans, compliance, routine tool or controller steps, validation, packet contents, or anything that can wait for the final answer.

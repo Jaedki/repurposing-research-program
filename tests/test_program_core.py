@@ -675,7 +675,7 @@ class SourceAdjudicationWorkflowTest(unittest.TestCase):
                         ]["undermind_search_name"],
                         "search_path": "/workspaces/workspace-1/deep-searches/test",
                         "outcome": "completed",
-                        "ranked_result_count": 0,
+                        "ranked_result_count": 1,
                         "pdf_count": 0,
                     }],
                 },
@@ -762,7 +762,7 @@ class WorkflowTest(unittest.TestCase):
                 "search_name": packet["context"]["undermind_search_name"],
                 "search_path": "/workspaces/workspace-1/deep-searches/test",
                 "outcome": "completed",
-                "ranked_result_count": len(records.get("documents", [])),
+                "ranked_result_count": max(1, len(records.get("documents", []))),
                 "pdf_count": len(records.get("documents", [])),
             }])
         if action["next_task"] == "pathology_node_research":

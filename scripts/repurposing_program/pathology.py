@@ -754,6 +754,11 @@ def _validate_coverage_expansion(
         value = receipt[field]
         if type(value) is not int or value < 0:
             raise ProgramError(f"undermind_search_receipts[0].{field} must be non-negative")
+    if receipt["ranked_result_count"] == 0:
+        raise ProgramError(
+            "Undermind completion receipt must report at least one ranked result; "
+            "an empty search keeps pathology_coverage_expansion active"
+        )
     if documents and receipt["pdf_count"] < len(documents):
         raise ProgramError("Undermind receipt pdf_count cannot omit retained full-text documents")
 

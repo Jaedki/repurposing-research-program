@@ -24,7 +24,7 @@ field and direct dependants before submitting; preflight never accepts or rewrit
 
 1. `pathology_source_adjudication`: `sentence_decisions`; one compact packet partitions every flagged free-text sentence exactly once as `retain_pathology`, `exclude_treatment`, `exclude_mixed`, or `exclude_ambiguous`. It performs no search or rewriting and is skipped deterministically when the batch is empty.
 2. `pathology_landscape_scan`: `documents`, `landscape_proposals`, `asta_call_receipts`, `coverage_checks`; one global, shallow Asta scan runs one stable broad search and focused searches until every coverage gap is terminal. Zero proposals are valid after at least one completed search and a complete coverage register.
-3. `pathology_coverage_expansion`: `documents`, `coverage_proposals`, `undermind_search_receipts`; one named Undermind search challenges the complete post-Asta index and must return one completion receipt. Operational failure keeps the packet active.
+3. `pathology_coverage_expansion`: `documents`, `coverage_proposals`, `undermind_search_receipts`; one named Undermind search challenges the complete post-Asta index and must return one completion receipt reporting at least one ranked result. An empty search shell or other operational failure keeps the packet active.
 4. `pathology_curation`: `concepts`; one packet partitions every supplied non-anchor Monarch, DisMech, and projected Asta or Undermind node exactly once and is the only packet that decides splits, merges, final concept identity, and research eligibility.
 5. `pathology_node_research`: `documents`, `profiles`, `assertions`, `atomic_addition_proposals`.
 6. `pathology_reconciliation`: `atomic_additions`, `addition_decisions`; emitted only when initial node research proposed independently supported missing atomic biology.
@@ -87,7 +87,7 @@ Python preserves accepted results unchanged and applies this rule as a soft prop
   framing, duplicates, unknown sources, and unused papers, then assigns stable
   `UNDERMIND-NODE-<hash>` identities. The final curator alone decides splits, merges, identity,
   eligibility, and desired state. The single receipt records the non-secret workspace, search name
-  and path, completed outcome, ranked count, and PDF count; raw search and account data are never returned.
+  and path, completed outcome, positive ranked count, and PDF count; raw search and account data are never returned.
 
 - Monarch, DisMech, and projected Asta or Undermind nodes are disease-specific claims with a provisional type and retained sources. Each literature proposal contains one pathological state or process at one causal level; one paper may support several separate proposals. The curator assigns the authoritative run-local concept type from the supplied claim, payload, and edges; literature-service proposals have no privileged status.
 - Non-node DisMech material is retained in `disease_context`. The curator receives only compact disease-defining context and performs packet-only classification without searching or deep research. Receipts and full provenance remain controller-owned and do not create independent research tasks.

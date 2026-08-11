@@ -118,7 +118,8 @@ each packet as deeply as the evidence permits.
   twenty. It returns only full-text-supported missing or materially refined atomic pathology
   proposals; reports, rankings, abstracts, goals, queries, and raw responses remain transient. The
   final curator alone decides splits, merges, identity, eligibility, and desired state. A completed
-  non-secret search receipt is mandatory; operational failure keeps the same packet active.
+  non-secret search receipt reporting at least one ranked result is mandatory; an empty completed
+  search shell or other operational failure keeps the same packet active.
 - Candidate generation keeps `pathology element -> focal primary desired biological state -> established drug mode of action` as its main anchor. Secondary desired states and the phenotype objective remain context and do not create additional discovery routes by themselves. A supplied linked graph node may support a symptomatic or compensatory candidate only when its relationship to the focal concept and candidate hypothesis is mechanistically justified.
 - Monarch associations are pathology-category allowlisted. DisMech treatment-oriented sections
   and fields are excluded unconditionally. Flagged free text is batched once, classified without

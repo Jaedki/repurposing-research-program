@@ -745,7 +745,7 @@ FIELD_RULES = {
         "each proposal contains one pathological state or process at one causal level and cites a "
         "returned canonical document whose full text was inspected through read_pdfs",
         "every returned document is cited by at least one proposal; zero proposals are valid only "
-        "with the completed supplied logical-search receipt",
+        "with the completed, non-empty supplied logical-search receipt",
         "retain only directly supported pathology and no therapeutic interpretation; Undermind "
         "proposals are decomposition candidates and cannot create IDs or curate concepts",
     ],

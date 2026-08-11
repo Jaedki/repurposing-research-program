@@ -302,7 +302,7 @@ class LandscapeWorkflowTest(unittest.TestCase):
                         "search_name": coverage_packet["context"]["undermind_search_name"],
                         "search_path": "/workspaces/workspace-1/deep-searches/test",
                         "outcome": "completed",
-                        "ranked_result_count": 0,
+                        "ranked_result_count": 1,
                         "pdf_count": 0,
                     }],
                 },
@@ -338,7 +338,7 @@ class LandscapeWorkflowTest(unittest.TestCase):
             "search_name": packet["context"]["undermind_search_name"],
             "search_path": "/workspaces/workspace-1/deep-searches/test",
             "outcome": "completed",
-            "ranked_result_count": len(records.get("documents", [])),
+            "ranked_result_count": max(1, len(records.get("documents", []))),
             "pdf_count": len(records.get("documents", [])),
         }])
         result = {
@@ -458,6 +458,7 @@ class LandscapeWorkflowTest(unittest.TestCase):
         self.assertIn("create_workspace", rules)
         self.assertIn("inspect_deep_searches", rules)
         self.assertIn("it is asynchronous and should return immediately", rules)
+        self.assertIn("no ranked results is not completed coverage", rules)
         self.assertIn("Never interrupt", rules)
         self.assertIn("relaunch the same logical name", rules)
         self.assertIn("created no search does not consume", rules)
@@ -560,6 +561,59 @@ class LandscapeWorkflowTest(unittest.TestCase):
             self.submit_coverage(
                 action, records, gaps=["Undermind authentication was unavailable."]
             )
+        status = core.status(self.root)
+        self.assertEqual(status["state"], "needs_agent")
+        self.assertEqual(status["next_task"], "pathology_coverage_expansion")
+        self.assertFalse(
+            storage._result_path(self.root, "pathology_coverage_expansion").exists()
+        )
+
+    def test_empty_undermind_completion_cannot_advance(self):
+        action = self.coverage_action()
+        packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
+        records = {
+            "documents": [],
+            "coverage_proposals": [],
+            "undermind_search_receipts": [{
+                "workspace_id": "workspace-1",
+                "search_name": packet["context"]["undermind_search_name"],
+                "search_path": "/workspaces/workspace-1/deep-searches/empty",
+                "outcome": "completed",
+                "ranked_result_count": 0,
+                "pdf_count": 0,
+            }],
+        }
+        with self.assertRaisesRegex(core.ProgramError, "at least one ranked result"):
+            self.submit_coverage(action, records)
+        status = core.status(self.root)
+        self.assertEqual(status["state"], "needs_agent")
+        self.assertEqual(status["next_task"], "pathology_coverage_expansion")
+        self.assertFalse(
+            storage._result_path(self.root, "pathology_coverage_expansion").exists()
+        )
+
+    def test_wrong_undermind_search_cannot_advance(self):
+        action = self.coverage_action()
+        records = {
+            "documents": [],
+            "coverage_proposals": [],
+            "undermind_search_receipts": [{
+                "workspace_id": "workspace-1",
+                "search_name": "an unrelated or malformed search",
+                "search_path": "/workspaces/workspace-1/deep-searches/unrelated",
+                "outcome": "completed",
+                "ranked_result_count": 1,
+                "pdf_count": 0,
+            }],
+        }
+        with self.assertRaisesRegex(core.ProgramError, "completed supplied logical search"):
+            self.submit_coverage(action, records)
+        status = core.status(self.root)
+        self.assertEqual(status["state"], "needs_agent")
+        self.assertEqual(status["next_task"], "pathology_coverage_expansion")
+        self.assertFalse(
+            storage._result_path(self.root, "pathology_coverage_expansion").exists()
+        )
 
     def test_stop_decision_waits_for_undermind_coverage(self):
         sparse = source_result()
@@ -1439,6 +1493,13 @@ class DocumentationContractTest(unittest.TestCase):
         self.assertIn("ASTA_AI2_API_KEY", skill)
         self.assertIn("ASTA_AI2_API_KEY", adapters)
 
+    def test_required_mcp_authorization_persists_across_packet_workers(self):
+        root = Path(__file__).resolve().parents[1]
+        agents = (root / "AGENTS.md").read_text(encoding="utf-8")
+
+        self.assertIn("without additional per-call confirmation", agents)
+        self.assertIn("persists across fresh isolated packet workers and resumed runs", agents)
+
 
 class SparseSourceWorkflowTest(unittest.TestCase):
     def test_landscape_scan_can_rescue_an_empty_initial_concept_index(self):
@@ -1504,7 +1565,7 @@ class SparseSourceWorkflowTest(unittest.TestCase):
                         "search_name": coverage_packet["context"]["undermind_search_name"],
                         "search_path": "/workspaces/workspace-1/deep-searches/test",
                         "outcome": "completed",
-                        "ranked_result_count": 0,
+                        "ranked_result_count": 1,
                         "pdf_count": 0,
                     }],
                 },
