@@ -18,6 +18,18 @@ from .contracts import (
 from .errors import ProgramError
 from .storage import _canonical_bytes
 
+_DATABASE_RECORD_ID = re.compile(
+    r"^(?:(?:HPA|UNIPROT(?:KB)?|DAILYMED|PUBCHEM):\S+|https://reactome\.org/content/detail/R-[A-Z]{3}-\d+|https://www\.ebi\.ac\.uk/QuickGO/term/GO:\d+|https://www\.bgee\.org/gene/ENSG\d+)$",
+    re.IGNORECASE,
+)
+_DATABASE_TITLE_STOPWORDS = {
+    "human", "protein", "atlas", "gene", "entry", "tissue", "expression", "summary",
+    "single", "cell", "uniprotkb", "reactome", "plasma", "membrane", "bgee",
+    "healthy", "wild", "type", "conditions", "homo", "sapiens",
+    "tablet", "tablets", "film", "coated", "injection", "full", "prescribing",
+    "information", "compound", "record",
+}
+
 
 def _normalized_title(value: Any) -> str:
     text = html.unescape(str(value))
@@ -54,6 +66,15 @@ def _equivalent_document_titles(document_id: str, left: Any, right: Any) -> bool
     ]
     if normalized[0] == normalized[1]:
         return True
+    if _DATABASE_RECORD_ID.fullmatch(document_id):
+        identifier_tokens = set(_normalized_title(document_id).split())
+        tokens = [
+            {token for token in title.split()
+             if (len(token) >= 4 or any(char.isdigit() for char in token))
+             and token not in _DATABASE_TITLE_STOPWORDS | identifier_tokens}
+            for title in normalized
+        ]
+        return bool(tokens[0] and (tokens[0] <= tokens[1] or tokens[1] <= tokens[0]))
     return min(map(len, normalized)) >= 12 and SequenceMatcher(
         None, *normalized, autojunk=False
     ).ratio() >= 0.9

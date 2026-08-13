@@ -30,9 +30,6 @@ def curation_atomicity(disposition="research"):
         "causal_level": "molecular signalling",
         "biological_direction": "increased kinase activity",
         "compartment": "spinal motor neurons",
-        "primary_desired_biological_state": (
-            "Decrease abnormal signalling." if disposition == "research" else None
-        ),
         "atomicity_rationale": "Kinase activity is one distinct normalisable variable.",
     }
 
@@ -1283,12 +1280,10 @@ class LandscapeWorkflowTest(unittest.TestCase):
                     "summary": "Specific downstream pathology.",
                     "normal_state": "Regulated signalling.",
                     "pathological_state": "Abnormal signalling.",
-                    "desired_biological_state": "Decrease abnormal signalling.",
-                    "secondary_desired_states": [],
-                    "phenotype_objective": "Reduce disease-linked cellular dysfunction.",
                     "established_pathology_observations": [],
                     "causal_role": "Contributes to dysfunction.",
                     "mechanisms": [],
+                    "distinct_mechanisms": [],
                     "cell_types": [],
                     "anatomical_context": [],
                     "temporal_context": [],
@@ -1300,7 +1295,6 @@ class LandscapeWorkflowTest(unittest.TestCase):
                     "source_ids": ["PMID:101"],
                 }],
                 "assertions": [],
-                "atomic_addition_proposals": [],
             },
             "gaps": [],
         }
@@ -1490,15 +1484,38 @@ class DocumentationContractTest(unittest.TestCase):
         self.assertIn("Asta is not a Python source adapter", adapters)
         self.assertIn("Undermind is also an agent-used MCP service", adapters)
         self.assertIn("interrupts the asynchronous launch", packet_contract)
-        self.assertIn("ASTA_AI2_API_KEY", skill)
+        self.assertNotIn("ASTA_AI2_API_KEY", skill)
         self.assertIn("ASTA_AI2_API_KEY", adapters)
 
-    def test_required_mcp_authorization_persists_across_packet_workers(self):
+    def test_global_agent_policy_authorizes_packet_scoped_research_services(self):
         root = Path(__file__).resolve().parents[1]
         agents = (root / "AGENTS.md").read_text(encoding="utf-8")
+        agents_flat = " ".join(agents.split())
+        skill = (root / "SKILL.md").read_text(encoding="utf-8")
 
-        self.assertIn("without additional per-call confirmation", agents)
-        self.assertIn("persists across fresh isolated packet workers and resumed runs", agents)
+        self.assertIn("Normal literature search and primary-source reading", agents_flat)
+        self.assertIn("Science Research skills remain available", agents_flat)
+        self.assertIn("searches and record lookups performed for this programme", agents_flat)
+        self.assertIn("are explicitly", agents_flat)
+        self.assertIn("authorized at NCBI PubMed and PMC, DOI metadata services, Asta", agents_flat)
+        self.assertIn("Undermind through the user's connected account", agents_flat)
+        self.assertIn("without additional per-call confirmation", agents_flat)
+        self.assertIn("packet-derived disease, gene, candidate", agents_flat)
+        self.assertIn("routine permission status, unused research services", agents_flat)
+        self.assertIn("other public literature and scientific", agents_flat)
+        self.assertIn("database services without additional per-call confirmation", agents_flat)
+        self.assertIn(
+            "Use the installed `scripts/orchestrate_program.py` for every controller action",
+            skill,
+        )
+        self.assertIn(
+            "Asta landscape scan",
+            contracts.STAGE_GUIDANCE["pathology_landscape_scan"]["task"],
+        )
+        self.assertIn(
+            "host-configured Undermind MCP service",
+            contracts.STAGE_GUIDANCE["pathology_coverage_expansion"]["task"],
+        )
 
 
 class SparseSourceWorkflowTest(unittest.TestCase):

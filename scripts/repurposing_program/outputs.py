@@ -67,6 +67,11 @@ def _write_output_files(
         outputs / "candidate_provenance.jsonl",
         _provenance_rows(rows, candidates),
     )
+    rescue_strategies = sorted(
+        _rows(results["candidate_seed_generation"]["records"], "rescue_strategies"),
+        key=lambda row: str(row["strategy_id"]),
+    )
+    _write_jsonl(outputs / "rescue_strategies.jsonl", rescue_strategies)
     gap_count = sum(len(results[stage].get("gaps", [])) for stage in STAGES)
     raw_candidate_count = len(
         _rows(results["candidate_seed_generation"]["records"], "candidates")
@@ -114,6 +119,10 @@ def _write_output_files(
     ) or "none"
     multiple_node_candidates = ", ".join(candidates_using_multiple_nodes) or "none"
     context_only_candidates = ", ".join(candidates_using_context_only_nodes) or "none"
+    unseeded_strategy_count = sum(
+        strategy["search_outcome"] == "no_supported_seed"
+        for strategy in rescue_strategies
+    )
     summary = (
         "# Repurposing programme summary\n\n"
         f"Disease: {case['disease']}\n\n"
@@ -124,6 +133,8 @@ def _write_output_files(
         f"Sources: {len(documents)}; pathology nodes: {len(graph['profiles'])}; "
         f"assertions: {len(graph['assertions'])}; raw candidate seeds: "
         f"{raw_candidate_count}; deduplicated candidates: {len(candidates)}; "
+        f"rescue strategies: {len(rescue_strategies)} "
+        f"({unseeded_strategy_count} without a supported seed); "
         f"reported gaps: {gap_count}.\n\n"
         "## Graph coverage\n\n"
         f"Candidates per graph node: {node_coverage}.\n\n"
@@ -145,6 +156,7 @@ def _write_output_files(
         outputs / "citations.jsonl",
         outputs / "graph.json",
         outputs / "candidate_provenance.jsonl",
+        outputs / "rescue_strategies.jsonl",
         outputs / "summary.md",
     ]
 

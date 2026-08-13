@@ -39,13 +39,9 @@ from .pathology import (
     _canonical_source_records,
     _combined_source_records,
     _compact_disease_context,
-    _project_atomic_additions,
     _research_concepts,
 )
-from .storage import (
-    _item_result_path, _packet_path, _read_json, _result_path, _sha256, _stable_id,
-    _write_json,
-)
+from .storage import _packet_path, _result_path, _sha256, _stable_id, _write_json
 from .validation import _secret_paths
 
 
@@ -174,19 +170,8 @@ def _packet_context(
             ],
         }
     if task == "pathology_node_research":
-        prior_research_documents = [
-            row
-            for concept in _research_concepts(results)
-            if "pathology_reconciliation" in results
-            for path in [_item_result_path(
-                run_root, "pathology_node_research", str(concept["concept_id"])
-            )]
-            if path.exists()
-            for row in _cited_documents(_read_json(path)["records"])
-        ]
         documents = _merge_documents([
             *_all_documents(results),
-            *prior_research_documents,
             *(
                 _cited_documents(results["pathology_landscape_scan"]["records"])
                 if "pathology_landscape_scan" in results
@@ -264,30 +249,11 @@ def _packet_context(
                 ),
             ),
             "source_receipts": _rows(source, "source_receipts"),
-            "atomic_additions_allowed": "pathology_reconciliation" not in results,
-            "prior_research_document_ids": sorted(
-                str(row["document_id"]) for row in prior_research_documents
-            ),
             "upstream_gaps": [
                 *results["pathology_sources"].get("gaps", []),
                 *results.get("pathology_landscape_scan", {}).get("gaps", []),
                 *results.get("pathology_coverage_expansion", {}).get("gaps", []),
             ],
-        }
-    if task == "pathology_reconciliation":
-        initial_ids = [
-            str(row["concept_id"]) for row in _research_concepts(results)
-        ]
-        item_results = {
-            item_id: _read_json(path)
-            for item_id in initial_ids
-            if (path := _item_result_path(
-                run_root, "pathology_node_research", item_id
-            )).exists()
-        }
-        return {
-            "atomic_additions": _project_atomic_additions(item_results),
-            "existing_concepts": _research_concepts(results),
         }
     graph_result = results["evidence_graph"]
     graph = graph_result["records"]
@@ -323,6 +289,11 @@ def _packet_context(
             for row in _canonical_candidates(results)
             if str(row["candidate_id"]) in candidate_ids
         ]
+        strategy_ids = {
+            str(strategy_id)
+            for candidate in candidates
+            for strategy_id in candidate["strategy_ids"]
+        }
         node_ids = {
             str(node_id)
             for candidate in candidates
@@ -387,6 +358,10 @@ def _packet_context(
             "candidates": candidates,
             "pathology_concepts": concepts,
             "pathology_profiles": profiles,
+            "rescue_strategies": [
+                row for row in _rows(seeds, "rescue_strategies")
+                if str(row["strategy_id"]) in strategy_ids
+            ],
             "selected_graph_evidence": selected_graph_evidence,
             "source_index": _source_index(
                 _canonicalize_documents(run_root, documents, verify_titles=False),
@@ -432,6 +407,7 @@ def _packet_context(
         })
     return {
         "candidates": _canonical_candidates(results),
+        "rescue_strategies": _rows(seeds, "rescue_strategies"),
         "reviews": _rows(results["candidate_review"]["records"], "reviews"),
         "evidence_graph": graph,
         "candidate_identity": results["candidate_identity"]["records"],
@@ -445,17 +421,29 @@ _PACKET_CASE_FIELDS = ("case_id", "disease", "gene", "mondo")
 
 def _row_template(name: str) -> dict[str, Any]:
     template = {field: None for field in ROW_SCHEMAS[name]["required_fields"]}
-    if name == "profiles":
-        for field in ("secondary_desired_states", "established_pathology_observations",
-                      "mechanisms", "cell_types", "anatomical_context", "temporal_context",
-                      "upstream_causes", "downstream_consequences", "contradictions", "gaps",
-                      "source_ids"):
+    if name == "documents":
+        template["evidence_passages"] = [{"text": None, "locator": None}]
+    elif name == "profiles":
+        for field in ("established_pathology_observations", "mechanisms",
+                      "distinct_mechanisms", "cell_types", "anatomical_context",
+                      "temporal_context", "upstream_causes", "downstream_consequences",
+                      "contradictions", "gaps", "source_ids"):
             template[field] = []
+    elif name == "rescue_strategies":
+        template.update({"linked_node_ids": [], "assertion_ids": [], "source_ids": []})
+    elif name == "candidates":
+        template.update({
+            "identifiers": {},
+            "strategy_keys": [],
+            "graph_node_ids": [],
+            "assertion_ids": [],
+            "pathology_source_ids": [],
+            "mechanism_source_ids": [],
+        })
     elif name == "reviews":
         template.update({"supporting_findings": [], "assumptions": [], "why_not": [],
                          "aliases": [], "limitations": [], "prior_art": {
-                             "search_status": "completed", "status": None,
-                             "summary": "", "findings": []}})
+                             "status": None, "summary": "", "findings": []}})
     elif name == "assessments":
         template.update({"source_integrity": {"checks": []}, "component_scores": {
             component: {"value": None, "reason": "", "source_ids": []}
@@ -484,9 +472,11 @@ def _record_contract(
     if task == "pathology_node_research" and context is not None:
         profile = contracts["profiles"]["template"]
         profile.update({"node_id": context["concept"]["concept_id"],
-                        "node_type": context["node"]["node_type"],
-                        "desired_biological_state": context["concept"]["atomicity"]
-                        ["primary_desired_biological_state"]})
+                        "node_type": context["node"]["node_type"]})
+    if task == "candidate_seed_research" and context is not None:
+        contracts["rescue_strategies"]["template"]["primary_node_id"] = (
+            context["focal_context"]["node"]["node_id"]
+        )
     if task == "pathology_coverage_expansion" and context is not None:
         contracts["undermind_search_receipts"]["template"].update({
             "search_name": context["undermind_search_name"], "outcome": "completed"
@@ -593,6 +583,36 @@ def _build_packet(
             "Do not persist goals, queries, raw responses, reports, account data, or credentials; return only the non-secret completion receipt requested by result_contract.",
             "Return JSON only.",
         ]
+    elif task == "pathology_node_research":
+        packet_rules = [
+            "Use normal literature research, with Life Science Research skills available as "
+            "supplementary structured lookups for the evidence question.",
+        ]
+    elif task == "candidate_seed_research":
+        packet_rules = [
+            "Use normal literature research, with Life Science Research skills available as "
+            "supplementary structured lookups for the evidence question.",
+            "Each rescue_strategies row uses the supplied focal primary_node_id and a strategy_key "
+            "that is local to this packet; the controller later creates strategy_id.",
+            "In result_template, rescue_strategies contains one row-shaped placeholder with "
+            "primary_node_id set. Complete it, copy it for each additional materially distinct "
+            "route, and do not return the placeholder unchanged or an empty collection.",
+            "After route-specific searching, set each search_outcome to seeded only when at least "
+            "one candidate copies that exact strategy_key; otherwise use no_supported_seed. Every "
+            "candidate copies one or more seeded keys and includes their primary node, linked "
+            "nodes, and assertions in its own graph provenance.",
+        ]
+    elif task == "candidate_evidence_review":
+        packet_rules = [
+            "Use normal literature research, with Life Science Research skills available as "
+            "supplementary structured lookups for the evidence question.",
+            "Complete the prior-art assessment through ordinary literature discovery to evidence "
+            "saturation. Select sources and query forms for the evidence question; structured "
+            "lookups are optional supplements. Controller validation owns canonical publication "
+            "identity and title verification.",
+            "For each candidate, match candidate.strategy_ids to rescue_strategies.strategy_id "
+            "exactly and do not apply another candidate's strategy.",
+        ]
     else:
         packet_rules = [
             "Use only supplied or newly retrieved named sources; never invent citations.",
@@ -620,10 +640,6 @@ def _build_packet(
     context = _packet_context(run_root, task, item_id, results)
     if task == "pathology_coverage_expansion":
         context["undermind_search_name"] = f"pathology coverage {case['case_id']}"
-    if task == "pathology_node_research" and not context["atomic_additions_allowed"]:
-        packet_rules.append(
-            "This is supplemental research after reconciliation; atomic_addition_proposals must be empty."
-        )
     result_fields = {
         "stage": task,
         "item_id": item_id,
@@ -638,8 +654,10 @@ def _build_packet(
         "status": "complete", "records": {name: [] for name in guidance["collections"]},
         "gaps": [], "notes": [],
     }
-    if task == "pathology_reconciliation":
-        result_template["records"]["atomic_additions"] = context["atomic_additions"]
+    if task == "candidate_seed_research":
+        result_template["records"]["rescue_strategies"] = [
+            dict(result_fields["records"]["rescue_strategies"]["template"])
+        ]
     if task == "pathology_landscape_scan":
         result_template["records"]["coverage_checks"] = [
             {"gap": gap, "status": None, "reason": ""}

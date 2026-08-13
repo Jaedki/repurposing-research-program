@@ -36,7 +36,6 @@ from .pathology import (
     _validate_curation,
     _validate_landscape_scan,
     _validate_pathology_item,
-    _validate_reconciliation,
     _validate_source_adjudication,
     _validate_source_result,
     _validate_source_screening,
@@ -99,8 +98,8 @@ def next_action(root: str | Path) -> dict[str, Any]:
         "suggested_result_path": str(result_path),
         "worker_prompt": (
             f"Complete {display_item_id}. Read only the content packet at {packet_path} and any "
-            "controller-returned graph "
-            f"context explicitly authorized by that packet. Complete the {task} task and write "
+            "read-only graph context "
+            f"returned through that packet. Complete the {task} task and write "
             f"one JSON object matching result_contract to {result_path}. Use this exact header: "
             f"stage={json.dumps(task)}, item_id={json.dumps(item_id)}, "
             f"packet_id={json.dumps(packet['packet_id'])}, status=\"complete\". "
@@ -181,6 +180,18 @@ def _build_seed_result(
     accepted = _item_results(root, "candidate_seed_research", item_ids)
     if len(accepted) != len(item_ids):
         raise ProgramError("Cannot aggregate seeds before every researched concept is accepted")
+    rescue_strategies = []
+    strategy_ids_by_item: dict[str, dict[str, str]] = {}
+    for item_id in item_ids:
+        strategy_ids_by_item[item_id] = {}
+        for row in _rows(accepted[item_id]["records"], "rescue_strategies"):
+            strategy_key = str(row["strategy_key"])
+            strategy_id = _stable_id(
+                "STRATEGY",
+                {"primary_node_id": item_id, "strategy_key": strategy_key},
+            )
+            strategy_ids_by_item[item_id][strategy_key] = strategy_id
+            rescue_strategies.append({**row, "strategy_id": strategy_id})
     raw_candidates = []
     for item_id in item_ids:
         for row in _rows(accepted[item_id]["records"], "candidates"):
@@ -190,7 +201,11 @@ def _build_seed_result(
             )
             raw_candidates.append(
                 {
-                    **row,
+                    **{key: value for key, value in row.items() if key != "strategy_keys"},
+                    "strategy_ids": [
+                        strategy_ids_by_item[item_id][str(strategy_key)]
+                        for strategy_key in row["strategy_keys"]
+                    ],
                     "seed_id": seed_id,
                     "origin_concept_ids": [item_id],
                 }
@@ -201,6 +216,7 @@ def _build_seed_result(
     )
     records = {
         "candidates": candidates,
+        "rescue_strategies": rescue_strategies,
         "identity_receipts": receipts,
         "exclusions": [
             {**row, "origin_concept_id": item_id}
@@ -323,12 +339,6 @@ def _advance_controller(
             verify_titles=False,
         )
         _validate_source_result(result)
-    elif stage == "pathology_reconciliation":
-        result = {
-            "stage": stage, "status": "complete",
-            "records": {"atomic_additions": [], "addition_decisions": []},
-            "gaps": [], "notes": ["No independent atomic additions required reconciliation."],
-        }
     elif stage == "evidence_graph":
         result = _build_graph_result(root, results)
     elif stage == "candidate_seed_generation":
@@ -397,13 +407,8 @@ def _validate_result(
             str(packet["context"]["undermind_search_name"]),
         ),
         "pathology_curation": lambda: _validate_curation(result["records"], prior),
-        "pathology_reconciliation": lambda: _validate_reconciliation(
-            result["records"], prior, packet["context"]["atomic_additions"]
-        ),
         "pathology_node_research": lambda: _validate_pathology_item(
             result["records"], str(item_id), prior,
-            packet["context"]["prior_research_document_ids"],
-            packet["context"]["atomic_additions_allowed"],
         ),
         "candidate_seed_research": lambda: _validate_seed_item(
             result["records"], str(item_id), prior

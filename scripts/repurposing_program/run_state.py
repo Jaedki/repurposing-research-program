@@ -12,7 +12,7 @@ from .errors import ProgramError
 from .evidence import _rows
 from .graph import _graph_node_context
 from .identity import _identity_queue
-from .pathology import _project_atomic_additions, _research_concepts
+from .pathology import _research_concepts
 from .storage import (
     _accepted_result_files,
     _item_result_path,
@@ -226,22 +226,6 @@ def _program_status(
                 "flagged_sentences",
             )
             state = "needs_agent" if flagged else "needs_controller"
-        elif next_stage == "pathology_reconciliation":
-            initial_ids = sorted(
-                str(row["concept_id"]) for row in _research_concepts(results)
-            )
-            next_task = "pathology_node_research"
-            next_item_id, accepted_items = _first_missing(
-                run_root, next_task, initial_ids
-            )
-            if next_item_id is not None:
-                state = "needs_agent"
-            else:
-                additions = _project_atomic_additions(
-                    _item_results(run_root, next_task, initial_ids)
-                )
-                state = "needs_agent" if additions else "needs_controller"
-                next_task = next_stage if additions else next_task
         elif next_stage in {
             "evidence_graph",
             "candidate_seed_generation",

@@ -37,7 +37,7 @@ PROGRAM_BASELINE = json.loads(
 )
 
 
-def curation_atomicity(disposition="research", desired_state="restore the normal process"):
+def curation_atomicity(disposition="research"):
     if disposition != "research":
         return None
     return {
@@ -45,9 +45,6 @@ def curation_atomicity(disposition="research", desired_state="restore the normal
         "causal_level": "molecular signalling",
         "biological_direction": "increased kinase activity",
         "compartment": "spinal motor neurons",
-        "primary_desired_biological_state": (
-            desired_state if disposition == "research" else None
-        ),
         "atomicity_rationale": "Kinase activity is one distinct normalisable variable.",
     }
 
@@ -765,10 +762,31 @@ class WorkflowTest(unittest.TestCase):
                 "ranked_result_count": max(1, len(records.get("documents", []))),
                 "pdf_count": len(records.get("documents", [])),
             }])
-        if action["next_task"] == "pathology_node_research":
-            records.setdefault("atomic_addition_proposals", [])
-        for review in records.get("reviews", []):
-            review.get("prior_art", {}).setdefault("search_status", "completed")
+        if action["next_task"] == "candidate_seed_research":
+            strategy_outcome = "seeded" if records.get("candidates") else "no_supported_seed"
+            records.setdefault("rescue_strategies", [{
+                "strategy_key": "strategy-1",
+                "primary_node_id": action["next_item_id"],
+                "linked_node_ids": [],
+                "pathological_state": "increased kinase signalling",
+                "rescuable_state": "kinase signalling within the normal physiological range",
+                "desired_direction": "decrease excessive kinase activity",
+                "mechanistic_basis": "The focal profile establishes increased kinase activity.",
+                "ownership_rationale": "The rescued state is the focal node's control variable.",
+                "assertion_ids": [],
+                "source_ids": ["SRC:1"],
+                "search_outcome": strategy_outcome,
+                "search_summary": (
+                    "The route produced at least one supported seed."
+                    if strategy_outcome == "seeded"
+                    else "No supported drug-action seed was identified for this route."
+                ),
+            }])
+            default_strategy_key = records["rescue_strategies"][0].get(
+                "strategy_key", "strategy-1"
+            )
+            for candidate in records.get("candidates", []):
+                candidate.setdefault("strategy_keys", [default_strategy_key])
         if add_evidence_passages:
             for document in records.get("documents", []):
                 document.setdefault("evidence_passages", [{
@@ -828,82 +846,51 @@ class WorkflowTest(unittest.TestCase):
             },
         )
 
-    def reach_reconciliation(self):
+    def test_unindexed_distinct_mechanism_stays_in_the_frozen_profile(self):
         self.curate_single_process()
         action = core.next_action(self.root)
         packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
         records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
-        records["atomic_addition_proposals"] = [{
-            "label": "Distinct downstream repair defect",
-            "provisional_type": "mechanism",
-            "claim": "A separately variable repair defect contributes to pathology.",
-            "index_comparison": "No supplied concept represents the repair variable.",
-            "independence_rationale": "Repair and signalling have distinct biological directions.",
+        records["profiles"][0]["distinct_mechanisms"] = [{
+            "label": "Cell-specific inflammatory transcription",
+            "normal_state": "Inflammatory transcription is transiently regulated.",
+            "pathological_state": "Inflammatory transcription remains elevated.",
+            "biological_direction": "increased transcriptional activation",
+            "causal_level": "cellular signalling",
+            "compartment": "disease-relevant glial cells",
+            "relationship_to_focal": "A distinct downstream component of the focal process.",
+            "index_status": "unindexed_distinct",
+            "indexed_node_id": None,
+            "limitations": ["Cell-state generalisation is unresolved."],
             "source_ids": ["PMID:1"],
         }]
         self.submit(action, records)
-        action = core.next_action(self.root)
-        self.assertEqual(action["next_task"], "pathology_reconciliation")
-        return action, json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
 
-    def test_reconciliation_schedules_only_new_atomic_research(self):
-        action, packet = self.reach_reconciliation()
-        addition = packet["context"]["atomic_additions"][0]
-        self.submit(action, {
-            "atomic_additions": packet["context"]["atomic_additions"],
-            "addition_decisions": [{
-                "addition_id": addition["addition_id"],
-                "disposition": "new_research_concept",
-                "preferred_label": addition["label"],
-                "concept_type": "mechanism",
-                "reason": "The evidence supports an independent normalisable variable.",
-                "related_concept_id": None,
-                "atomicity": curation_atomicity(),
-            }],
-        })
-        research = core.next_action(self.root)
-        self.assertEqual(research["next_task"], "pathology_node_research")
-        self.assertEqual(research["next_item_id"], addition["addition_id"])
-        research_packet = json.loads(Path(research["packet_path"]).read_text())
-        self.assertEqual(research_packet["context"]["prior_research_document_ids"], ["PMID:1"])
+        seed = core.next_action(self.root)
+        self.assertEqual(seed["next_task"], "candidate_seed_research")
+        self.assertNotIn("pathology_reconciliation", core.STAGES)
+        graph = json.loads((self.root / "results" / "evidence_graph.json").read_text())
         self.assertEqual(
-            research_packet["result_contract"]["records"]["profiles"]["template"]
-            ["desired_biological_state"],
-            "restore the normal process",
+            graph["records"]["profiles"][0]["distinct_mechanisms"],
+            records["profiles"][0]["distinct_mechanisms"],
         )
 
-        records = self.profile(addition["addition_id"], "mechanism")
-        with self.assertRaisesRegex(core.ProgramError, "newly researched evidence"):
-            self.submit(research, records)
-        records["documents"][0]["document_id"] = "PMID:4"
-        records["profiles"][0]["source_ids"] = ["PMID:1", "PMID:4"]
-        records["atomic_addition_proposals"] = [{
-            "label": "Recursive addition", "provisional_type": "mechanism",
-            "claim": "A recursive claim.", "index_comparison": "Absent after reconciliation.",
-            "independence_rationale": "A second variable.", "source_ids": ["PMID:4"],
+    def test_distinct_mechanism_index_status_cannot_point_to_the_disease_anchor(self):
+        self.curate_single_process()
+        action = core.next_action(self.root)
+        packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
+        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
+        records["profiles"][0]["distinct_mechanisms"] = [{
+            "label": "Indexed component", "normal_state": "Normal component state.",
+            "pathological_state": "Abnormal component state.",
+            "biological_direction": "increased component activity",
+            "causal_level": "cellular signalling", "compartment": "affected cells",
+            "relationship_to_focal": "A component of the focal process.",
+            "index_status": "indexed_node", "indexed_node_id": "MONDO:1",
+            "limitations": [], "source_ids": ["PMID:1"],
         }]
-        with self.assertRaisesRegex(core.ProgramError, "cannot reopen atomic reconciliation"):
-            self.submit(research, records)
-        records["atomic_addition_proposals"] = []
-        self.submit(research, records)
-        self.assertEqual(core.next_action(self.root)["next_task"], "candidate_seed_research")
-
-    def test_reconciliation_existing_detail_does_not_create_an_item(self):
-        action, packet = self.reach_reconciliation()
-        addition = packet["context"]["atomic_additions"][0]
-        self.submit(action, {
-            "atomic_additions": packet["context"]["atomic_additions"],
-            "addition_decisions": [{
-                "addition_id": addition["addition_id"],
-                "disposition": "existing_concept_detail",
-                "preferred_label": addition["label"],
-                "concept_type": "mechanism",
-                "reason": "The detail belongs within the existing signalling concept.",
-                "related_concept_id": "NODE:1",
-                "atomicity": None,
-            }],
-        })
-        self.assertEqual(core.next_action(self.root)["next_task"], "candidate_seed_research")
+        with self.assertRaisesRegex(core.ProgramError, "another indexed node"):
+            self.submit(action, records)
 
     def test_pathology_research_source_index_has_canonical_publication_metadata(self):
         source = source_result()
@@ -939,6 +926,7 @@ class WorkflowTest(unittest.TestCase):
         document = {"document_id": "PMID:12", "title": "Drug action", "source": "test"}
         candidate = {
             "candidate_id": "DRUG:1",
+            "strategy_ids": ["STRATEGY:1"],
             "graph_node_ids": [],
             "assertion_ids": [],
             "pathology_source_ids": [],
@@ -951,6 +939,7 @@ class WorkflowTest(unittest.TestCase):
             }},
             "candidate_seed_generation": {"records": {
                 "documents": [document], "candidates": [candidate],
+                "rescue_strategies": [{"strategy_id": "STRATEGY:1"}],
             }},
         }
         with (
@@ -1036,8 +1025,9 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(contract["records"]["profiles"]["type"], "list of objects")
         self.assertIsInstance(contract["records"]["profiles"]["required_fields"], list)
         profile_fields = contract["records"]["profiles"]["required_fields"]
-        self.assertIn("secondary_desired_states", profile_fields)
-        self.assertIn("phenotype_objective", profile_fields)
+        self.assertIn("distinct_mechanisms", profile_fields)
+        self.assertNotIn("desired_biological_state", profile_fields)
+        self.assertNotIn("phenotype_objective", profile_fields)
         for excluded_field in (
             "applicable_stage_population", "measurable_readouts", "causal_prerequisites",
             "invalidating_conditions",
@@ -1046,6 +1036,8 @@ class WorkflowTest(unittest.TestCase):
         self.assertTrue(any("temporal_context" in rule for rule in contract["field_rules"]))
         self.assertIn(action["packet_id"], action["worker_prompt"])
         self.assertIn(action["suggested_result_path"], action["worker_prompt"])
+        self.assertNotIn("authorized", action["worker_prompt"])
+        self.assertIn("read-only graph context returned through that packet", action["worker_prompt"])
         first_item = action["next_item_id"]
         self.assertEqual(first_item, "NODE:1")
         self.assertEqual(
@@ -1069,6 +1061,7 @@ class WorkflowTest(unittest.TestCase):
         )
         self.assertEqual(indexed_node["atomicity"], curation_atomicity())
         research_rules = " ".join(contract["field_rules"])
+        self.assertIn("Use normal literature research", " ".join(research_packet["rules"]))
         endpoint_rule = contracts.PATHOLOGY_ASSERTION_ENDPOINT_RULE
         nested_rule = contracts.NESTED_MECHANISM_RESEARCH_RULE
         self.assertIn(endpoint_rule, research_packet["task"])
@@ -1109,7 +1102,31 @@ class WorkflowTest(unittest.TestCase):
         )
         self.assertEqual(action["next_item_id"], "NODE:1")
         packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
+        self.assertIn("Use normal literature research", " ".join(packet["rules"]))
         candidate_contract = packet["result_contract"]["records"]["candidates"]
+        strategy_contract = packet["result_contract"]["records"]["rescue_strategies"]
+        document_contract = packet["result_contract"]["records"]["documents"]
+        self.assertEqual(strategy_contract["template"]["primary_node_id"], "NODE:1")
+        self.assertIn("strategy_key", strategy_contract["required_fields"])
+        self.assertIn("linked_node_ids", strategy_contract["required_fields"])
+        self.assertIn("desired_direction", strategy_contract["required_fields"])
+        self.assertEqual(
+            strategy_contract["field_contracts"]["search_outcome"]["allowed_values"],
+            ["seeded", "no_supported_seed"],
+        )
+        self.assertIn(
+            "focal node ID supplied",
+            strategy_contract["field_contracts"]["primary_node_id"]["value_rule"],
+        )
+        template_strategy = packet["result_contract"]["result_template"]["records"][
+            "rescue_strategies"
+        ]
+        self.assertEqual(len(template_strategy), 1)
+        self.assertEqual(template_strategy[0]["primary_node_id"], "NODE:1")
+        self.assertEqual(
+            document_contract["template"]["evidence_passages"],
+            [{"text": None, "locator": None}],
+        )
         self.assertEqual(
             {key: candidate_contract[key] for key in contracts.ROW_SCHEMAS["candidates"]},
             contracts.ROW_SCHEMAS["candidates"],
@@ -1117,8 +1134,15 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("template", candidate_contract)
         self.assertIn("identifiers", candidate_contract["required_fields"])
         self.assertIn("assertion_ids", candidate_contract["required_fields"])
+        self.assertIn("strategy_keys", candidate_contract["required_fields"])
         self.assertIn("graph_rationale", candidate_contract["required_fields"])
         self.assertNotIn("identity", candidate_contract["required_fields"])
+        for field in (
+            "strategy_keys", "graph_node_ids", "assertion_ids", "pathology_source_ids",
+            "mechanism_source_ids",
+        ):
+            self.assertEqual(candidate_contract["template"][field], [])
+        self.assertEqual(candidate_contract["template"]["identifiers"], {})
         self.assertEqual(
             candidate_contract["field_contracts"]["identifiers"]["type"], "object"
         )
@@ -1140,6 +1164,7 @@ class WorkflowTest(unittest.TestCase):
             self.root, "NODE:1"
         )["graph_snapshot_id"])
         self.assertEqual(packet["context"]["context_lookup"]["argv"][-1], "<node_id>")
+        self.assertIn("row-shaped placeholder", " ".join(packet["rules"]))
         with self.assertRaisesRegex(core.ProgramError, "disease anchor"):
             core.graph_context(self.root, "MONDO:1")
         seed_records = {
@@ -1225,6 +1250,15 @@ class WorkflowTest(unittest.TestCase):
         review_packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
         self.assertIn("authoritative disease context", review_packet["task"])
         self.assertIn("exact-disease prior art", review_packet["task"])
+        self.assertIn("No particular research service", review_packet["task"])
+        self.assertIn("controller alone owns canonical PMID", review_packet["task"])
+        self.assertIn("structured lookups are optional supplements", review_packet["task"])
+        self.assertIn(
+            "Controller validation owns canonical publication identity",
+            " ".join(review_packet["rules"]),
+        )
+        self.assertIn("strategy_ids", review_packet["task"])
+        self.assertIn("strategy_ids", " ".join(review_packet["rules"]))
         self.assertTrue(
             any(
                 "document retained" in rule
@@ -1233,6 +1267,14 @@ class WorkflowTest(unittest.TestCase):
         )
         self.assertNotIn("score_rubric", review_packet["result_contract"])
         self.assertEqual(review_packet["context"]["primary_concept_id"], packet["item_id"])
+        self.assertEqual(
+            review_packet["context"]["rescue_strategies"][0]["primary_node_id"],
+            "NODE:1",
+        )
+        linked_strategy_id = review_packet["context"]["rescue_strategies"][0][
+            "strategy_id"
+        ]
+        self.assertTrue(linked_strategy_id.startswith("STRATEGY-"))
         self.assertEqual(
             [row["candidate_id"] for row in review_packet["context"]["candidates"]],
             ["UNICHEM:1", "UNICHEM:2"],
@@ -1269,6 +1311,10 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(
             seeds["records"]["candidates"][0]["origin_concept_ids"],
             [packet["item_id"]],
+        )
+        self.assertEqual(
+            seeds["records"]["candidates"][0]["strategy_ids"],
+            [linked_strategy_id],
         )
         self.submit(
             action,
@@ -1316,6 +1362,10 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(action["next_task"], "candidate_audit")
         audit_packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
         self.assertEqual(len(audit_packet["context"]["candidates"]), 2)
+        self.assertEqual(
+            audit_packet["context"]["rescue_strategies"][0]["desired_direction"],
+            "decrease excessive kinase activity",
+        )
         self.assertEqual(len(audit_packet["context"]["reviews"]), 2)
         self.assertEqual(
             [row["document_id"] for row in audit_packet["context"]["source_index"]],
@@ -1438,6 +1488,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertNotIn("stage_results", manifest)
         summary = (self.root / "outputs" / "summary.md").read_text(encoding="utf-8")
         self.assertIn("raw candidate seeds: 2; deduplicated candidates: 2", summary)
+        self.assertIn("rescue strategies: 1 (0 without a supported seed)", summary)
         self.assertIn("4 20-point components out of 80", summary)
         self.assertIn("## Graph coverage", summary)
         self.assertIn("Candidates per graph node: NODE:1 (Process): 2", summary)
@@ -1452,8 +1503,19 @@ class WorkflowTest(unittest.TestCase):
         ]
         self.assertEqual(len(provenance), 1)
         self.assertEqual(provenance[0]["assertion_ids"], [selected_assertion_id])
+        self.assertEqual(provenance[0]["strategy_ids"], [linked_strategy_id])
         self.assertNotIn(assertions_by_relation["precedes"], provenance[0]["assertion_ids"])
         self.assertIn("contributes_to assertion", provenance[0]["graph_rationale"])
+        exported_strategies = [
+            json.loads(line)
+            for line in (self.root / "outputs" / "rescue_strategies.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        self.assertEqual(
+            [row["strategy_id"] for row in exported_strategies],
+            [linked_strategy_id],
+        )
         csv_lines = (self.root / "outputs" / "candidates.csv").read_text(
             encoding="utf-8"
         ).splitlines()
@@ -1596,16 +1658,17 @@ class WorkflowTest(unittest.TestCase):
         pathology_guidance = contracts.STAGE_GUIDANCE["pathology_node_research"]["task"]
         self.assertIn("Keep discovery pathology-led", pathology_guidance)
         self.assertIn("directional evidence", pathology_guidance)
-        self.assertIn("one biological variable and one desired direction", pathology_guidance)
-        self.assertIn("secondary_desired_states", pathology_guidance)
-        self.assertIn("phenotype_objective", pathology_guidance)
-        self.assertIn("do not create additional graph nodes", pathology_guidance)
+        self.assertIn("do not split, merge, redefine, or formulate a rescue objective", pathology_guidance)
+        self.assertIn("distinct_mechanisms", pathology_guidance)
+        self.assertIn("Do not duplicate an indexed profile", pathology_guidance)
         self.assertIn("evidence_context", pathology_guidance)
         self.assertIn("Python assigns the final assertion ID", pathology_guidance)
-        self.assertIn("Life Science Research skills: Reactome", pathology_guidance)
-        self.assertIn("Use NCBI Entrez and PMC", pathology_guidance)
+        self.assertIn("Use normal literature search", pathology_guidance)
+        self.assertIn("supplemented by relevant Life Science Research lookups", pathology_guidance)
         landscape_guidance = contracts.STAGE_GUIDANCE["pathology_landscape_scan"]["task"]
         self.assertIn("coverage-gap register from the Monarch and DisMech index", landscape_guidance)
+        self.assertIn("normal literature research", landscape_guidance)
+        self.assertIn("supplementary Life Science Research lookups", landscape_guidance)
         self.assertIn("Turn the resulting questions into the", landscape_guidance)
         self.assertIn("prescribed broad and focused Asta searches", landscape_guidance)
         seed_guidance = contracts.STAGE_GUIDANCE["candidate_seed_research"]["task"]
@@ -1615,9 +1678,10 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("neighbouring node", seed_guidance)
         self.assertIn("cross-node use is never mandatory", seed_guidance)
         self.assertIn("do not use disease-specific drug literature", seed_guidance)
-        self.assertIn("Life Science Research Reactome and UniProt skills", seed_guidance)
-        self.assertIn("Use ChEMBL", seed_guidance)
-        self.assertIn("BindingDB", seed_guidance)
+        self.assertIn("before searching for any drug", seed_guidance)
+        self.assertIn("rescue_strategies", seed_guidance)
+        self.assertIn("normal literature and authoritative database research", seed_guidance)
+        self.assertIn("supplemented by relevant Life Science Research lookups", seed_guidance)
         self.assertIn(
             "evidence dossier", contracts.STAGE_GUIDANCE["candidate_evidence_review"]["task"]
         )
@@ -1626,10 +1690,28 @@ class WorkflowTest(unittest.TestCase):
             contracts.STAGE_GUIDANCE["candidate_evidence_review"]["task"],
         )
         review_guidance = contracts.STAGE_GUIDANCE["candidate_evidence_review"]["task"]
-        self.assertIn("Life Science Research ChEMBL skill", review_guidance)
-        self.assertIn("Use NCBI Entrez", review_guidance)
-        self.assertIn("use ClinicalTrials.gov", review_guidance)
-        self.assertIn("PharmGKB", review_guidance)
+        self.assertIn("normal literature and authoritative database research", review_guidance)
+        self.assertIn("available as supplementary structured lookups", review_guidance)
+        self.assertIn("ordinary literature discovery to evidence saturation", review_guidance)
+        self.assertIn("No particular research service", review_guidance)
+        self.assertIn("fixed query form", review_guidance)
+        self.assertIn("structured lookups are optional supplements", review_guidance)
+        self.assertIn("controller alone owns canonical PMID", review_guidance)
+        self.assertIn("strategy_ids", review_guidance)
+        for guidance_text in (
+            pathology_guidance, landscape_guidance, seed_guidance, review_guidance,
+        ):
+            self.assertNotIn("may be skipped without penalty", guidance_text)
+            self.assertNotIn("optional when directly relevant", guidance_text)
+        audit_guidance = contracts.STAGE_GUIDANCE["candidate_audit"]["task"]
+        self.assertIn("strategy_ids", audit_guidance)
+        for task in (
+            "pathology_node_research", "candidate_seed_research",
+            "candidate_evidence_review",
+        ):
+            with self.subTest(task=task):
+                self.assertNotIn("Asta", contracts.STAGE_GUIDANCE[task]["task"])
+                self.assertNotIn("Undermind", contracts.STAGE_GUIDANCE[task]["task"])
         self.assertIn(
             "unresolved identity", " ".join(contracts.FIELD_RULES["candidate_audit"])
         )
@@ -1658,8 +1740,7 @@ class WorkflowTest(unittest.TestCase):
         guidance = contracts.STAGE_GUIDANCE["candidate_seed_research"]["task"]
         self.assertRegex(
             guidance,
-            r"focal primary desired_biological_state as the main candidate anchor.*"
-            r"do not create additional discovery routes by themselves.*"
+            r"before searching for any drug.*rescue_strategies.*"
             r"supplied linked graph node may support a symptomatic or compensatory candidate.*"
             r"mechanistically justified",
         )
@@ -1967,12 +2048,27 @@ class WorkflowTest(unittest.TestCase):
             "documents": [
                 {"document_id": "PMID:2", "title": "Drug action", "source": "test"}
             ],
+            "rescue_strategies": [{
+                "strategy_key": "strategy-1",
+                "primary_node_id": "NODE:1",
+                "linked_node_ids": ["NODE:2"],
+                "pathological_state": "increased kinase signalling",
+                "rescuable_state": "kinase signalling within its physiological range",
+                "desired_direction": "decrease excessive kinase activity",
+                "mechanistic_basis": "The focal pathology profile supports this direction.",
+                "ownership_rationale": "The rescued kinase state belongs to NODE:1.",
+                "assertion_ids": [],
+                "source_ids": ["SRC:1", "SRC:2"],
+                "search_outcome": "seeded",
+                "search_summary": "The route produced a supported candidate seed.",
+            }],
             "candidates": [
                 {
                     "candidate_id": "CHEMBL:1",
                     "name": "Drug",
                     "identifiers": {"chembl": "CHEMBL1"},
                     "mechanism_hypothesis": "Mechanism using both contexts",
+                    "strategy_keys": ["strategy-1"],
                     "graph_node_ids": ["NODE:1", "NODE:2"],
                     "assertion_ids": [],
                     "graph_rationale": (
@@ -1984,10 +2080,97 @@ class WorkflowTest(unittest.TestCase):
             ],
             "exclusions": [],
         }
+        missing_strategy = json.loads(json.dumps(seed_records))
+        del missing_strategy["rescue_strategies"]
+        with self.assertRaisesRegex(core.ProgramError, "records.rescue_strategies"):
+            candidate_rules._validate_seed_item(missing_strategy, "NODE:1", results)
+        legacy_strategy = json.loads(json.dumps(seed_records))
+        legacy_strategy["rescue_strategies"][0]["node_id"] = legacy_strategy[
+            "rescue_strategies"
+        ][0].pop("primary_node_id")
+        with self.assertRaisesRegex(core.ProgramError, "unsupported field node_id"):
+            candidate_rules._validate_seed_item(legacy_strategy, "NODE:1", results)
+        controller_strategy_id = json.loads(json.dumps(seed_records))
+        controller_strategy_id["rescue_strategies"][0]["strategy_id"] = (
+            "STRATEGY:controller-owned"
+        )
+        with self.assertRaisesRegex(core.ProgramError, "strategy_id is controller-owned"):
+            candidate_rules._validate_seed_item(controller_strategy_id, "NODE:1", results)
+        missing_candidate_link = json.loads(json.dumps(seed_records))
+        del missing_candidate_link["candidates"][0]["strategy_keys"]
+        with self.assertRaisesRegex(core.ProgramError, "copy one or more keys"):
+            candidate_rules._validate_seed_item(missing_candidate_link, "NODE:1", results)
+        controller_candidate_ids = json.loads(json.dumps(seed_records))
+        controller_candidate_ids["candidates"][0]["strategy_ids"] = (
+            controller_candidate_ids["candidates"][0].pop("strategy_keys")
+        )
+        with self.assertRaisesRegex(core.ProgramError, "strategy_ids is controller-owned"):
+            candidate_rules._validate_seed_item(controller_candidate_ids, "NODE:1", results)
+        invalid_strategy = json.loads(json.dumps(seed_records))
+        invalid_strategy["rescue_strategies"][0]["desired_direction"] = ""
+        with self.assertRaisesRegex(core.ProgramError, "missing required fields: desired_direction"):
+            candidate_rules._validate_seed_item(invalid_strategy, "NODE:1", results)
+        seed_records["rescue_strategies"][0]["source_ids"] = ["SRC:1"]
         with self.assertRaisesRegex(core.ProgramError, "do not support graph nodes"):
             candidate_rules._validate_seed_item(seed_records, "NODE:1", results)
+        seed_records["rescue_strategies"][0]["source_ids"].append("SRC:2")
         seed_records["candidates"][0]["pathology_source_ids"].append("SRC:2")
         candidate_rules._validate_seed_item(seed_records, "NODE:1", results)
+
+        multiple = json.loads(json.dumps(seed_records))
+        second_strategy = {
+            "strategy_key": "strategy-2",
+            "primary_node_id": "NODE:1",
+            "linked_node_ids": [],
+            "pathological_state": "reduced cellular resilience",
+            "rescuable_state": "cellular resilience sufficient to preserve function",
+            "desired_direction": "increase cellular resilience",
+            "mechanistic_basis": "The focal profile supports an independent compensatory route.",
+            "ownership_rationale": "The preserved function belongs to the focal NODE:1 state.",
+            "assertion_ids": [],
+            "source_ids": ["SRC:1"],
+            "search_outcome": "seeded",
+            "search_summary": "The compensatory route produced a supported candidate seed.",
+        }
+        multiple["rescue_strategies"].append(second_strategy)
+        second_candidate = json.loads(json.dumps(multiple["candidates"][0]))
+        second_candidate.update({
+            "candidate_id": "CHEMBL:2",
+            "name": "Second drug",
+            "identifiers": {"chembl": "CHEMBL2"},
+            "strategy_keys": ["strategy-2"],
+            "graph_node_ids": ["NODE:1"],
+            "pathology_source_ids": ["SRC:1"],
+        })
+        multiple["candidates"].append(second_candidate)
+        candidate_rules._validate_seed_item(multiple, "NODE:1", results)
+
+        duplicate = json.loads(json.dumps(seed_records))
+        repeated = json.loads(json.dumps(duplicate["rescue_strategies"][0]))
+        repeated["strategy_key"] = "strategy-duplicate"
+        duplicate["rescue_strategies"].append(repeated)
+        with self.assertRaisesRegex(core.ProgramError, "repeated biological strategy"):
+            candidate_rules._validate_seed_item(duplicate, "NODE:1", results)
+
+        unseeded = json.loads(json.dumps(seed_records))
+        no_seed = json.loads(json.dumps(second_strategy))
+        no_seed["search_outcome"] = "no_supported_seed"
+        no_seed["search_summary"] = "No established action supported a candidate seed."
+        unseeded["rescue_strategies"].append(no_seed)
+        candidate_rules._validate_seed_item(unseeded, "NODE:1", results)
+        unseeded["candidates"][0]["strategy_keys"].append("strategy-2")
+        with self.assertRaisesRegex(core.ProgramError, "no_supported_seed strategies"):
+            candidate_rules._validate_seed_item(unseeded, "NODE:1", results)
+
+        only_unseeded = json.loads(json.dumps(seed_records))
+        only_unseeded["rescue_strategies"] = [no_seed]
+        only_unseeded["candidates"] = []
+        candidate_rules._validate_seed_item(only_unseeded, "NODE:1", results)
+
+        wrong_owner = json.loads(json.dumps(seed_records))
+        wrong_owner["rescue_strategies"][0]["primary_node_id"] = "NODE:2"
+        with self.assertRaisesRegex(core.ProgramError, "must equal the focal item concept"):
+            candidate_rules._validate_seed_item(wrong_owner, "NODE:1", results)
 
         invalid_records = json.loads(json.dumps(seed_records))
         invalid_records["candidates"][0]["assertion_ids"] = ["ASSERTION:UNKNOWN"]
@@ -2032,42 +2215,20 @@ class WorkflowTest(unittest.TestCase):
             self.submit(action, records)
 
         records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
-        records["profiles"][0]["desired_biological_state"] = ""
-        with self.assertRaisesRegex(core.ProgramError, "desired_biological_state"):
+        records["profiles"][0]["rescuable_state"] = "normalize the process"
+        with self.assertRaisesRegex(core.ProgramError, "unexpected fields"):
             self.submit(action, records)
 
         records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
-        records["profiles"][0]["desired_biological_state"] = "change a different state"
-        with self.assertRaisesRegex(core.ProgramError, "exactly copy the result-contract template"):
-            self.submit(action, records)
-
-        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
-        records["profiles"][0]["phenotype_objective"] = ""
-        with self.assertRaisesRegex(core.ProgramError, "phenotype_objective"):
-            self.submit(action, records)
-
-        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
-        records["profiles"][0]["secondary_desired_states"] = "increase resilience"
-        with self.assertRaisesRegex(core.ProgramError, "secondary_desired_states must be a list"):
-            self.submit(action, records)
-
-        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
-        records["profiles"][0]["secondary_desired_states"] = [" "]
-        with self.assertRaisesRegex(core.ProgramError, "only non-empty strings"):
-            self.submit(action, records)
-
-        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
-        records["profiles"][0]["secondary_desired_states"] = [
-            "increase cellular resilience", " Increase  cellular resilience ",
-        ]
-        with self.assertRaisesRegex(core.ProgramError, "secondary_desired_states must be unique"):
-            self.submit(action, records)
-
-        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
-        records["profiles"][0]["secondary_desired_states"] = [
-            " Restore  the normal process ",
-        ]
-        with self.assertRaisesRegex(core.ProgramError, "must not repeat desired_biological_state"):
+        records["profiles"][0]["distinct_mechanisms"] = [{
+            "label": "Distinct inflammatory component", "normal_state": "Regulated activity.",
+            "pathological_state": "Sustained activity.",
+            "biological_direction": "increased activity", "causal_level": "cellular",
+            "compartment": "affected cells", "relationship_to_focal": "Downstream component.",
+            "index_status": "unindexed_distinct", "indexed_node_id": None,
+            "limitations": [], "source_ids": [],
+        }]
+        with self.assertRaisesRegex(core.ProgramError, "source_ids must be a non-empty list"):
             self.submit(action, records)
 
         records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
@@ -2114,15 +2275,11 @@ class WorkflowTest(unittest.TestCase):
         self.curate_single_process()
         action = core.next_action(self.root)
         packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
-        expected_state = packet["result_contract"]["records"]["profiles"]["template"][
-            "desired_biological_state"
-        ]
         records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
-        records["atomic_addition_proposals"] = []
         records["documents"][0]["evidence_passages"] = [{
             "text": "Inspectable research evidence.", "locator": "results"
         }]
-        records["profiles"][0]["desired_biological_state"] = "paraphrased state"
+        records["profiles"][0]["distinct_mechanisms"] = "not a list"
         result = {
             "stage": action["next_task"], "item_id": action["next_item_id"],
             "packet_id": action["packet_id"], "status": "complete",
@@ -2130,13 +2287,13 @@ class WorkflowTest(unittest.TestCase):
         }
         path = self.root / "preflight.json"
         path.write_text(json.dumps(result), encoding="utf-8")
-        with self.assertRaisesRegex(core.ProgramError, "exactly copy"):
+        with self.assertRaisesRegex(core.ProgramError, "distinct_mechanisms must be a list"):
             core.validate_submission(self.root, path)
         self.assertFalse(storage._item_result_path(
             self.root, "pathology_node_research", action["next_item_id"]
         ).exists())
 
-        result["records"]["profiles"][0]["desired_biological_state"] = expected_state
+        result["records"]["profiles"][0]["distinct_mechanisms"] = []
         path.write_text(json.dumps(result), encoding="utf-8")
         self.assertEqual(core.validate_submission(self.root, path)["valid"], True)
         self.assertEqual(core.next_action(self.root)["packet_id"], action["packet_id"])
@@ -2660,10 +2817,10 @@ class WorkflowTest(unittest.TestCase):
         batch = [{"concept_id": "NODE:A", "candidate_ids": ["DRUG-A", "DRUG-B"]}]
         with patch.object(candidate_rules, "_review_batches", return_value=batch):
             candidate_rules._validate_review_item(records, "NODE:A", {})
-            records["reviews"][0]["prior_art"]["search_status"] = "operational_failure"
-            with self.assertRaisesRegex(core.ProgramError, "authorized research transport"):
-                candidate_rules._validate_review_item(records, "NODE:A", {})
             records["reviews"][0]["prior_art"]["search_status"] = "completed"
+            with self.assertRaisesRegex(core.ProgramError, "unexpected fields"):
+                candidate_rules._validate_review_item(records, "NODE:A", {})
+            del records["reviews"][0]["prior_art"]["search_status"]
             records["reviews"][0]["aliases"] = [{"name": "Drug salt", "source_ids": []}]
             with self.assertRaisesRegex(core.ProgramError, "must be a non-empty list"):
                 candidate_rules._validate_review_item(records, "NODE:A", {})
@@ -2701,7 +2858,6 @@ class WorkflowTest(unittest.TestCase):
     def test_audit_validation_is_review_independent_and_preserves_longshots(self):
         second_review = self.review("DRUG-B")
         second_review["prior_art"] = {
-            "search_status": "completed",
             "status": "human_intervention",
             "summary": "An exact-disease human study was identified.",
             "findings": [{
@@ -2796,7 +2952,7 @@ class WorkflowTest(unittest.TestCase):
         results = {
             "evidence_graph": {"records": {}},
             "candidate_identity": {"records": {}},
-            "candidate_seed_generation": {"records": {}},
+            "candidate_seed_generation": {"records": {"rescue_strategies": []}},
             "candidate_review": {"records": {
                 "documents": documents,
                 "reviews": [self.review("DRUG-PREG", "PMID:1"),
@@ -3247,12 +3403,10 @@ class WorkflowTest(unittest.TestCase):
                     "summary": "deep profile",
                     "normal_state": "normal",
                     "pathological_state": "abnormal",
-                    "desired_biological_state": "restore the normal process",
-                    "secondary_desired_states": [],
-                    "phenotype_objective": "reduce the disease-defining functional impairment",
                     "established_pathology_observations": [],
                     "causal_role": "causal",
                     "mechanisms": ["mechanism"],
+                    "distinct_mechanisms": [],
                     "cell_types": ["relevant cell"],
                     "anatomical_context": ["relevant tissue"],
                     "temporal_context": ["disease progression"],
@@ -3274,6 +3428,7 @@ class WorkflowTest(unittest.TestCase):
             "name": name,
             "identity": identity,
             "mechanism_hypothesis": f"mechanism {node_id}",
+            "strategy_ids": [f"STRATEGY:{concept_id}"],
             "graph_node_ids": [node_id],
             "assertion_ids": [],
             "graph_rationale": f"The focal profile for {node_id} is sufficient.",
@@ -3292,6 +3447,7 @@ class WorkflowTest(unittest.TestCase):
             "name": name,
             "identifiers": identifiers or {},
             "mechanism_hypothesis": f"mechanism {concept_id}",
+            "strategy_ids": [f"STRATEGY:{concept_id}"],
             "graph_node_ids": [concept_id],
             "assertion_ids": [],
             "graph_rationale": f"The focal profile for {concept_id} is sufficient.",
@@ -3336,7 +3492,6 @@ class WorkflowTest(unittest.TestCase):
             "aliases": [],
             "why_not": [],
             "prior_art": {
-                "search_status": "completed",
                 "status": "none_found",
                 "summary": "No exact-disease experimentation was found in the bounded search.",
                 "findings": [],

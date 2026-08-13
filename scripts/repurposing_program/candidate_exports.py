@@ -18,6 +18,7 @@ def _provenance_rows(
         output.append(
             {
                 "candidate_id": row["candidate_id"],
+                "strategy_ids": sorted(map(str, candidate["strategy_ids"])),
                 "graph_node_ids": sorted(node_ids),
                 "assertion_ids": sorted(map(str, candidate["assertion_ids"])),
                 "graph_rationale": candidate["graph_rationale"],
@@ -54,6 +55,9 @@ def _excluded_candidate_rows(
                 "source_ids": sorted(set(map(str, exclusion["source_ids"]))),
                 "graph_node_ids": sorted(
                     set(map(str, candidate["graph_node_ids"]))
+                ),
+                "strategy_ids": sorted(
+                    set(map(str, candidate["strategy_ids"]))
                 ),
                 "pathology_source_ids": sorted(
                     set(map(str, candidate["pathology_source_ids"]))

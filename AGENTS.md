@@ -31,24 +31,16 @@ This file dictates agent judgment, behaviour, and communication. Use `SKILL.md`,
 - When using non-focal graph context, state the relationship it contributes and retain a source attached to that node or edge. Graph proximity or label similarity alone is not support; unsupported links must be challenged.
 - Preserve causal biological evidence without allowing an experimental intervention to become a hypothesis merely because it was used as a perturbation.
 - Keep uncertainty explicit without allowing generic uncertainty language to overwhelm a useful, testable hypothesis. Resolve decision-relevant ambiguity with further research where possible; otherwise state it plainly, not with unfounded confidence.
-
-## External research authorization
-
-- A user instruction to run `repurposing-research-program` explicitly authorizes the programme's
-  required, non-secret Asta and Undermind MCP operations without additional per-call confirmation.
-- Authorized Undermind disclosure is limited to the user's connected account
-  `jago.king24@imperial.ac.uk` and workspaces owned by that account. It includes the disease name,
-  gene and MONDO identifiers, treatment-blind pathology node index and descriptions, source-edge
-  summaries, coverage checklist, unresolved evidence gaps, and the treatment-blind research goal
-  derived from those fields. It authorizes creating or reusing a workspace, launching the one named
-  deep search required by the packet, polling it, inspecting its ranked results, and reading
-  decision-relevant PDFs.
-- Authorized Asta disclosure is limited to treatment-blind literature queries derived from the same
-  disease and pathology fields and the searches and citation/snippet calls required by `SKILL.md`.
-- This authorization persists across fresh isolated packet workers and resumed runs. It never
-  authorizes disclosure of credentials, access tokens, personal or clinical records, raw upstream
-  service responses, or unrelated local files.
+- Normal literature search and primary-source reading are the default for research packets. Life
+  Science Research skills remain available across those packets as supplementary structured
+  lookups selected for the evidence question; the packet's scientific task supplies the scope.
+- Non-secret, packet-scoped searches and record lookups performed for this programme are explicitly
+  authorized at NCBI PubMed and PMC, DOI metadata services, Asta, Undermind through the user's
+  connected account, and other public literature and scientific database services without
+  additional per-call confirmation. Permitted payloads are limited to packet-derived disease,
+  gene, candidate, mechanism, and public-identifier terms and the treatment-blind pathology
+  context assigned to the Asta or Undermind stage.
 
 ## Communication
 
-- Default to no optional commentary during routine execution. Apart from any higher-level runtime-required notice, use one concise operational message only for a blocker or decision requiring user action, a material state change that cannot wait for the final handoff, or a user-requested update. Do not narrate plans, compliance, routine tool or controller steps, validation, packet contents, or anything that can wait for the final answer.
+- Default to no optional commentary during routine execution. Apart from any higher-level runtime-required notice, use one concise operational message only for a blocker or decision requiring user action, a material state change that cannot wait for the final handoff, or a user-requested update. Do not narrate plans, compliance, routine permission status, unused research services, tool or controller steps, validation, packet contents, or anything that can wait for the final answer.

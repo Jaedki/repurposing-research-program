@@ -11,7 +11,8 @@ Treat every result as an experimental hypothesis, never clinical advice or proof
 
 ## Run the programme
 
-Run commands from this skill folder, or use absolute script paths.
+Use the installed `scripts/orchestrate_program.py` for every controller action, invoked from this
+skill folder or by its absolute path.
 
 Install the pinned runtime dependencies once with `python -m pip install -r requirements.txt`.
 
@@ -38,7 +39,7 @@ Install the pinned runtime dependencies once with `python -m pip install -r requ
    If validation rejects a noncanonical result, preserve its research, amend only the reported
    invalid field and direct dependants, and validate the same ready packet again. Validation never
    accepts or mutates a result. Escalate a controller defect or a scientific gap that cannot satisfy
-   the contract. If authorized transport is unavailable, keep the packet active and report the blocker.
+   the contract.
 
 4. Repeat `next -> new agent -> submit` as foreground actions. Do not replace this loop with a persistent or background supervisor. The controller progresses through:
 
@@ -52,8 +53,6 @@ Install the pinned runtime dependencies once with `python -m pip install -r requ
    - one constrained curation packet that partitions every non-anchor Monarch, DisMech, and
      projected Asta or Undermind node into run-local research, context-only, or excluded concepts;
    - one deep pathology-research packet per curated research concept;
-   - one no-search reconciliation packet when deep research finds independently supported atomic
-     biology absent from the index, followed by research only for retained new concepts;
    - a frozen, content-addressed living evidence graph;
    - one mechanism-directed candidate-seed packet per researched pathology concept, with a compact frozen-graph index and read-only context lookup;
    - deterministic UniChem lookup for every raw candidate seed, followed by one identity-review
@@ -81,46 +80,25 @@ each packet as deeply as the evidence permits.
   only packet allowed to contain flagged source sentences; it cannot create nodes or propagate
   into pathology context. All subsequent pathology packets must not contain drug, compound,
   treatment, therapeutic, or candidate fields or interpretations.
-- Candidate generation starts only after curation, reconciliation, and every required pathology-concept result are accepted and Python freezes the graph snapshot.
-- The Asta landscape scan is a single treatment-blind discovery packet between normalized sources
-  and curation. It runs one stable broad relevance search plus focused searches for every distinct
-  open coverage gap, uses completed receipts to avoid duplicates, preserves pending originals
-  across search cycles, and maintains a live mechanism index. Before searching, it builds an ordered register
-  of distinct high-priority coverage gaps from the source-node index and coverage checklist; a gap
-  is either a missing disease process or an indexed concept too broad to express one abnormal state.
-  The broad cycle may resolve several gaps, and each focused cycle targets the highest-priority
-  unchecked gap. After every complete cycle it updates the index, merges equivalent gaps, and marks
-  the targeted gap as filled or refined, already covered, or searched but unresolved. Coverage is
-  saturated only when every registered gap has been searched or merged into a searched equivalent
-  and the updated index exposes no new distinct in-scope gap. A fixed paper count, an empty result,
-  or a streak of duplicates alone never establishes saturation. No fixed search, proposal, or
-  original-paper cap applies; unresolved gaps remain explicit.
-  A material refinement must change the abnormal state, causal step or level, biological direction,
-  or disease-relevant context enough to change the atomic pathology concept or its later desired
-  biological state; a new model, assay, population, biomarker, or wording alone is not material.
-  Packet wording about repeatedly non-novel papers means this coverage rule, not a numerical streak.
-  It makes and inspects one Asta call at a time. For each retained original it retrieves at most
-  three citing papers and runs one paper-specific snippet search per distinct paper. It follows
-  `https://allenai.org/asta/resources/mcp` and cannot create final concept IDs, perform deep node
-  research, or replace curation. A pending call is not terminated before 180 seconds; a retryable
-  failure receives one minimal same-operation retry. Citation-endpoint failure is partial and does
-  not suppress snippet evaluation of the original relevance paper. At least one relevance search
-  must complete, and every coverage check must end as resolved, searched-unresolved, or merged.
-- At curation, projected Asta additions join the same `source_nodes` collection and shared disease
-  context as all other pathology claims; projected Undermind additions join identically, and source
-  origin is provenance rather than a separate evidence tier.
-- The Undermind coverage expansion is one treatment-blind discovery packet after Asta and before
-  curation. It follows the host MCP orientation, workspace, named-search, launch, poll, paginated
-  inspection, and PDF-read flow. Launch is asynchronous and is never interrupted; after a lost
-  response the worker inspects the named search and relaunches the same name only if none was
-  created. It challenges the complete post-Asta index, inspects
-  the full ranked result, and reads decision-relevant papers in one native parallel batch of up to
-  twenty. It returns only full-text-supported missing or materially refined atomic pathology
-  proposals; reports, rankings, abstracts, goals, queries, and raw responses remain transient. The
-  final curator alone decides splits, merges, identity, eligibility, and desired state. A completed
-  non-secret search receipt reporting at least one ranked result is mandatory; an empty completed
-  search shell or other operational failure keeps the same packet active.
-- Candidate generation keeps `pathology element -> focal primary desired biological state -> established drug mode of action` as its main anchor. Secondary desired states and the phenotype objective remain context and do not create additional discovery routes by themselves. A supplied linked graph node may support a symptomatic or compensatory candidate only when its relationship to the focal concept and candidate hypothesis is mechanistically justified.
+- Candidate generation starts only after curation and every required pathology-concept result are accepted and Python freezes the graph snapshot.
+- `pathology_landscape_scan` owns the treatment-blind Asta discovery work; its packet supplies the
+  complete search, coverage, evidence, retry, and receipt contract.
+- `pathology_coverage_expansion` owns the treatment-blind Undermind coverage challenge; its packet
+  supplies the complete search, evidence, and receipt contract.
+- At curation, projected literature-discovery additions join the same `source_nodes` collection and
+  shared disease context as all other pathology claims; source origin is provenance rather than a
+  separate evidence tier.
+- Candidate generation begins by deriving one or more cited, directionally explicit rescue
+  strategies from the frozen focal pathology JSON before any drug search, and then keeps
+  `pathology element -> seed-stage rescue strategy -> established drug mode of action` as its main
+  anchor. Do not seek a strategy quota. Each strategy has the focal concept as its primary node and
+  may cite linked graph nodes only when they materially support the route. The worker compares the
+  rescued state with every linked-node profile and does not repeat the same state and route under a
+  linked node in reverse; a different objective, direction, or causal route remains distinct. Each
+  seeded strategy links to at least one candidate, while a route without a supported candidate is
+  retained as `no_supported_seed` rather than padded. A researched distinct mechanism or linked
+  graph node may supply the causal route only when its relationship to the focal concept and
+  candidate hypothesis is mechanistically justified.
 - Monarch associations are pathology-category allowlisted. DisMech treatment-oriented sections
   and fields are excluded unconditionally. Flagged free text is batched once, classified without
   search or rewriting, and retained only when the complete sentence is adjudicated pathology-only.
@@ -131,32 +109,24 @@ each packet as deeply as the evidence permits.
 ## Evidence safeguards
 
 - Preserve source IDs, exact identity, contradictions, negative results, unresolved identity, exclusions, and explicit gaps.
-- Search results, citation results, snippets, deep-search reports, rankings, and raw MCP responses are transient. In the landscape
-  scan, search by relevance, inspect related citing papers, and run paper-restricted snippet search
-  on each paper retained for evaluation. Return only canonical papers cited by an actual proposal, each with an
-  inspectable evidence passage. Return non-secret call receipts containing only operation metadata,
-  outcomes, elapsed time, and result counts. Endpoint-specific terminal failures remain explicit
-  gaps, but the scan cannot advance without one completed relevance search and a terminal coverage register.
-- Configure Asta in the MCP host with `ASTA_AI2_API_KEY`. The controller never reads that variable
-  or persists keys, headers, authentication data, or raw MCP exchanges.
-- Configure and authenticate Undermind in the MCP host. The controller does not persist account or
-  authentication data, search goals, queries, reports, or raw MCP exchanges.
+- Discovery-stage search outputs and service responses are transient. Retained proposals cite
+  canonical papers with inspectable evidence, and packets return only their specified non-secret
+  operation receipts.
 - Pathology research assertions are optional and may use only exact `node_id` values in the packet's `allowed_assertion_nodes`; keep newly researched mechanisms in the profile when they do not connect two allowed nodes.
 - If a focal research concept appears to contain nested mechanisms, compare each semantically with
-  that complete index and its atomicity metadata. Do not duplicate indexed mechanisms; research
-  unindexed mechanisms distinctly in the focal profile, and flag one in `gaps` as a possible
-  missing atomic concept when it has an independent focal or desired state, causal level, or
-  compartment. Return an independently supported and independently normalisable missing state in
-  `atomic_addition_proposals`. Python assigns its identity and a no-search reconciliation classifies
-  it as new research, context, existing detail, or unsupported without reopening focal identity.
-  Supplemental research for an accepted addition cannot propose another expansion.
-- Curation alone owns pathology splits, merges, concept identity, and research eligibility. Asta
-  and Undermind may expose a broad claim by returning separate evidence-backed atomic proposals,
+  that complete index and its atomicity metadata. Research every materially distinct causal or
+  downstream component in the profile's `distinct_mechanisms`, including biology that may enable a
+  specific later candidate route. Mark it `indexed_node` with the exact existing node ID,
+  `focal_detail`, or `unindexed_distinct`; do not duplicate another profile or create graph nodes
+  after curation.
+- Curation alone owns pathology splits, merges, concept identity, and research eligibility.
+  Literature-discovery stages may expose a broad claim through separate evidence-backed atomic proposals,
   but those are decomposition candidates rather than ontology decisions. Every research concept records one
-  focal abnormal state, causal level, biological direction, compartment, atomicity rationale, and
-  primary desired biological state. Context-only and excluded concepts use `atomicity: null`; do
+  focal abnormal state, causal level, biological direction, compartment, and atomicity rationale.
+  Context-only and excluded concepts use `atomicity: null`; do
   not invent state metadata for claims that do not support a research route. Keep separately supplied
-  states separate when they can occur independently, require different biological normalisation,
+  states separate when they can occur independently, could justify distinct candidate-discovery
+  routes,
   occupy different causal levels or compartments, or have materially different evidence. If a
   lone source node bundles such states without separately supported proposals, retain it as
   `context_only` and report the missing atomic subclaims as a gap; do not fabricate them. Keep
@@ -170,7 +140,7 @@ each packet as deeply as the evidence permits.
   nodes and proposals, and otherwise assigns the broad claim `context_only` plus a decomposition
   gap. The final concepts partition and `member_node_ids` are the sole split/merge record; do not
   add parallel `proposed_splits`, `merge_targets`, or identity metadata. Later research preserves
-  this identity boundary and primary desired state and records contrary findings as gaps rather
+  this identity boundary and records contrary findings as gaps rather
   than silently splitting, merging, or redefining the concept.
 - Curation separates concept identity from research eligibility: concept distinctness does not
   create a research job, and researchability may not be deferred to deep research. A bare gene or
@@ -189,19 +159,25 @@ each packet as deeply as the evidence permits.
   not a subordinate sign, measurement, severity descriptor, or manifestation that would be
   substantially subsumed by normalising an upstream retained concept; and (5) it is material
   enough that changing it would preserve a major function or independently important disease
-  burden and justify its own candidate-discovery route. If any criterion is absent or uncertain,
+  burden and justify its own candidate-discovery route. A directionally defined causal component
+  is not demoted merely because it sits inside a broader process. If any criterion is absent or uncertain,
   retain the phenotype `context_only` and attach it to the relevant research concept. Curation
-  does not assess drug availability, therapeutic actionability, or rescue plausibility when making
-  this decision.
+  does not formulate a rescue state or assess drug availability; rescue direction is constructed
+  only at the start of candidate seed research.
 - Every graph assertion is keyed by its biological triple and retains cited evidence contexts for evidence type, model, stage, polarity, and summary; Python assigns the stable assertion ID.
 - Candidate graph provenance contains only graph nodes and assertion IDs explicitly selected by the seed worker, with one non-duplicative graph rationale. Focal-profile-only hypotheses may select no assertion.
+- Rescue strategies use packet-local keys rather than semantic controller merging. Python only
+  namespaces those keys for downstream provenance. Every candidate names one or more local strategy
+  keys and includes the primary node, materially linked nodes, and selected assertions belonging to
+  those strategies in its graph provenance. Strategy rows use a packet-local `strategy_key` and the
+  supplied focal `primary_node_id`; Python assigns the downstream `strategy_id`.
 - Seed workers review every immediate focal neighbour, source edge, and researched assertion before
   searching, then retain only materially useful graph context. Candidate reviewers receive the exact
   selected assertions plus a bounded source-edge projection for the selected nodes and cited
   pathology sources; the full graph remains available to the audit.
-- Candidate evidence reviews use the frozen graph as disease context, retrieve primary or authoritative drug facts, and build cited dossiers without scoring, ranking, or excluding candidates.
-- Exact-disease prior-art research must complete through an authorized transport before a dossier
-  can be accepted. Until then, keep the packet active and leave `prior_art.search_status` incomplete.
+- Candidate evidence reviews use each candidate's `strategy_ids` to select only its matching rescue
+  strategies, use the frozen graph as disease context, retrieve primary or authoritative drug facts,
+  and build cited dossiers without scoring, ranking, or excluding candidates.
 - The independent audit receives the frozen graph, candidate-identity result, dossiers, and retained source content. It reads and weighs that evidence rather than restating a review and may not search, add evidence, or send a candidate for re-review.
 - Before scoring, the audit classifies every controller-indexed candidate/source pair, including
   candidate evidence retained under a different dossier. Qualifying use or experimentation forces

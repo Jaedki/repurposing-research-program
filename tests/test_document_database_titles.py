@@ -13,6 +13,80 @@ from repurposing_program.errors import ProgramError  # noqa: E402
 
 
 class DatabaseDocumentTitleTests(unittest.TestCase):
+    def test_supported_database_accessions_accept_record_label_variants(self):
+        cases = (
+            (
+                "HPA:ENSG00000141837",
+                "CACNA1A - Human Protein Atlas gene entry",
+                "CACNA1A tissue and single-cell expression summary",
+            ),
+            (
+                "UNIPROT:O00555",
+                "Voltage-dependent P/Q-type calcium channel subunit alpha-1A",
+                "UniProtKB O00555: Voltage-dependent P/Q-type calcium channel subunit alpha-1A",
+            ),
+            (
+                "https://reactome.org/content/detail/R-HSA-210490",
+                "CACNA1A [plasma membrane]",
+                "CACNA1A at the plasma membrane",
+            ),
+            (
+                "https://www.ebi.ac.uk/QuickGO/term/GO:0005245",
+                "GO:0005245 voltage-gated calcium channel activity",
+                "voltage-gated calcium channel activity and CACNA1A annotations",
+            ),
+            (
+                "https://www.bgee.org/gene/ENSG00000141837",
+                "Bgee healthy wild-type expression conditions for human CACNA1A",
+                "CACNA1A ENSG00000141837 expression in Homo sapiens",
+            ),
+            (
+                "DAILYMED:bc8f7cf2-c19c-4235-859f-9ff1dd21908e",
+                "Perampanel tablets, full prescribing information",
+                "PERAMPANEL — perampanel tablet, film coated",
+            ),
+            (
+                "PUBCHEM:4054",
+                "Memantine | C12H21N | CID 4054",
+                "Memantine compound record",
+            ),
+        )
+        for document_id, left, right in cases:
+            with self.subTest(document_id=document_id):
+                merged = evidence._merge_documents([
+                    {"document_id": document_id, "title": left},
+                    {"document_id": document_id, "title": right},
+                ])
+                self.assertEqual(len(merged), 1)
+
+    def test_database_record_label_variants_still_require_a_shared_entity(self):
+        cases = (
+            (
+                "HPA:ENSG00000141837", "CACNA1A expression", "ATP1A1 expression"
+            ),
+            (
+                "UNIPROT:O00555",
+                "Voltage-dependent calcium channel subunit alpha-1A",
+                "Voltage-dependent calcium channel subunit alpha-1B",
+            ),
+            (
+                "DAILYMED:bc8f7cf2-c19c-4235-859f-9ff1dd21908e",
+                "Perampanel tablets, full prescribing information",
+                "Memantine tablets, full prescribing information",
+            ),
+            (
+                "PUBCHEM:4054", "Memantine compound record", "Ketamine compound record"
+            ),
+        )
+        for document_id, left, right in cases:
+            with self.subTest(document_id=document_id), self.assertRaisesRegex(
+                ProgramError, "Conflicting document metadata"
+            ):
+                evidence._merge_documents([
+                    {"document_id": document_id, "title": left},
+                    {"document_id": document_id, "title": right},
+                ])
+
     def test_pubchem_locator_suffix_does_not_create_a_title_conflict(self):
         documents = evidence._merge_documents(
             [
