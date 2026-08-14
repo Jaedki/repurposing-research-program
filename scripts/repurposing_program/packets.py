@@ -495,10 +495,18 @@ def _row_template(name: str) -> dict[str, Any]:
     elif name == "open_questions":
         template["node_ids"] = []
     elif name == "question_answers":
-        template.update({"claims": [], "node_ids": [], "limitations": []})
+        template.update({
+            "claims": [],
+            "node_ids": [],
+            "limitations": [],
+            "frozen_baseline_claim_ids": [],
+            "counterevidence_claim_ids": [],
+            "alternative_explanation_claim_ids": [],
+        })
     elif name == "hypothesis_connections":
         template.update({
-            "node_ids": [], "claim_ids": [], "limitations": [], "source_ids": [],
+            "node_ids": [], "claim_ids": [], "limitations": [], "assumptions": [],
+            "source_ids": [],
         })
     elif name == "candidates":
         template.update({

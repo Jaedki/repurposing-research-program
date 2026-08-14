@@ -1127,11 +1127,21 @@ class WorkflowTest(unittest.TestCase):
             ["NODE:1"],
         )
         self.assertNotIn("source_index", open_packet["context"])
+        open_contract = open_packet["result_contract"]["records"]["open_questions"]
+        self.assertIn("unresolved_basis", open_contract["required_fields"])
+        self.assertIn("discriminating_evidence", open_contract["required_fields"])
+        self.assertNotIn("gap_type", open_contract["required_fields"])
         invalid_questions = [{
             "question_id": "Q1",
             "question": "Could a missing compensatory route alter the pathological state?",
             "rationale": "Resolving this could change rescue-pathway selection.",
             "node_ids": ["NODE:unknown"],
+            "unresolved_basis": (
+                "The graph does not establish whether feedback capacity changes the state."
+            ),
+            "discriminating_evidence": (
+                "A timed perturbation separating feedback from correlated pathway activity."
+            ),
         }]
         with self.assertRaisesRegex(core.ProgramError, "unknown IDs"):
             self.submit(action, {"open_questions": invalid_questions})
@@ -1139,6 +1149,13 @@ class WorkflowTest(unittest.TestCase):
             **invalid_questions[0],
             "node_ids": ["NODE:1"],
         }]
+        repeated_gap = json.loads(json.dumps(questions[0]))
+        repeated_gap.update({
+            "question_id": "Q2",
+            "question": "Does feedback alter the duration of the pathological state?",
+        })
+        with self.assertRaisesRegex(core.ProgramError, "repeated unresolved_basis"):
+            self.submit(action, {"open_questions": [questions[0], repeated_gap]})
         self.submit(action, {"open_questions": questions})
 
         action = core.next_action(self.root)
@@ -1155,8 +1172,19 @@ class WorkflowTest(unittest.TestCase):
         question_instructions = " ".join([
             question_packet["task"], *question_packet["rules"]
         ])
-        self.assertIn("normal primary-source research", question_instructions)
+        self.assertIn("short discovery pass", question_instructions)
+        self.assertIn("primary-source research", question_instructions)
         self.assertNotIn("structured scientific lookup", question_instructions.casefold())
+        answer_contract = question_packet["result_contract"]["records"]["question_answers"]
+        self.assertEqual(
+            answer_contract["field_contracts"]["research_disposition"]["allowed_values"],
+            ["corpus_sufficient", "literature_delta_found", "still_unresolved"],
+        )
+        self.assertEqual(
+            answer_contract["field_contracts"]["claims"]["field_contracts"]
+            ["epistemic_status"]["allowed_values"],
+            ["direct_observation", "synthesis", "inference"],
+        )
         with self.assertRaisesRegex(core.ProgramError, "partition every supplied question_id"):
             self.submit(action, {"documents": [], "question_answers": []})
         answer = {
@@ -1167,14 +1195,119 @@ class WorkflowTest(unittest.TestCase):
                 "A compensatory feedback route can oppose sustained kinase signalling in the "
                 "disease-relevant cellular state."
             ),
-            "claims": [{
-                "claim_id": "CLAIM:1",
-                "claim": "Feedback phosphatase activity can oppose sustained kinase signalling.",
-                "source_ids": ["PMID:4"],
-            }],
+            "claims": [
+                {
+                    "claim_id": "CLAIM:BASE",
+                    "claim": "The disease graph establishes excessive kinase signalling.",
+                    "epistemic_status": "direct_observation",
+                    "delta_type": "baseline",
+                    "evidence_scope": "Disease-relevant experimental model in the frozen graph.",
+                    "assumptions": [],
+                    "source_ids": ["PMID:1"],
+                },
+                {
+                    "claim_id": "CLAIM:1",
+                    "claim": (
+                        "Feedback phosphatase activity can oppose sustained kinase signalling."
+                    ),
+                    "epistemic_status": "direct_observation",
+                    "delta_type": "extends",
+                    "evidence_scope": "Perturbed disease-relevant cells during sustained signalling.",
+                    "assumptions": [],
+                    "source_ids": ["PMID:4"],
+                },
+            ],
             "node_ids": ["NODE:1"],
             "limitations": ["The magnitude of compensation in human tissue remains uncertain."],
+            "research_disposition": "literature_delta_found",
+            "frozen_baseline_claim_ids": ["CLAIM:BASE"],
+            "counterevidence_claim_ids": [],
+            "alternative_explanation_claim_ids": [],
+            "material_answer_delta": (
+                "New perturbational evidence identifies feedback capacity as a causal constraint."
+            ),
+            "saturation_reason": None,
         }
+        prior = run_state._load_results(self.root)
+        corpus_sufficient = json.loads(json.dumps(answer))
+        corpus_sufficient.update({
+            "status": "answered",
+            "claims": [answer["claims"][0]],
+            "research_disposition": "corpus_sufficient",
+            "frozen_baseline_claim_ids": ["CLAIM:BASE"],
+            "material_answer_delta": None,
+            "saturation_reason": (
+                "The frozen claim directly answers every part of the question; discovery found no "
+                "distinct evidential requirement."
+            ),
+        })
+        hypotheses._validate_question_research(
+            {"documents": [], "question_answers": [corpus_sufficient]}, prior
+        )
+        still_unresolved = json.loads(json.dumps(answer))
+        still_unresolved.update({
+            "status": "unresolved",
+            "answer": "The available literature does not discriminate the proposed feedback route.",
+            "claims": [],
+            "research_disposition": "still_unresolved",
+            "frozen_baseline_claim_ids": [],
+            "material_answer_delta": None,
+            "saturation_reason": (
+                "No temporally resolved perturbation study tested the required feedback relationship."
+            ),
+        })
+        hypotheses._validate_question_research(
+            {"documents": [], "question_answers": [still_unresolved]}, prior
+        )
+        aliased_graph_answer = json.loads(json.dumps(answer))
+        aliased_graph_answer["claims"][1]["source_ids"] = ["DOI:10.1000/graph-paper"]
+        with self.assertRaisesRegex(core.ProgramError, "already present in the frozen corpus"):
+            hypotheses._validate_question_research(
+                {
+                    "documents": [{
+                        "document_id": "DOI:10.1000/graph-paper",
+                        "title": "Research evidence",
+                        "source": "test",
+                    }],
+                    "question_answers": [aliased_graph_answer],
+                },
+                prior,
+            )
+        redundant_citation = json.loads(json.dumps(answer))
+        redundant_citation["claims"][1]["delta_type"] = "baseline"
+        redundant_citation["frozen_baseline_claim_ids"].append("CLAIM:1")
+        with self.assertRaisesRegex(core.ProgramError, "may cite only frozen graph sources"):
+            hypotheses._validate_question_research(
+                {
+                    "documents": [{
+                        "document_id": "PMID:4", "title": "Compensatory feedback",
+                        "source": "test",
+                    }],
+                    "question_answers": [redundant_citation],
+                },
+                prior,
+            )
+        reused_graph_answer = json.loads(json.dumps(answer))
+        reused_graph_answer["claims"][1]["source_ids"] = ["PMID:1"]
+        with self.assertRaisesRegex(core.ProgramError, "frozen graph documents"):
+            self.submit(action, {
+                "documents": [{
+                    "document_id": "PMID:1", "title": "Research evidence", "source": "test",
+                }],
+                "question_answers": [reused_graph_answer],
+            })
+        unsupported_inference = json.loads(json.dumps(answer))
+        unsupported_inference["claims"][1].update({
+            "epistemic_status": "inference",
+            "assumptions": [],
+        })
+        with self.assertRaisesRegex(core.ProgramError, "assumptions must not be empty"):
+            self.submit(action, {
+                "documents": [{
+                    "document_id": "PMID:4", "title": "Compensatory feedback", "source": "test",
+                }],
+                "question_answers": [unsupported_inference],
+            })
         self.submit(action, {
             "documents": [{
                 "document_id": "PMID:4", "title": "Compensatory feedback", "source": "test",
@@ -1209,11 +1342,61 @@ class WorkflowTest(unittest.TestCase):
             "why_unexpected": "The route targets endogenous control capacity rather than the driver.",
             "counterargument": "Feedback induction may be too weak or occur in the wrong cell state.",
             "limitations": ["Human disease-tissue feedback capacity is not quantified."],
+            "assumptions": [
+                "The perturbational feedback relationship is conserved in the affected human cells."
+            ],
+            "weakest_link": (
+                "Feedback magnitude has not been measured in the affected human cell state."
+            ),
+            "falsifying_observation": (
+                "Restoring feedback capacity fails to reduce sustained kinase signalling."
+            ),
             "source_ids": ["PMID:4", "PMID:5"],
         }
+        baseline_only_connection = json.loads(json.dumps(connection))
+        baseline_only_connection.update({
+            "claim_ids": ["CLAIM:BASE"],
+            "source_ids": ["PMID:1"],
+        })
+        with self.assertRaisesRegex(core.ProgramError, "literature-delta claim"):
+            hypotheses._validate_hypothesis_synthesis(
+                {"documents": [], "hypothesis_connections": [baseline_only_connection]},
+                run_state._load_results(self.root),
+            )
+        alternative_connection = json.loads(json.dumps(connection))
+        alternative_connection.update({
+            "connection_id": "CONNECTION:2",
+            "title": "Feedback capacity may also alter recovery kinetics",
+            "mechanistic_reasoning": (
+                "The same feedback evidence could support faster recovery after signalling peaks "
+                "without changing the initiating lesion."
+            ),
+            "predicted_rescue_direction": "Accelerate recovery from excessive kinase activity.",
+            "why_unexpected": (
+                "This route changes state duration rather than steady-state pathway amplitude."
+            ),
+        })
+        hypotheses._validate_hypothesis_synthesis(
+            {
+                "documents": [{
+                    "document_id": "PMID:5", "title": "Feedback verification", "source": "test",
+                }],
+                "hypothesis_connections": [connection, alternative_connection],
+            },
+            run_state._load_results(self.root),
+        )
         invalid_connection = json.loads(json.dumps(connection))
         invalid_connection["source_ids"] = ["PMID:5"]
         with self.assertRaisesRegex(core.ProgramError, "every source behind its selected claims"):
+            self.submit(action, {
+                "documents": [{
+                    "document_id": "PMID:5", "title": "Feedback verification", "source": "test",
+                }],
+                "hypothesis_connections": [invalid_connection],
+            })
+        invalid_connection = json.loads(json.dumps(connection))
+        invalid_connection["assumptions"] = []
+        with self.assertRaisesRegex(core.ProgramError, "assumptions must be a non-empty list"):
             self.submit(action, {
                 "documents": [{
                     "document_id": "PMID:5", "title": "Feedback verification", "source": "test",

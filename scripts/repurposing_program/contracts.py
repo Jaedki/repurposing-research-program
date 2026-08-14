@@ -347,27 +347,35 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
         "role": "global pathology open-question researcher",
         "task": (
             "Inspect the complete frozen pathology graph through its compact index and bounded "
-            "node-context lookup. Identify between one and ten unanswered questions whose resolution "
-            "could materially broaden, connect, challenge, or redirect a later biological rescue "
-            "route. Every question must name the graph nodes that motivate it and explain why the "
-            "answer could matter for rescue reasoning. Prefer cross-node causality, compensation or "
-            "bypass, state direction or timing, compartment translation, model-to-human translation, "
-            "and contradictions or missing links. Do not research the answers, nominate drugs, search "
-            "for treatments, or add graph nodes or edges. Do not pad the list with generic screening, "
-            "platform, unrelated-disease, or already answered questions."
+            "node-context lookup. Generate a broad internal pool of graph-anchored uncertainties, "
+            "challenge each against the supplied graph, and retain between one and ten materially "
+            "distinct questions whose resolution could broaden, connect, challenge, or redirect a "
+            "later biological rescue route. For every retained question, state exactly what the graph "
+            "cannot establish and what evidence would discriminate the uncertainty. Explore causal, "
+            "temporal, compensatory, contradictory, compartmental, and cross-context possibilities "
+            "without filling categories or a quota. Do not research the answers, nominate drugs, "
+            "search for treatments, or add graph nodes or edges. Do not retain generic screening, "
+            "platform, unrelated-disease, graph-proximity, or already answered questions."
         ),
         "collections": ["open_questions"],
     },
     "pathology_question_research": {
         "role": "global pathology question researcher",
         "task": (
-            "Answer every supplied open question through normal primary-source research, using the "
-            "frozen graph index and node-context lookup to preserve the disease context. Return each "
-            "question exactly once as answered, partially_answered, or unresolved. Separate directly "
-            "supported factual claims from synthesis; every claim cites inspectable evidence, while "
-            "limitations and remaining uncertainty stay explicit. Experimental perturbations may "
-            "clarify causal biology, but do not nominate candidates, search disease-drug associations, "
-            "or interpret an intervention as a treatment. Do not alter the frozen graph."
+            "Research every supplied open question from its unresolved basis and discriminating "
+            "evidence requirement. First reconstruct the answer supported by the frozen corpus, then "
+            "perform a short discovery pass and deepen primary-source research only where further "
+            "information could materially change, constrain, or discriminate the answer. Search "
+            "adaptively for direct, causal, temporal, perturbational, contradictory, or transferable "
+            "biology rather than filling a search quota; define the biological abstraction before "
+            "using remote-context evidence. Return each question exactly once with disposition "
+            "corpus_sufficient, literature_delta_found, or still_unresolved and status answered, "
+            "partially_answered, or unresolved. Distinguish direct observation, synthesis, and "
+            "inference; state evidence scope and assumptions; retain only primary documents that "
+            "support a material delta, counterclaim, or alternative explanation. A fresh citation that "
+            "only restates the frozen corpus is not a delta. Experimental perturbations may clarify "
+            "causal biology, but do not nominate candidates, search disease-drug associations, "
+            "interpret an intervention as a treatment, or alter the frozen graph."
         ),
         "collections": ["documents", "question_answers"],
     },
@@ -375,13 +383,17 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
         "role": "global pathology connection synthesist and critic",
         "task": (
             "Use only the supplied answered questions, their cited claims, and the frozen graph to "
-            "generate, compare, challenge, and refine unexpected biological connections that could "
-            "inform later rescue-strategy discovery. Targeted literature search is permitted only to "
-            "verify or challenge a proposed connection. Return only defensible connections, each "
-            "anchored to exact claim and graph-node IDs with a mechanistic direction, an explanation "
-            "of why it is non-obvious, a concrete counterargument, limitations, and citations. An "
-            "empty connection set is valid when critique eliminates every proposal. Do not nominate "
-            "drugs, rank candidates, create graph edges, or mutate the frozen graph."
+            "generate a diverse internal pool of unexpected biological connections, compare their "
+            "mechanistic substance, and adversarially challenge them before selection. Targeted "
+            "literature search is permitted only to verify or challenge a proposed connection. Reject "
+            "graph restatements, reversed duplicates, label similarity, unsupported causal leaps, and "
+            "remote analogies without an explicit conserved mechanism. Return only materially "
+            "distinct survivors grounded in at least one literature-delta claim, each anchored to "
+            "exact claim and graph-node IDs with a mechanistic direction, why it is genuinely "
+            "unexpected, explicit assumptions, the strongest counterargument, the weakest causal "
+            "link, a falsifying observation, limitations, and citations. An empty connection set is "
+            "valid when critique eliminates every proposal. Do not nominate drugs, rank candidates, "
+            "create graph edges, or mutate the frozen graph."
         ),
         "collections": ["documents", "hypothesis_connections"],
     },
@@ -640,18 +652,33 @@ ROW_SCHEMAS = {
         "additional_fields": False,
     },
     "open_questions": {
-        "required_fields": ["question_id", "question", "rationale", "node_ids"],
+        "required_fields": [
+            "question_id", "question", "rationale", "node_ids", "unresolved_basis",
+            "discriminating_evidence",
+        ],
         "additional_fields": False,
         "field_contracts": {
             "node_ids": {
                 "type": "non-empty list of unique frozen graph node IDs",
+            },
+            "unresolved_basis": {
+                "type": "non-empty string",
+                "value_rule": "state exactly what the frozen graph cannot establish",
+            },
+            "discriminating_evidence": {
+                "type": "non-empty string",
+                "value_rule": (
+                    "state the observation or evidence that would materially resolve the uncertainty"
+                ),
             },
         },
     },
     "question_answers": {
         "required_fields": [
             "question_id", "question", "status", "answer", "claims", "node_ids",
-            "limitations",
+            "limitations", "research_disposition", "frozen_baseline_claim_ids",
+            "counterevidence_claim_ids", "alternative_explanation_claim_ids",
+            "material_answer_delta", "saturation_reason",
         ],
         "additional_fields": False,
         "field_contracts": {
@@ -660,8 +687,31 @@ ROW_SCHEMAS = {
             },
             "claims": {
                 "type": "list of objects",
-                "required_fields": ["claim_id", "claim", "source_ids"],
+                "required_fields": [
+                    "claim_id", "claim", "epistemic_status", "delta_type",
+                    "evidence_scope", "assumptions", "source_ids",
+                ],
                 "additional_fields": False,
+                "field_contracts": {
+                    "epistemic_status": {
+                        "allowed_values": ["direct_observation", "synthesis", "inference"],
+                    },
+                    "delta_type": {
+                        "allowed_values": [
+                            "baseline", "extends", "contradicts", "discriminates",
+                            "transfers", "defines_decisive_test",
+                        ],
+                    },
+                    "evidence_scope": {
+                        "type": "non-empty string describing model, compartment, and stage",
+                    },
+                    "assumptions": {
+                        "type": "list of unique non-empty strings",
+                        "value_rule": (
+                            "required for inference and transfer; empty for direct observation"
+                        ),
+                    },
+                },
             },
             "node_ids": {
                 "type": "non-empty list of unique frozen graph node IDs",
@@ -669,13 +719,33 @@ ROW_SCHEMAS = {
             "limitations": {
                 "type": "list of non-empty strings",
             },
+            "research_disposition": {
+                "allowed_values": [
+                    "corpus_sufficient", "literature_delta_found", "still_unresolved",
+                ],
+            },
+            "frozen_baseline_claim_ids": {
+                "type": "list of unique claim IDs whose delta_type is baseline",
+            },
+            "counterevidence_claim_ids": {
+                "type": "list of unique claim IDs from this answer",
+            },
+            "alternative_explanation_claim_ids": {
+                "type": "list of unique claim IDs from this answer",
+            },
+            "material_answer_delta": {
+                "type": "non-empty string for literature_delta_found; otherwise null",
+            },
+            "saturation_reason": {
+                "type": "non-empty string for corpus_sufficient or still_unresolved; otherwise null",
+            },
         },
     },
     "hypothesis_connections": {
         "required_fields": [
             "connection_id", "title", "node_ids", "claim_ids", "mechanistic_reasoning",
             "predicted_rescue_direction", "why_unexpected", "counterargument", "limitations",
-            "source_ids",
+            "assumptions", "weakest_link", "falsifying_observation", "source_ids",
         ],
         "additional_fields": False,
         "field_contracts": {
@@ -686,7 +756,16 @@ ROW_SCHEMAS = {
                 "type": "non-empty list of unique question-research claim IDs",
             },
             "limitations": {
-                "type": "list of non-empty strings",
+                "type": "non-empty list of unique non-empty strings",
+            },
+            "assumptions": {
+                "type": "non-empty list of unique non-empty strings",
+            },
+            "weakest_link": {
+                "type": "non-empty string identifying the least secure causal step",
+            },
+            "falsifying_observation": {
+                "type": "non-empty string describing an observation that would defeat the connection",
             },
             "source_ids": {
                 "type": "non-empty list of unique source IDs supporting the connection",
@@ -967,19 +1046,34 @@ FIELD_RULES = {
     ],
     "pathology_open_questions": [
         "return between one and ten materially distinct open questions; do not fill a quota",
-        "question_id values are unique and each question, rationale, and node_ids list is non-empty",
+        "question_id values are unique and each question, rationale, unresolved_basis, "
+        "discriminating_evidence, and node_ids list is non-empty",
         "every node_id is copied from context.graph_index and the rationale explains how resolving "
         "the question could change rescue reasoning",
         "inspect the complete graph index and use context_lookup for the node JSON needed to test "
-        "whether each question is genuinely unanswered",
+        "whether each question is genuinely unanswered; unresolved_basis states the exact missing "
+        "knowledge and discriminating_evidence states what would resolve it",
+        "generate broadly before selection, retain materially distinct biological uncertainties, "
+        "and do not use graph proximity, shared terminology, or category filling as novelty",
         "do not research answers, nominate drugs, search treatments, or create graph claims",
     ],
     "pathology_question_research": [
         "partition every supplied question_id exactly once and copy its question text exactly",
-        "status is answered, partially_answered, or unresolved; unresolved may have no claims, while "
-        "answered and partially_answered require at least one directly supported claim",
-        "claim_id values are unique across the result; every claim is non-empty and cites one or more "
-        "returned or retained graph sources",
+        "research_disposition is corpus_sufficient, literature_delta_found, or still_unresolved; "
+        "status remains answered, partially_answered, or unresolved and follows the disposition",
+        "claim_id values are unique across the result; every claim records epistemic_status, "
+        "delta_type, evidence_scope, assumptions, and one or more returned or retained graph sources",
+        "frozen_baseline_claim_ids names exactly the claims with delta_type baseline; "
+        "counterevidence_claim_ids and alternative_explanation_claim_ids refer only to claims in "
+        "the same answer",
+        "corpus_sufficient uses only frozen baseline claims, returns no new evidence for that answer, "
+        "answers the question, and records why the frozen corpus is sufficient",
+        "literature_delta_found has at least one non-baseline claim citing a genuinely new retained "
+        "document and states the material_answer_delta; a redundant citation is not a delta",
+        "still_unresolved retains no purported material delta and records the unresolved evidence "
+        "requirement and saturation reason without returning redundant search results",
+        "direct observations have no assumptions; inference and transferred claims state their "
+        "assumptions explicitly",
         "node_ids include every node attached to the supplied question and contain only graph IDs",
         "limitations is a list of concise non-empty strings and may be empty",
         "do not nominate drugs, search disease-drug associations, or mutate the graph",
@@ -987,9 +1081,14 @@ FIELD_RULES = {
     "pathology_hypothesis_synthesis": [
         "each connection_id is unique and every connection cites one or more exact claim_ids and "
         "one or more frozen graph node_ids",
+        "every connection includes at least one non-baseline claim from an answer with disposition "
+        "literature_delta_found",
         "source_ids include the evidence behind every selected claim and any returned verification source",
         "mechanistic_reasoning and predicted_rescue_direction state a coherent biological bridge and "
-        "direction; why_unexpected, counterargument, and limitations prevent uncritical amplification",
+        "direction; why_unexpected, assumptions, counterargument, weakest_link, "
+        "falsifying_observation, and non-empty limitations prevent uncritical amplification",
+        "generate and compare a broad internal pool, but reject graph restatements, reversed "
+        "duplicates, label similarity, unsupported causal leaps, and unexamined remote transfer",
         "return only connections surviving comparison and critique; an empty list is valid",
         "do not nominate drugs, rank candidates, create graph edges, or mutate the graph",
     ],
