@@ -20,6 +20,7 @@ from repurposing_program import (  # noqa: E402
     evidence,
     evidence_cards,
     graph as graph_rules,
+    hypotheses,
     identity,
     orchestration,
     packets,
@@ -782,6 +783,7 @@ class WorkflowTest(unittest.TestCase):
                 "strategy_key": "strategy-1",
                 "primary_node_id": action["next_item_id"],
                 "linked_node_ids": [],
+                "connection_ids": [],
                 "pathological_state": "increased kinase signalling",
                 "rescuable_state": "kinase signalling within the normal physiological range",
                 "desired_direction": "decrease excessive kinase activity",
@@ -882,7 +884,7 @@ class WorkflowTest(unittest.TestCase):
         self.submit(action, records)
 
         seed = core.next_action(self.root)
-        self.assertEqual(seed["next_task"], "candidate_seed_research")
+        self.assertEqual(seed["next_task"], "pathology_open_questions")
         self.assertNotIn("pathology_reconciliation", core.STAGES)
         graph = json.loads((self.root / "results" / "evidence_graph.json").read_text())
         self.assertEqual(
@@ -1110,7 +1112,7 @@ class WorkflowTest(unittest.TestCase):
         )
 
         action = core.next_action(self.root)
-        self.assertEqual(action["next_task"], "candidate_seed_research")
+        self.assertEqual(action["next_task"], "pathology_open_questions")
         self.assertTrue((self.root / "results" / "evidence_graph.json").exists())
         graph_result = json.loads(
             (self.root / "results" / "evidence_graph.json").read_text()
@@ -1119,6 +1121,114 @@ class WorkflowTest(unittest.TestCase):
             [row["document_id"] for row in graph_result["records"]["documents"]],
             ["PMID:1", "SRC:1"],
         )
+        open_packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(
+            [row["node_id"] for row in open_packet["context"]["graph_index"]],
+            ["NODE:1"],
+        )
+        self.assertNotIn("source_index", open_packet["context"])
+        invalid_questions = [{
+            "question_id": "Q1",
+            "question": "Could a missing compensatory route alter the pathological state?",
+            "rationale": "Resolving this could change rescue-pathway selection.",
+            "node_ids": ["NODE:unknown"],
+        }]
+        with self.assertRaisesRegex(core.ProgramError, "unknown IDs"):
+            self.submit(action, {"open_questions": invalid_questions})
+        questions = [{
+            **invalid_questions[0],
+            "node_ids": ["NODE:1"],
+        }]
+        self.submit(action, {"open_questions": questions})
+
+        action = core.next_action(self.root)
+        self.assertEqual(action["next_task"], "pathology_question_research")
+        question_packet = json.loads(
+            Path(action["packet_path"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(question_packet["context"]["open_questions"], questions)
+        self.assertTrue(question_packet["context"]["source_index"])
+        self.assertFalse(any(
+            "evidence_passages" in row
+            for row in question_packet["context"]["source_index"]
+        ))
+        question_instructions = " ".join([
+            question_packet["task"], *question_packet["rules"]
+        ])
+        self.assertIn("normal primary-source research", question_instructions)
+        self.assertNotIn("structured scientific lookup", question_instructions.casefold())
+        with self.assertRaisesRegex(core.ProgramError, "partition every supplied question_id"):
+            self.submit(action, {"documents": [], "question_answers": []})
+        answer = {
+            "question_id": "Q1",
+            "question": questions[0]["question"],
+            "status": "answered",
+            "answer": (
+                "A compensatory feedback route can oppose sustained kinase signalling in the "
+                "disease-relevant cellular state."
+            ),
+            "claims": [{
+                "claim_id": "CLAIM:1",
+                "claim": "Feedback phosphatase activity can oppose sustained kinase signalling.",
+                "source_ids": ["PMID:4"],
+            }],
+            "node_ids": ["NODE:1"],
+            "limitations": ["The magnitude of compensation in human tissue remains uncertain."],
+        }
+        self.submit(action, {
+            "documents": [{
+                "document_id": "PMID:4", "title": "Compensatory feedback", "source": "test",
+            }],
+            "question_answers": [answer],
+        })
+
+        action = core.next_action(self.root)
+        self.assertEqual(action["next_task"], "pathology_hypothesis_synthesis")
+        synthesis_packet = json.loads(
+            Path(action["packet_path"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(synthesis_packet["context"]["question_answers"], [answer])
+        self.assertIn(
+            "PMID:4",
+            {row["document_id"] for row in synthesis_packet["context"]["source_index"]},
+        )
+        hypotheses._validate_hypothesis_synthesis(
+            {"documents": [], "hypothesis_connections": []},
+            run_state._load_results(self.root),
+        )
+        connection = {
+            "connection_id": "CONNECTION:1",
+            "title": "Feedback capacity may define a bypass rescue route",
+            "node_ids": ["NODE:1"],
+            "claim_ids": ["CLAIM:1"],
+            "mechanistic_reasoning": (
+                "Restoring feedback phosphatase capacity could constrain the sustained kinase "
+                "state without directly blocking its initiating lesion."
+            ),
+            "predicted_rescue_direction": "Increase negative feedback on excessive kinase activity.",
+            "why_unexpected": "The route targets endogenous control capacity rather than the driver.",
+            "counterargument": "Feedback induction may be too weak or occur in the wrong cell state.",
+            "limitations": ["Human disease-tissue feedback capacity is not quantified."],
+            "source_ids": ["PMID:4", "PMID:5"],
+        }
+        invalid_connection = json.loads(json.dumps(connection))
+        invalid_connection["source_ids"] = ["PMID:5"]
+        with self.assertRaisesRegex(core.ProgramError, "every source behind its selected claims"):
+            self.submit(action, {
+                "documents": [{
+                    "document_id": "PMID:5", "title": "Feedback verification", "source": "test",
+                }],
+                "hypothesis_connections": [invalid_connection],
+            })
+        self.submit(action, {
+            "documents": [{
+                "document_id": "PMID:5", "title": "Feedback verification", "source": "test",
+            }],
+            "hypothesis_connections": [connection],
+        })
+
+        action = core.next_action(self.root)
+        self.assertEqual(action["next_task"], "candidate_seed_research")
         self.assertEqual(action["next_item_id"], "NODE:1")
         packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
         seed_instructions = " ".join([packet["task"], *packet["rules"]])
@@ -1130,6 +1240,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(strategy_contract["template"]["primary_node_id"], "NODE:1")
         self.assertIn("strategy_key", strategy_contract["required_fields"])
         self.assertIn("linked_node_ids", strategy_contract["required_fields"])
+        self.assertIn("connection_ids", strategy_contract["required_fields"])
         self.assertIn("desired_direction", strategy_contract["required_fields"])
         self.assertEqual(
             strategy_contract["field_contracts"]["search_outcome"]["allowed_values"],
@@ -1173,6 +1284,30 @@ class WorkflowTest(unittest.TestCase):
         )
         self.assertEqual(packet["context"]["focal_context"]["node"]["node_id"], "NODE:1")
         self.assertEqual(packet["context"]["focal_context"]["profile"]["node_id"], "NODE:1")
+        self.assertEqual(
+            [row["connection_id"] for row in packet["context"]["connection_index"]],
+            ["CONNECTION:1"],
+        )
+        self.assertEqual(packet["context"]["focal_connections"], [connection])
+        self.assertEqual(
+            packet["context"]["connection_lookup"]["argv"][-1], "<connection_id>"
+        )
+        bounded_connection = core.connection_context(self.root, "CONNECTION:1")
+        self.assertEqual(
+            bounded_connection["context"]["connection"]["connection_id"],
+            "CONNECTION:1",
+        )
+        self.assertEqual(
+            [row["claim_id"] for row in bounded_connection["context"]["claims"]],
+            ["CLAIM:1"],
+        )
+        self.assertEqual(
+            {
+                row["document_id"]
+                for row in bounded_connection["context"]["source_index"]
+            },
+            {"PMID:4", "PMID:5"},
+        )
         self.assertIn("context_nodes", packet["context"]["focal_context"])
         self.assertIn("context-node association", seed_instructions)
         self.assertIn("rescue-pathway check", seed_instructions)
@@ -1206,6 +1341,23 @@ class WorkflowTest(unittest.TestCase):
                 {"document_id": "PMID:2", "title": "Drug MOA", "source": "test"},
                 {"document_id": "PMID:80", "title": "Unused seed search hit", "source": "test"},
             ],
+            "rescue_strategies": [{
+                "strategy_key": "strategy-1",
+                "primary_node_id": "NODE:1",
+                "linked_node_ids": [],
+                "connection_ids": ["CONNECTION:1"],
+                "pathological_state": "increased kinase signalling",
+                "rescuable_state": "kinase signalling within the normal physiological range",
+                "desired_direction": "decrease excessive kinase activity",
+                "mechanistic_basis": (
+                    "The focal pathology and retained feedback connection support a bypass route."
+                ),
+                "ownership_rationale": "The rescued signalling state belongs to NODE:1.",
+                "assertion_ids": [],
+                "source_ids": ["SRC:1"],
+                "search_outcome": "seeded",
+                "search_summary": "The feedback route produced two supported candidate seeds.",
+            }],
             "candidates": [
                 {
                     "candidate_id": "CHEMBL:1",
@@ -1236,6 +1388,12 @@ class WorkflowTest(unittest.TestCase):
             ],
             "exclusions": [],
         }
+        invalid_records = json.loads(json.dumps(seed_records))
+        invalid_records["rescue_strategies"][0]["connection_ids"] = [
+            "CONNECTION:missing"
+        ]
+        with self.assertRaisesRegex(core.ProgramError, "unknown IDs"):
+            self.submit(action, invalid_records)
         invalid_records = json.loads(json.dumps(seed_records))
         invalid_records["candidates"][0]["graph_node_ids"] = ["MONDO:1"]
         with self.assertRaisesRegex(core.ProgramError, "unknown IDs"):
@@ -1299,6 +1457,10 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(
             review_packet["context"]["rescue_strategies"][0]["primary_node_id"],
             "NODE:1",
+        )
+        self.assertEqual(
+            review_packet["context"]["rescue_strategies"][0]["connection_ids"],
+            ["CONNECTION:1"],
         )
         linked_strategy_id = review_packet["context"]["rescue_strategies"][0][
             "strategy_id"
@@ -2103,6 +2265,7 @@ class WorkflowTest(unittest.TestCase):
                 "strategy_key": "strategy-1",
                 "primary_node_id": "NODE:1",
                 "linked_node_ids": ["NODE:2"],
+                "connection_ids": [],
                 "pathological_state": "increased kinase signalling",
                 "rescuable_state": "kinase signalling within its physiological range",
                 "desired_direction": "decrease excessive kinase activity",
@@ -2173,6 +2336,7 @@ class WorkflowTest(unittest.TestCase):
             "strategy_key": "strategy-2",
             "primary_node_id": "NODE:1",
             "linked_node_ids": [],
+            "connection_ids": [],
             "pathological_state": "reduced cellular resilience",
             "rescuable_state": "cellular resilience sufficient to preserve function",
             "desired_direction": "increase cellular resilience",
@@ -2320,7 +2484,7 @@ class WorkflowTest(unittest.TestCase):
             self.profile(action["next_item_id"], packet["context"]["node"]["node_type"]),
         )
         resumed_action = core.next_action(self.root)
-        self.assertEqual(resumed_action["next_task"], "candidate_seed_research")
+        self.assertEqual(resumed_action["next_task"], "pathology_open_questions")
 
     def test_preflight_reuses_the_ready_packet_and_does_not_accept(self):
         self.curate_single_process()

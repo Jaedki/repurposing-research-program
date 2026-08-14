@@ -30,6 +30,7 @@ from .evidence import (
     _source_index,
 )
 from .graph import _graph_index, _graph_node_context
+from .hypotheses import _connection_index, _connection_rows
 from .identity import (
     _canonical_candidates,
     _identity_candidate_options,
@@ -43,6 +44,16 @@ from .pathology import (
 )
 from .storage import _packet_path, _result_path, _sha256, _stable_id, _write_json
 from .validation import _secret_paths
+
+
+def _source_catalog(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    fields = (
+        "document_id", "canonical_publication_id", "title", "year", "source", "url",
+    )
+    return [
+        {field: row[field] for field in fields if field in row}
+        for row in documents
+    ]
 
 
 def _packet_context(
@@ -257,19 +268,66 @@ def _packet_context(
         }
     graph_result = results["evidence_graph"]
     graph = graph_result["records"]
+    orchestrator = Path(__file__).resolve().parents[1] / "orchestrate_program.py"
+    graph_lookup = {
+        "argv": [
+            "python",
+            str(orchestrator.resolve()),
+            "graph-context",
+            str(run_root),
+            "<node_id>",
+        ]
+    }
+    if task == "pathology_open_questions":
+        return {
+            "graph_snapshot_id": graph_result["snapshot_id"],
+            "graph_index": _graph_index(graph),
+            "context_lookup": graph_lookup,
+        }
+    if task == "pathology_question_research":
+        return {
+            "graph_snapshot_id": graph_result["snapshot_id"],
+            "open_questions": _rows(
+                results["pathology_open_questions"]["records"], "open_questions"
+            ),
+            "graph_index": _graph_index(graph),
+            "context_lookup": graph_lookup,
+            "source_index": _source_catalog(_rows(graph, "documents")),
+        }
+    if task == "pathology_hypothesis_synthesis":
+        source_documents = _merge_documents([
+            *_rows(graph, "documents"),
+            *_rows(results["pathology_question_research"]["records"], "documents"),
+        ])
+        return {
+            "graph_snapshot_id": graph_result["snapshot_id"],
+            "question_answers": _rows(
+                results["pathology_question_research"]["records"], "question_answers"
+            ),
+            "graph_index": _graph_index(graph),
+            "context_lookup": graph_lookup,
+            "source_index": _source_catalog(source_documents),
+        }
     if task == "candidate_seed_research":
-        orchestrator = Path(__file__).resolve().parents[1] / "orchestrate_program.py"
+        focal_connections = [
+            row
+            for row in _connection_rows(results)
+            if str(item_id) in set(map(str, row["node_ids"]))
+        ]
         return {
             "graph_snapshot_id": graph_result["snapshot_id"],
             "focal_context": _graph_node_context(graph, str(item_id)),
             "graph_index": _graph_index(graph),
-            "context_lookup": {
+            "context_lookup": graph_lookup,
+            "connection_index": _connection_index(results),
+            "focal_connections": focal_connections,
+            "connection_lookup": {
                 "argv": [
                     "python",
                     str(orchestrator.resolve()),
-                    "graph-context",
+                    "connection-context",
                     str(run_root),
-                    "<node_id>",
+                    "<connection_id>",
                 ]
             },
         }
@@ -430,7 +488,18 @@ def _row_template(name: str) -> dict[str, Any]:
                       "contradictions", "gaps", "source_ids"):
             template[field] = []
     elif name == "rescue_strategies":
-        template.update({"linked_node_ids": [], "assertion_ids": [], "source_ids": []})
+        template.update({
+            "linked_node_ids": [], "connection_ids": [], "assertion_ids": [],
+            "source_ids": [],
+        })
+    elif name == "open_questions":
+        template["node_ids"] = []
+    elif name == "question_answers":
+        template.update({"claims": [], "node_ids": [], "limitations": []})
+    elif name == "hypothesis_connections":
+        template.update({
+            "node_ids": [], "claim_ids": [], "limitations": [], "source_ids": [],
+        })
     elif name == "candidates":
         template.update({
             "identifiers": {},
@@ -584,6 +653,12 @@ def _build_packet(
             "Return JSON only.",
         ]
     elif task == "pathology_node_research":
+        packet_rules = []
+    elif task == "pathology_open_questions":
+        packet_rules = []
+    elif task == "pathology_question_research":
+        packet_rules = []
+    elif task == "pathology_hypothesis_synthesis":
         packet_rules = []
     elif task == "candidate_seed_research":
         packet_rules = [

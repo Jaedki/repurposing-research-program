@@ -290,8 +290,9 @@ def _all_documents(results: Mapping[str, Mapping[str, Any]]) -> list[dict[str, A
     """Return the retained downstream corpus, not every accepted discovery document.
 
     Asta and Undermind discovery papers are projected selectively into the frozen graph after
-    curation. Directly unioning either discovery result here would reintroduce papers supporting
-    excluded proposals.
+    curation. Global question and connection research is a discovery aid for seed workers, not a
+    downstream evidence shortcut. Directly unioning those results here would retain sources that
+    no candidate or strategy independently used.
     """
     return _merge_documents(
         (
@@ -299,6 +300,7 @@ def _all_documents(results: Mapping[str, Mapping[str, Any]]) -> list[dict[str, A
             for stage, result in results.items()
             if stage not in {
                 "pathology_landscape_scan", "pathology_coverage_expansion",
+                "pathology_question_research", "pathology_hypothesis_synthesis",
             }
             if isinstance(result.get("records"), Mapping)
             for row in _cited_documents(result["records"])

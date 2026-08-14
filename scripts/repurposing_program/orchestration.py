@@ -23,6 +23,11 @@ from .evidence import (
     _validate_research_document_content,
 )
 from .graph import _assemble_graph_result
+from .hypotheses import (
+    _validate_hypothesis_synthesis,
+    _validate_open_questions,
+    _validate_question_research,
+)
 from .identity import (
     _UniChemBatchPending,
     _empty_identity_result,
@@ -409,6 +414,15 @@ def _validate_result(
         "pathology_curation": lambda: _validate_curation(result["records"], prior),
         "pathology_node_research": lambda: _validate_pathology_item(
             result["records"], str(item_id), prior,
+        ),
+        "pathology_open_questions": lambda: _validate_open_questions(
+            result["records"], prior
+        ),
+        "pathology_question_research": lambda: _validate_question_research(
+            result["records"], prior
+        ),
+        "pathology_hypothesis_synthesis": lambda: _validate_hypothesis_synthesis(
+            result["records"], prior
         ),
         "candidate_seed_research": lambda: _validate_seed_item(
             result["records"], str(item_id), prior

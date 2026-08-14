@@ -23,6 +23,7 @@ class PublicContractTest(unittest.TestCase):
                 "ProgramError",
                 "STAGES",
                 "build_outputs",
+                "connection_context",
                 "graph_context",
                 "initialize",
                 "next_action",
@@ -71,6 +72,19 @@ class PublicContractTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(json.loads(stdout.getvalue()), {"ok": True, "result": expected})
         validate.assert_called_once_with("RUN", "result.json")
+
+    def test_cli_connection_context_dispatches_bounded_lookup(self):
+        expected = {"context": {"connection": {"connection_id": "CONNECTION:1"}}}
+        stdout = io.StringIO()
+        with (
+            patch.object(cli, "connection_context", return_value=expected) as lookup,
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = cli.main(["connection-context", "RUN", "CONNECTION:1"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(json.loads(stdout.getvalue()), {"ok": True, "result": expected})
+        lookup.assert_called_once_with("RUN", "CONNECTION:1")
 
 
 if __name__ == "__main__":

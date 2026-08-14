@@ -11,6 +11,7 @@ from .contracts import EXPERIMENTAL_USE_POLICY, OBJECTIVE, STAGES
 from .errors import ProgramError
 from .evidence import _rows
 from .graph import _graph_node_context
+from .hypotheses import _connection_context
 from .identity import _identity_queue
 from .pathology import _research_concepts
 from .storage import (
@@ -281,4 +282,27 @@ def graph_context(root: str | Path, node_id: str) -> dict[str, Any]:
         "case_id": case["case_id"],
         "graph_snapshot_id": graph["snapshot_id"],
         "context": _graph_node_context(records, node_id),
+    }
+
+
+def connection_context(root: str | Path, connection_id: str) -> dict[str, Any]:
+    run_root = Path(root).expanduser().resolve()
+    case, results = _case(run_root), _load_results(run_root)
+    graph = results.get("evidence_graph")
+    if graph is None:
+        raise ProgramError("Connection context is unavailable before the evidence graph is frozen")
+    records = graph.get("records")
+    if not isinstance(records, dict) or graph.get("snapshot_id") != _stable_id(
+        "GRAPH", records
+    ):
+        raise ProgramError("Evidence graph snapshot verification failed")
+    if "pathology_hypothesis_synthesis" not in results:
+        raise ProgramError("Connection context is unavailable before hypothesis synthesis")
+    connection_id = connection_id.strip()
+    if not connection_id:
+        raise ProgramError("connection_id is required")
+    return {
+        "case_id": case["case_id"],
+        "graph_snapshot_id": graph["snapshot_id"],
+        "context": _connection_context(results, connection_id),
     }

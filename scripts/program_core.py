@@ -9,7 +9,7 @@ from repurposing_program.contracts import (
 from repurposing_program.errors import ProgramError
 from repurposing_program.orchestration import next_action, submit, validate_submission
 from repurposing_program.outputs import build_outputs
-from repurposing_program.run_state import graph_context, initialize, status
+from repurposing_program.run_state import connection_context, graph_context, initialize, status
 
 
 __all__ = [
@@ -18,6 +18,7 @@ __all__ = [
     "ProgramError",
     "STAGES",
     "build_outputs",
+    "connection_context",
     "graph_context",
     "initialize",
     "next_action",

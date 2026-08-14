@@ -10,6 +10,7 @@ import sys
 from program_core import (
     ProgramError,
     build_outputs,
+    connection_context,
     graph_context,
     initialize,
     next_action,
@@ -41,6 +42,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     graph_command.add_argument("run_folder")
     graph_command.add_argument("node_id")
+    connection_command = commands.add_parser(
+        "connection-context", help="return one bounded retained hypothesis connection"
+    )
+    connection_command.add_argument("run_folder")
+    connection_command.add_argument("connection_id")
     return parser
 
 
@@ -62,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
                 result = build_outputs(args.run_folder)
             case "graph-context":
                 result = graph_context(args.run_folder, args.node_id)
+            case "connection-context":
+                result = connection_context(args.run_folder, args.connection_id)
             case _:
                 raise AssertionError(args.command)
     except (ProgramError, OSError) as exc:

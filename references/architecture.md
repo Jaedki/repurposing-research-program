@@ -11,13 +11,17 @@
 | `pathology_coverage_expansion` | One global agent | One completed Undermind coverage challenge and retained cited proposals |
 | `pathology_curation` | One agent | Exact partition into final run-local concepts and dispositions |
 | `evidence_graph` | Python after item work | One accepted profile per research concept and one frozen snapshot |
+| `pathology_open_questions` | One global agent | One to ten graph-anchored, rescue-relevant open questions |
+| `pathology_question_research` | One global agent | Every question answered, partly answered, or explicitly unresolved |
+| `pathology_hypothesis_synthesis` | One global agent | Defensible claim-anchored connections, or an explicit empty set |
 | `candidate_seed_generation` | Python after item work | One accepted seed result per research concept and deterministic aggregation |
 | `candidate_identity` | Python plus one bounded agent when needed | Complete resolution or explicit retention of every identity residue |
 | `candidate_review` | Python after item work | One accepted dossier per assigned canonical candidate |
 | `candidate_audit` | One independent agent, then Python | Exact candidate partition, at least one assessment, and deterministic ordering |
 
 Within the three item barriers, `next` selects the first missing item from a stable sorted manifest.
-`graph-context` returns a deterministic read-only node projection without changing controller state.
+`graph-context` returns a deterministic read-only node projection without changing controller state;
+after synthesis, `connection-context` does the same for one retained connection and its claims.
 After identity resolution, Python assigns each candidate once to an origin concept, breaking ties by
 concept ID. This is a deterministic cursor, not a general DAG, queue, scheduler, or agent-controlled
 handoff. Packet contents and worker obligations are defined in [packet-contract.md](packet-contract.md).
@@ -45,6 +49,11 @@ Graph edges originate only from retained source edges or accepted researched ass
 `related_concept_ids` remain a separate administrative `context_nodes` projection so a seed worker
 can consider them while constructing rescue routes without mistaking curation proximity for sourced
 biological support.
+
+The three global hypothesis stages run after graph freezing and before candidate seeding. They do
+not mutate the graph or nominate drugs. Their literature is exposed to seed workers only through
+the retained connection index and bounded connection lookup; it does not enter the audit corpus
+unless a downstream candidate stage independently retrieves and cites the relevant evidence.
 
 ## Ownership
 
@@ -102,6 +111,8 @@ point while extracted responsibilities have one owner:
   and researched-profile validation;
 - `repurposing_program.graph` owns deterministic assertion merging, frozen-graph assembly, graph
   indexing, support lookup, and bounded node-context projection;
+- `repurposing_program.hypotheses` owns global open-question, answer, and connection validation,
+  compact connection indexing, and bounded connection projection;
 - `repurposing_program.identity` owns UniChem transport/caching, exact-identity grouping, identity
   review options, canonical candidate assembly, and identity-result validation;
 - `repurposing_program.candidates` owns review-batch partitioning and candidate seed/dossier
@@ -116,7 +127,8 @@ point while extracted responsibilities have one owner:
   projections;
 - `repurposing_program.manifests` owns artifact metadata and final manifest construction;
 - `repurposing_program.run_state` owns case identity and initialization, accepted stage and item
-  loading, derived stop/status state, output-manifest verification, and read-only graph context;
+  loading, derived stop/status state, output-manifest verification, and read-only graph and
+  connection context;
 - `repurposing_program.packets` owns stage-specific context projection, worker result-contract
   construction, packet validation, content addressing, and packet persistence;
 - `repurposing_program.orchestration` owns deterministic controller advancement, item-result

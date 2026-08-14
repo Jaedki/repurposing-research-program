@@ -8,6 +8,7 @@ from .contracts import PRIOR_ART_STATUSES, _COMPARATORS
 from .errors import ProgramError
 from .evidence import _all_documents, _cited_ids, _find, _rows
 from .graph import _graph_support_ids
+from .hypotheses import _connection_rows
 from .identity import _candidate_queries, _canonical_candidates
 from .pathology import _research_concepts
 from .validation import (
@@ -141,7 +142,12 @@ def _validate_seed_item(
     assertions_by_id = {
         str(row["assertion_id"]): row for row in _rows(graph, "assertions")
     }
+    connections_by_id = {
+        str(row["connection_id"]): row for row in _connection_rows(results)
+    }
     pathology_source_ids = _ids(_rows(graph, "documents"), "document_id", "documents")
+    returned_seed_source_ids = {str(row["document_id"]) for row in documents}
+    strategy_source_ids = {*pathology_source_ids, *returned_seed_source_ids}
     if not strategies:
         raise ProgramError("candidate seed research requires at least one rescue_strategy")
 
@@ -179,6 +185,11 @@ def _validate_seed_item(
             f"{label}.assertion_ids",
             allowed=set(assertions_by_id),
         )
+        connection_refs = _id_list(
+            strategy["connection_ids"],
+            f"{label}.connection_ids",
+            allowed=set(connections_by_id),
+        )
         strategy_nodes = {concept_id, *linked_refs}
         missing_assertion_nodes = sorted(
             node_id for node_id in _assertion_nodes(assertion_refs, assertions_by_id)
@@ -189,8 +200,18 @@ def _validate_seed_item(
                 f"{label}.linked_node_ids must include selected assertion nodes: "
                 f"{missing_assertion_nodes}"
             )
+        unrelated_connections = sorted(
+            connection_id
+            for connection_id in connection_refs
+            if not strategy_nodes & set(map(str, connections_by_id[connection_id]["node_ids"]))
+        )
+        if unrelated_connections:
+            raise ProgramError(
+                f"{label}.connection_ids must overlap the strategy's primary or linked nodes: "
+                f"{unrelated_connections}"
+            )
         strategy_sources = _references(
-            strategy, "source_ids", pathology_source_ids, label
+            strategy, "source_ids", strategy_source_ids, label
         )
         if len(strategy_sources) != len(strategy["source_ids"]):
             raise ProgramError(f"{label}.source_ids must be unique")
@@ -214,7 +235,7 @@ def _validate_seed_item(
         seen_signatures.add(signature)
         strategy_by_key[str(strategy["strategy_key"])] = strategy
 
-    new_mechanism_source_ids = {str(row["document_id"]) for row in documents}
+    new_mechanism_source_ids = returned_seed_source_ids
     mechanism_source_ids = {
         *pathology_source_ids,
         *new_mechanism_source_ids,

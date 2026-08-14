@@ -1311,8 +1311,15 @@ class LandscapeWorkflowTest(unittest.TestCase):
         deep_path.write_text(json.dumps(deep_result), encoding="utf-8")
         core.submit(self.root, deep_path)
         seed_action = core.next_action(self.root)
-        self.assertEqual(seed_action["next_task"], "candidate_seed_research")
-        self.assertEqual(seed_action["next_item_id"], asta_id)
+        self.assertEqual(seed_action["next_task"], "pathology_open_questions")
+        self.assertIsNone(seed_action["next_item_id"])
+        open_packet = json.loads(
+            Path(seed_action["packet_path"]).read_text(encoding="utf-8")
+        )
+        self.assertIn(
+            asta_id,
+            {row["node_id"] for row in open_packet["context"]["graph_index"]},
+        )
         graph_result = json.loads(
             (self.root / "results" / "evidence_graph.json").read_text(encoding="utf-8")
         )

@@ -69,6 +69,9 @@ STAGES = (
     "pathology_coverage_expansion",
     "pathology_curation",
     "evidence_graph",
+    "pathology_open_questions",
+    "pathology_question_research",
+    "pathology_hypothesis_synthesis",
     "candidate_seed_generation",
     "candidate_identity",
     "candidate_review",
@@ -340,6 +343,48 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
         ),
         "collections": ["documents", "profiles", "assertions"],
     },
+    "pathology_open_questions": {
+        "role": "global pathology open-question researcher",
+        "task": (
+            "Inspect the complete frozen pathology graph through its compact index and bounded "
+            "node-context lookup. Identify between one and ten unanswered questions whose resolution "
+            "could materially broaden, connect, challenge, or redirect a later biological rescue "
+            "route. Every question must name the graph nodes that motivate it and explain why the "
+            "answer could matter for rescue reasoning. Prefer cross-node causality, compensation or "
+            "bypass, state direction or timing, compartment translation, model-to-human translation, "
+            "and contradictions or missing links. Do not research the answers, nominate drugs, search "
+            "for treatments, or add graph nodes or edges. Do not pad the list with generic screening, "
+            "platform, unrelated-disease, or already answered questions."
+        ),
+        "collections": ["open_questions"],
+    },
+    "pathology_question_research": {
+        "role": "global pathology question researcher",
+        "task": (
+            "Answer every supplied open question through normal primary-source research, using the "
+            "frozen graph index and node-context lookup to preserve the disease context. Return each "
+            "question exactly once as answered, partially_answered, or unresolved. Separate directly "
+            "supported factual claims from synthesis; every claim cites inspectable evidence, while "
+            "limitations and remaining uncertainty stay explicit. Experimental perturbations may "
+            "clarify causal biology, but do not nominate candidates, search disease-drug associations, "
+            "or interpret an intervention as a treatment. Do not alter the frozen graph."
+        ),
+        "collections": ["documents", "question_answers"],
+    },
+    "pathology_hypothesis_synthesis": {
+        "role": "global pathology connection synthesist and critic",
+        "task": (
+            "Use only the supplied answered questions, their cited claims, and the frozen graph to "
+            "generate, compare, challenge, and refine unexpected biological connections that could "
+            "inform later rescue-strategy discovery. Targeted literature search is permitted only to "
+            "verify or challenge a proposed connection. Return only defensible connections, each "
+            "anchored to exact claim and graph-node IDs with a mechanistic direction, an explanation "
+            "of why it is non-obvious, a concrete counterargument, limitations, and citations. An "
+            "empty connection set is valid when critique eliminates every proposal. Do not nominate "
+            "drugs, rank candidates, create graph edges, or mutate the frozen graph."
+        ),
+        "collections": ["documents", "hypothesis_connections"],
+    },
     "candidate_seed_research": {
         "role": "mechanism-directed candidate seed researcher",
         "task": (
@@ -368,6 +413,9 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "establishes the claimed relationship. Include only context that materially contributes "
             "after that bounded review; a focal-only hypothesis remains valid. "
             "After that review, cross-node use is never mandatory. "
+            "Supplied global connections are optional discovery leads, not graph evidence; record "
+            "a connection ID only when it materially informs the route, then validate that route "
+            "against the frozen pathology and independently cited evidence. "
             "Do not pad the "
             "list. A supplied linked graph node may support a symptomatic or compensatory candidate "
             "only when its relationship to the focal concept and candidate hypothesis is "
@@ -591,9 +639,63 @@ ROW_SCHEMAS = {
         ],
         "additional_fields": False,
     },
+    "open_questions": {
+        "required_fields": ["question_id", "question", "rationale", "node_ids"],
+        "additional_fields": False,
+        "field_contracts": {
+            "node_ids": {
+                "type": "non-empty list of unique frozen graph node IDs",
+            },
+        },
+    },
+    "question_answers": {
+        "required_fields": [
+            "question_id", "question", "status", "answer", "claims", "node_ids",
+            "limitations",
+        ],
+        "additional_fields": False,
+        "field_contracts": {
+            "status": {
+                "allowed_values": ["answered", "partially_answered", "unresolved"],
+            },
+            "claims": {
+                "type": "list of objects",
+                "required_fields": ["claim_id", "claim", "source_ids"],
+                "additional_fields": False,
+            },
+            "node_ids": {
+                "type": "non-empty list of unique frozen graph node IDs",
+            },
+            "limitations": {
+                "type": "list of non-empty strings",
+            },
+        },
+    },
+    "hypothesis_connections": {
+        "required_fields": [
+            "connection_id", "title", "node_ids", "claim_ids", "mechanistic_reasoning",
+            "predicted_rescue_direction", "why_unexpected", "counterargument", "limitations",
+            "source_ids",
+        ],
+        "additional_fields": False,
+        "field_contracts": {
+            "node_ids": {
+                "type": "non-empty list of unique frozen graph node IDs",
+            },
+            "claim_ids": {
+                "type": "non-empty list of unique question-research claim IDs",
+            },
+            "limitations": {
+                "type": "list of non-empty strings",
+            },
+            "source_ids": {
+                "type": "non-empty list of unique source IDs supporting the connection",
+            },
+        },
+    },
     "rescue_strategies": {
         "required_fields": [
-            "strategy_key", "primary_node_id", "linked_node_ids", "pathological_state",
+            "strategy_key", "primary_node_id", "linked_node_ids", "connection_ids", "pathological_state",
             "rescuable_state", "desired_direction", "mechanistic_basis",
             "ownership_rationale", "assertion_ids", "source_ids", "search_outcome",
             "search_summary",
@@ -619,6 +721,12 @@ ROW_SCHEMAS = {
                     "may be empty; omit the primary node; include only materially used linked nodes"
                 ),
             },
+            "connection_ids": {
+                "type": "list of unique retained global connection IDs",
+                "value_rule": (
+                    "may be empty; include only connections materially used to formulate this route"
+                ),
+            },
             "assertion_ids": {
                 "type": "list of unique graph assertion IDs",
                 "value_rule": (
@@ -627,8 +735,12 @@ ROW_SCHEMAS = {
                 ),
             },
             "source_ids": {
-                "type": "non-empty list of unique pathology source IDs",
-                "value_rule": "supports the primary node and every linked node",
+                "type": "non-empty list of unique retained source IDs",
+                "value_rule": (
+                    "includes frozen graph support for the primary node and every linked node; "
+                    "newly retrieved evidence used to validate a global connection is returned "
+                    "again in this packet before citation"
+                ),
             },
             "search_outcome": {
                 "allowed_values": ["seeded", "no_supported_seed"],
@@ -853,13 +965,43 @@ FIELD_RULES = {
         "cell, biochemical, or inferred; model; stage; polarity as supports or contradicts; and "
         "one context-specific summary; no treatment content",
     ],
+    "pathology_open_questions": [
+        "return between one and ten materially distinct open questions; do not fill a quota",
+        "question_id values are unique and each question, rationale, and node_ids list is non-empty",
+        "every node_id is copied from context.graph_index and the rationale explains how resolving "
+        "the question could change rescue reasoning",
+        "inspect the complete graph index and use context_lookup for the node JSON needed to test "
+        "whether each question is genuinely unanswered",
+        "do not research answers, nominate drugs, search treatments, or create graph claims",
+    ],
+    "pathology_question_research": [
+        "partition every supplied question_id exactly once and copy its question text exactly",
+        "status is answered, partially_answered, or unresolved; unresolved may have no claims, while "
+        "answered and partially_answered require at least one directly supported claim",
+        "claim_id values are unique across the result; every claim is non-empty and cites one or more "
+        "returned or retained graph sources",
+        "node_ids include every node attached to the supplied question and contain only graph IDs",
+        "limitations is a list of concise non-empty strings and may be empty",
+        "do not nominate drugs, search disease-drug associations, or mutate the graph",
+    ],
+    "pathology_hypothesis_synthesis": [
+        "each connection_id is unique and every connection cites one or more exact claim_ids and "
+        "one or more frozen graph node_ids",
+        "source_ids include the evidence behind every selected claim and any returned verification source",
+        "mechanistic_reasoning and predicted_rescue_direction state a coherent biological bridge and "
+        "direction; why_unexpected, counterargument, and limitations prevent uncritical amplification",
+        "return only connections surviving comparison and critique; an empty list is valid",
+        "do not nominate drugs, rank candidates, create graph edges, or mutate the graph",
+    ],
     "candidate_seed_research": [
         "before drug searching, return one or more rescue_strategies for the focal primary node; "
         "derive each pathological_state, rescuable_state, desired_direction, and mechanistic_basis "
-        "only from the frozen pathology JSON and cite retained pathology sources; do not add "
+        "from the frozen pathology JSON and any independently re-checked connection evidence; "
+        "cite retained sources and do not add "
         "strategies to meet a numerical quota",
         "strategy_key values are unique within this packet; primary_node_id exactly copies the "
         "focal node; linked_node_ids contains only materially used non-primary graph nodes and may "
+        "be empty; connection_ids contains only materially used retained global connections and may "
         "be empty; assertion_ids contains only graph assertions actually used by that strategy",
         "ownership_rationale explains why the rescued state lives in the primary node after "
         "comparison with every linked node; do not repeat the same state and route under a linked "

@@ -89,11 +89,14 @@ The controller advances linearly through:
 6. one constrained curation packet;
 7. one deep pathology-research packet per curated research concept;
 8. a frozen living evidence graph;
-9. one candidate-seed packet per researched concept;
-10. deterministic UniChem lookup and one identity-review packet when needed;
-11. one evidence-dossier packet per nonempty candidate-review batch;
-12. one closed-corpus independent candidate audit;
-13. deterministic scoring, ranking, and output construction.
+9. one global packet that identifies up to ten material open pathology questions;
+10. one global packet that researches every question;
+11. one global packet that synthesizes and challenges unexpected biological connections;
+12. one candidate-seed packet per researched concept;
+13. deterministic UniChem lookup and one identity-review packet when needed;
+14. one evidence-dossier packet per nonempty candidate-review batch;
+15. one closed-corpus independent candidate audit;
+16. deterministic scoring, ranking, and output construction.
 
 Asta and Undermind are required only in their named stages. Their presence in the sequence is not a
 general preference for research tools or sources. All other research follows the evidence question
