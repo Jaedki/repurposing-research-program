@@ -139,10 +139,6 @@ SCORE_RUBRIC = {
     ),
     "components": SCORE_COMPONENT_RUBRIC,
 }
-SCORE_LABELS = {
-    component: definition["label"]
-    for component, definition in SCORE_RUBRIC["components"].items()
-}
 PRIOR_ART_STATUSES = frozenset({
     "none_found",
     "preclinical_only",
@@ -151,16 +147,15 @@ PRIOR_ART_STATUSES = frozenset({
     "unclear",
 })
 AUDIT_EXCLUSION_POLICY = {
-    "exact_disease_use": (
-        "The retained corpus establishes that the exact candidate is already an established "
-        "therapeutic use for the exact disease."
-    ),
-    "qualifying_exact_disease_experiment": (
-        "The retained corpus establishes that the exact candidate was administered in the exact "
-        "disease or a disease-specific model in a therapeutic experiment with relevant exposure, "
-        "a credible counterfactual, and a disease-relevant outcome, making the result interpretable "
-        "whether favorable or unfavorable. Mere registration, an uncontrolled anecdote, or an "
-        "unsuitable or inadequately controlled experiment does not qualify."
+    "exact_disease_prior_use_or_testing": (
+        "The retained corpus establishes that the exact candidate, including the same active moiety "
+        "as a salt, formulation, or combination component, is an established exact-disease use, was "
+        "deliberately administered or applied in the exact disease or a disease-specific human, animal, "
+        "cell, or organoid model with a disease-relevant endpoint, or entered a registered exact-disease "
+        "therapeutic study. Exclude "
+        "regardless of outcome, controls, study quality, or interpretability. A proposal, review, "
+        "patent, computational prediction, related-disease study, class-level analogue, incidental "
+        "exposure, or unresolved identity does not establish exact-disease testing."
     ),
     "unsupported_action": (
         "The retained corpus contains no credible direct support that the exact candidate has the "
@@ -182,7 +177,7 @@ AUDIT_EXCLUSION_POLICY = {
 }
 AUDIT_EXCLUSION_REASONS = frozenset(AUDIT_EXCLUSION_POLICY)
 EVIDENCE_DISPOSITIONS = frozenset({
-    "qualifying_use", "qualifying_experiment", "relevant_not_qualifying",
+    "exact_disease_prior_use_or_testing", "relevant_not_tested",
     "name_collision", "irrelevant",
 })
 LANDSCAPE_PROPOSAL_TYPES = frozenset({
@@ -229,9 +224,10 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "Perform one shallow, treatment-blind Asta landscape scan against the supplied source-node index. "
             "Discover directly supported disease-linked abnormal biological claims that are absent or materially more specific. "
             "Return separate atomic proposals when a broad finding contains independently normalisable states; these are decomposition candidates only for the following curation agent, which alone owns splits, merges, final identity, and eligibility. "
-            "Build the coverage-gap register from the Monarch and DisMech index, using normal "
-            "literature research and supplementary Life Science Research lookups when they clarify "
-            "a broad source label. Turn the resulting questions into the "
+            "Build the coverage-gap register from the Monarch and DisMech index. A relevant "
+            "structured scientific lookup may be used transiently to resolve an entity, pathway, "
+            "interaction, expression, or ontology ambiguity and sharpen an Asta query; it does not "
+            "replace the required Asta search or a source-backed proposal. Turn the resulting questions into the "
             "prescribed broad and focused Asta searches. "
             "Do not perform deep node research, candidate research, or recursive citation traversal."
         ),
@@ -336,8 +332,7 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "researched graph assertion as a biological triple with one or "
             "more evidence_context entries that preserve evidence type, model, stage, polarity, "
             "summary, and citations; Python assigns the final assertion ID. Retain only "
-            "established pathology observations; an empty list is valid. Use normal literature search "
-            "and primary-paper reading, supplemented by relevant Life Science Research lookups. Keep discovery "
+            "established pathology observations; an empty list is valid. Keep discovery "
             "pathology-led: do not search for candidates, therapies, repurposing, or disease-drug "
             "associations. When an intervention appears in a source, retain only directly supported "
             "causal biology and pathology; do not use its therapeutic interpretation, efficacy, "
@@ -367,8 +362,11 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "assertion_ids list is valid when the focal profile alone supports the hypothesis, "
             "but graph_rationale must say so. Include only materially used graph nodes. "
             "Before searching, review the focal profile and every immediate source edge, researched "
-            "assertion, and neighbouring node supplied in focal_context. Include only context that "
-            "materially contributes after that bounded review; a focal-only hypothesis remains valid. "
+            "assertion, neighbouring node, and administrative context node supplied in focal_context. "
+            "A context-node association may prompt a rescue-pathway check but is not biological "
+            "evidence; use it as linked support only when a source edge or researched assertion "
+            "establishes the claimed relationship. Include only context that materially contributes "
+            "after that bounded review; a focal-only hypothesis remains valid. "
             "After that review, cross-node use is never mandatory. "
             "Do not pad the "
             "list. A supplied linked graph node may support a symptomatic or compensatory candidate "
@@ -377,9 +375,7 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "Retain a less-plausible seed only when it offers a discriminating, mechanism-relevant "
             "readout, and state what that readout would resolve. "
             "Use the compact graph index to identify context and retrieve only concepts materially "
-            "relevant to the focal rescue; do not traverse the graph for completeness. Use normal "
-            "literature and authoritative database research, supplemented by relevant Life Science "
-            "Research lookups. "
+            "relevant to the focal rescue; do not traverse the graph for completeness. "
             "Search from the supplied target or process to established drug action; do not use "
             "disease-specific drug literature or queries combining the disease with drug, "
             "treatment, therapy, trial, or repurposing terms. Cite pathology and mode-of-action "
@@ -413,21 +409,20 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "not infer graph support from evidence outside that projection. For "
             "every candidate, first retrieve primary or authoritative sources that verify identity, "
             "target and action, pharmacology, relevant exposure, and measurable readouts, then map "
-            "those facts to the supplied pathology. Use normal literature and authoritative database "
-            "research; relevant Life Science Research lookups are available as supplementary structured "
-            "lookups. Build an evidence dossier rather than a score "
+            "those facts to the supplied pathology. Build an evidence dossier rather than a score "
             "or eligibility decision: state the hypothesis, cited supporting findings, a concise "
             "mechanistic bridge, its explicit assumptions, cited why-not findings, and limitations. "
             "A long or unconventional bridge remains a valid hypothesis when its assumptions are "
             "clear. Only after constructing the mechanism, assess exact-disease prior art through "
             "ordinary literature discovery to evidence saturation across supported candidate names or "
-            "salt forms and the disease and gene names. No particular research service, fixed query "
-            "form, or numerical result bound is required; structured lookups are optional supplements. "
+            "salt forms and the disease and gene names. "
             "The controller alone owns canonical PMID, PMCID, and DOI identity and title verification "
             "during validation and submission. Classify "
             "it as none found, preclinical only, human intervention, established use, or unclear. "
-            "For reported experiments, retain the design, exposure, counterfactual, model, and outcome "
-            "details needed for the auditor to judge whether the result is interpretable. "
+            "For any prior art, retain enough detail to establish exact candidate identity, exact "
+            "disease or subtype, and whether the candidate was deliberately tested with a "
+            "disease-relevant endpoint or entered a registered therapeutic study. Study quality, "
+            "controls, and outcome do not restore repurposing novelty. "
             "Preserve decision-changing negative evidence. Report safety only when it opposes the "
             "desired phenotype, prevents relevant exposure, confounds the readout, or changes "
             "prioritisation. Record only drug names or salt forms explicitly used in cited evidence."
@@ -443,10 +438,11 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "once into a scored assessment or a cited exclusion. Match each candidate's strategy_ids "
             "to context.rescue_strategies and assess only those strategies for that candidate. Exclude "
             "only established exact-"
-            "disease use, a qualifying exact-disease experiment, unsupported proposed drug action, action "
+            "disease use, any confirmed exact-disease testing or registered therapeutic study, "
+            "unsupported proposed drug action, action "
             "clearly opposite to the seed-stage rescue strategy without compensation, demonstrated impossibility "
             "of relevant action or exposure, or an invalid candidate class. Unresolved identity, "
-            "weak evidence, long causal distance, uncertain exposure, nonqualifying prior evidence, and "
+            "weak evidence, long causal distance, uncertain exposure, related-disease evidence, and "
             "material assumptions remain scored with explicit why-not findings. For every assessment and "
             "exclusion, decide whether each cited source supports, partly supports, does not support, or "
             "contradicts the exact place it is used. Do not defer this judgment or request re-verification. "
@@ -454,10 +450,11 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "it directly challenges; if it does not challenge a scored premise, retain it only as an "
             "unscored why-not finding. Assign one cited integer score from 1 through 20 "
             "for each of drug-action confidence, disease-mechanism relevance, mechanistic-bridge "
-            "plausibility, and translational feasibility; and give a concise cited net assessment of why "
-            "the candidate remains worth ranking without repeating component reasons or why-not findings. "
+            "plausibility, and translational feasibility. Populate net_assessment and why_not as the "
+            "final-card prose defined in their field rules. "
             "Python computes the raw total "
-            "and ranking. Return only audited aliases and why-not findings that may enter final output."
+            "and ranking. Return audited aliases for provenance and concise, cited why-not findings for "
+            "the final card."
         ),
         "collections": ["assessments", "excluded_candidates", "evidence_dispositions"],
     },
@@ -892,9 +889,11 @@ FIELD_RULES = {
         "without repeating mechanism_hypothesis",
         "each candidate graph selection includes the primary and linked nodes and assertion_ids of "
         "every strategy_key it references",
-        "before searching, review every immediate source edge, researched assertion, and neighbouring "
-        "node in focal_context; after that bounded review cross-node use is optional and must never be "
-        "added for coverage",
+        "before searching, review every immediate source edge, researched assertion, neighbouring "
+        "node, and administrative context node in focal_context; a context-node association may "
+        "prompt a rescue-pathway check but supports a linked biological claim only through a source "
+        "edge or researched assertion; after that bounded review cross-node use is optional and must "
+        "never be added for coverage",
         "each graph_node_id has at least one attached source in pathology_source_ids; state the "
         "supported relationship because graph proximity or label similarity is not evidence",
         "mechanism_source_ids support the drug mode of action and exclude disease-specific drug evidence",
@@ -935,6 +934,9 @@ FIELD_RULES = {
         "merely to populate it",
         "prior_art has exactly status, summary, and findings; status is none_found, preclinical_only, "
         "human_intervention, established_use, or unclear; positive statuses cite at least one finding",
+        "preclinical_only includes deliberate exact-disease testing in an animal, cell, organoid, or "
+        "other disease-specific model; human_intervention includes actual human testing and a "
+        "registered exact-disease therapeutic study",
         "the reviewer does not score, rank, or exclude candidates",
     ],
     "candidate_audit": [
@@ -942,7 +944,8 @@ FIELD_RULES = {
         "reviewed candidate",
         "match each candidate.strategy_ids exactly to context.rescue_strategies.strategy_id before "
         "judging whether the drug action supports or opposes its rescue route",
-        "evidence_dispositions covers every candidate-source pair in context.candidate_evidence_index exactly once; qualifying_use or qualifying_experiment requires the matching bounded exclusion",
+        "evidence_dispositions covers every candidate-source pair in context.candidate_evidence_index "
+        "exactly once; exact_disease_prior_use_or_testing requires its matching exclusion",
         "source_integrity has exactly checks; do not return a summary status or generic declaration",
         "each source-integrity check has source_id, scope, verdict, and finding and covers exactly "
         "one source use in a component score, net assessment, indexed alias, indexed why-not "
@@ -961,17 +964,27 @@ FIELD_RULES = {
         "a 20-point component has no does_not_support or contradicts checks",
         "counterevidence never earns positive scoring credit; lower every component whose premise "
         "it directly challenges and otherwise retain it only in why_not",
-        "net_assessment has exactly text and source_ids and concisely states why the candidate "
-        "remains worth ranking without repeating component reasons or why_not findings",
-        "audited aliases and why_not use cited name or finding objects and are the only review-like "
-        "fields that may enter final cards",
+        "net_assessment has exactly text and source_ids; its text uses complete sentences and "
+        "concise mechanistic prose that "
+        "connects established drug action to the relevant disease mechanism and predicted corrective "
+        "or compensatory effect, marks the repurposing step as an inference, and contains no score, "
+        "rank, audit metadata, source-verification commentary, field labels, clause fragments, "
+        "keyword lists, or ellipses standing in for omitted text",
+        "why_not contains concise, cited, complete-sentence reasons against prioritisation, not "
+        "field labels, clause fragments, keyword lists, or ellipses; aliases remain provenance only "
+        "and do not enter final cards",
         "excluded_candidates use a source-backed reason_code from the bounded exclusion policy and "
         "verify every cited source under the exclusion scope",
-        "apply every qualifying_exact_disease_experiment criterion; favorable and unfavorable human "
-        "or preclinical results are treated alike, while mere registration, uncontrolled anecdotes, "
-        "and uninterpretable experiments remain scored with one concise cited why_not finding",
+        "classify exact_disease_prior_use_or_testing whenever the exact candidate is an established "
+        "exact-disease use, was deliberately tested in the "
+        "exact disease or a disease-specific human, animal, cell, or organoid model with a "
+        "disease-relevant endpoint, or entered a registered exact-disease therapeutic study; outcome, "
+        "controls, quality, and interpretability do not restore novelty",
+        "proposals, reviews, patents, computational predictions, related-disease studies, class-level "
+        "analogues, incidental exposures, and unresolved identity are not "
+        "exact_disease_prior_use_or_testing",
         "do not exclude a candidate merely for unresolved identity, weak evidence, long causal "
-        "distance, uncertain exposure, nonqualifying prior evidence, or material assumptions",
+        "distance, uncertain exposure, related-disease evidence, or material assumptions",
     ],
 }
 

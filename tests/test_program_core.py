@@ -534,6 +534,20 @@ class InstructionContractTest(unittest.TestCase):
         self.assertIn("amend only the reported invalid field and direct dependants", normalized)
         self.assertIn("Validation never accepts or mutates a result", normalized)
 
+    def test_each_packet_gets_one_fresh_authorized_worker_with_bounded_rate_limit_recovery(self):
+        skill = (Path(__file__).resolve().parents[1] / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        normalized = " ".join(skill.split())
+
+        self.assertIn("fresh `fork_turns=none` agent", normalized)
+        self.assertIn("its sibling `AGENTS.md`", normalized)
+        self.assertIn("Keep only this one packet worker active", normalized)
+        self.assertIn("without polling or repeated nudges", normalized)
+        self.assertIn("packet research belongs to the fresh worker", normalized)
+        self.assertIn("honour `Retry-After`", normalized)
+        self.assertIn("continue from `status` in a fresh task", normalized)
+
 
 class SourceAdjudicationWorkflowTest(unittest.TestCase):
     def test_source_validation_still_rejects_treatment_fields_in_pathology_content(self):
@@ -804,8 +818,9 @@ class WorkflowTest(unittest.TestCase):
                     disposition = "irrelevant"
                     if source_id in exclusion.get("source_ids", []):
                         disposition = {
-                            "exact_disease_use": "qualifying_use",
-                            "qualifying_exact_disease_experiment": "qualifying_experiment",
+                            "exact_disease_prior_use_or_testing": (
+                                "exact_disease_prior_use_or_testing"
+                            ),
                         }.get(exclusion.get("reason_code"), disposition)
                     dispositions.append({
                         "candidate_id": candidate_id, "source_id": source_id,
@@ -1061,7 +1076,11 @@ class WorkflowTest(unittest.TestCase):
         )
         self.assertEqual(indexed_node["atomicity"], curation_atomicity())
         research_rules = " ".join(contract["field_rules"])
-        self.assertIn("Use normal literature research", " ".join(research_packet["rules"]))
+        research_instructions = " ".join([
+            research_packet["task"], *research_packet["rules"]
+        ])
+        self.assertNotIn("Life Science Research", research_instructions)
+        self.assertNotIn("structured lookup", research_instructions.casefold())
         endpoint_rule = contracts.PATHOLOGY_ASSERTION_ENDPOINT_RULE
         nested_rule = contracts.NESTED_MECHANISM_RESEARCH_RULE
         self.assertIn(endpoint_rule, research_packet["task"])
@@ -1102,7 +1121,9 @@ class WorkflowTest(unittest.TestCase):
         )
         self.assertEqual(action["next_item_id"], "NODE:1")
         packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
-        self.assertIn("Use normal literature research", " ".join(packet["rules"]))
+        seed_instructions = " ".join([packet["task"], *packet["rules"]])
+        self.assertNotIn("Life Science Research", seed_instructions)
+        self.assertNotIn("structured lookup", seed_instructions.casefold())
         candidate_contract = packet["result_contract"]["records"]["candidates"]
         strategy_contract = packet["result_contract"]["records"]["rescue_strategies"]
         document_contract = packet["result_contract"]["records"]["documents"]
@@ -1152,6 +1173,10 @@ class WorkflowTest(unittest.TestCase):
         )
         self.assertEqual(packet["context"]["focal_context"]["node"]["node_id"], "NODE:1")
         self.assertEqual(packet["context"]["focal_context"]["profile"]["node_id"], "NODE:1")
+        self.assertIn("context_nodes", packet["context"]["focal_context"])
+        self.assertIn("context-node association", seed_instructions)
+        self.assertIn("rescue-pathway check", seed_instructions)
+        self.assertIn("not biological evidence", seed_instructions)
         assertions_by_relation = {
             row["relation"]: row["assertion_id"]
             for row in packet["context"]["focal_context"]["assertions"]
@@ -1250,9 +1275,13 @@ class WorkflowTest(unittest.TestCase):
         review_packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
         self.assertIn("authoritative disease context", review_packet["task"])
         self.assertIn("exact-disease prior art", review_packet["task"])
-        self.assertIn("No particular research service", review_packet["task"])
         self.assertIn("controller alone owns canonical PMID", review_packet["task"])
-        self.assertIn("structured lookups are optional supplements", review_packet["task"])
+        review_instructions = " ".join([
+            review_packet["task"], *review_packet["rules"]
+        ])
+        self.assertNotIn("Life Science Research", review_instructions)
+        self.assertNotIn("structured lookup", review_instructions.casefold())
+        self.assertNotIn("research service", review_instructions.casefold())
         self.assertIn(
             "Controller validation owns canonical publication identity",
             " ".join(review_packet["rules"]),
@@ -1340,7 +1369,7 @@ class WorkflowTest(unittest.TestCase):
                             {"name": "Drug", "source_ids": ["PMID:2"]},
                         ],
                         "why_not": [{
-                            "finding": "Relevant exposure remains uncertain",
+                            "finding": "Relevant exposure remains uncertain.",
                             "source_ids": ["PMID:3"],
                         }],
                     },
@@ -1361,6 +1390,13 @@ class WorkflowTest(unittest.TestCase):
         action = core.next_action(self.root)
         self.assertEqual(action["next_task"], "candidate_audit")
         audit_packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
+        self.assertIn(
+            "do not search for or add evidence",
+            audit_packet["task"].lower(),
+        )
+        self.assertFalse(
+            any("newly retrieved" in rule.lower() for rule in audit_packet["rules"])
+        )
         self.assertEqual(len(audit_packet["context"]["candidates"]), 2)
         self.assertEqual(
             audit_packet["context"]["rescue_strategies"][0]["desired_direction"],
@@ -1407,6 +1443,11 @@ class WorkflowTest(unittest.TestCase):
             },
         )
         rubric = audit_packet["result_contract"]["score_rubric"]
+        self.assertIn("final-card prose defined in their field rules", audit_packet["task"])
+        audit_field_rules = " ".join(audit_packet["result_contract"]["field_rules"])
+        self.assertIn("predicted corrective or compensatory effect", audit_field_rules)
+        self.assertIn("ellipses standing in for omitted text", audit_field_rules)
+        self.assertNotIn("remains worth ranking without repeating", audit_packet["task"])
         self.assertEqual(
             audit_packet["result_contract"]["records"]["assessments"]["template"]
             ["source_integrity"],
@@ -1421,9 +1462,10 @@ class WorkflowTest(unittest.TestCase):
         self.assertNotIn("anchors", rubric["components"]["mechanistic_bridge_plausibility"])
         exclusion_policy = audit_packet["result_contract"]["exclusion_policy"]
         self.assertEqual(set(exclusion_policy), set(contracts.AUDIT_EXCLUSION_REASONS))
-        qualifying_policy = exclusion_policy["qualifying_exact_disease_experiment"]
-        self.assertIn("whether favorable or unfavorable", qualifying_policy)
-        self.assertIn("uncontrolled anecdote", qualifying_policy)
+        novelty_policy = exclusion_policy["exact_disease_prior_use_or_testing"]
+        self.assertIn("registered exact-disease therapeutic study", novelty_policy)
+        self.assertIn("regardless of outcome, controls, study quality", novelty_policy)
+        self.assertIn("computational prediction", novelty_policy)
         self.assertNotIn("human_intervention", exclusion_policy)
         self.assertIn("missing data", exclusion_policy["impossible_translational_feasibility"])
         self.assertIn("unresolved identity alone", exclusion_policy["invalid_candidate"])
@@ -1450,11 +1492,14 @@ class WorkflowTest(unittest.TestCase):
                 {"name": "Drug", "source_ids": ["PMID:2"]},
             ],
             "why_not": [{
-                "finding": "Relevant exposure remains uncertain",
+                "finding": "Relevant exposure remains uncertain.",
                 "source_ids": ["PMID:3"],
             }],
             "net_assessment": {
-                "text": "Supported action and pathology fit outweigh a speculative bridge.",
+                "text": (
+                    "The drug's established action is expected to reduce the excessive "
+                    "pathological process and move the affected tissue toward its normal state."
+                ),
                 "source_ids": ["PMID:3"],
             },
         }
@@ -1465,8 +1510,8 @@ class WorkflowTest(unittest.TestCase):
                 "assessments": [first_assessment],
                 "excluded_candidates": [{
                     "candidate_id": "UNICHEM:2",
-                    "reason_code": "qualifying_exact_disease_experiment",
-                    "finding": "A qualifying exact-disease experiment disqualifies repurposing.",
+                    "reason_code": "exact_disease_prior_use_or_testing",
+                    "finding": "The candidate has already been tested in the exact disease.",
                     "source_ids": ["PMID:3"],
                     "source_integrity": self.exclusion_integrity(["PMID:3"]),
                 }],
@@ -1526,32 +1571,30 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("## Drug", cards)
         self.assertNotIn("UNICHEM:1", cards)
         self.assertIn(
-            "Aliases:\n- Drug hydrochloride (References: PMID:3)\n"
-            "- Drug (References: PMID:2)",
-            cards,
-        )
-        self.assertEqual(cards.count("Aliases:"), 1)
-        self.assertIn("Score: 55/80", cards)
-        self.assertIn("Source verification:", cards)
-        self.assertIn("Mechanistic-bridge plausibility: 5/20", cards)
-        self.assertIn(
-            "### Why\n\nSupported action and pathology fit outweigh a speculative bridge."
-            "\n\nReferences: PMID:3",
+            "### How it could work\n\n"
+            "The drug's established action is expected to reduce the excessive pathological "
+            "process and move the affected tissue toward its normal state. [PMID:3]",
             cards,
         )
         self.assertIn(
-            "### Why not\n\n- Relevant exposure remains uncertain\n"
-            "  References: PMID:3",
+            "### Reasons why not\n\n"
+            "Relevant exposure remains uncertain. [PMID:3]",
             cards,
         )
-        self.assertEqual(cards.count("### Why not"), 1)
-        self.assertNotIn("Priority tier:", cards)
-        self.assertNotIn("Mechanism hypothesis:", cards)
-        self.assertNotIn("Review:", cards)
-        self.assertNotIn("Audit:", cards)
-        exclusions = (self.root / "outputs" / "candidate_exclusions.jsonl").read_text()
-        self.assertIn('"candidate_id":"UNICHEM:2"', exclusions)
-        self.assertIn('"reason_code":"qualifying_exact_disease_experiment"', exclusions)
+        for hidden in (
+            "Aliases:", "Score:", "Source verification:", "Citation-audit exceptions:",
+            "Drug-action confidence:", "Mechanistic-bridge plausibility:", "Priority tier:",
+            "Mechanism hypothesis:", "Review:", "Audit:", "References:",
+        ):
+            self.assertNotIn(hidden, cards)
+        exclusions = (self.root / "outputs" / "candidate_exclusions.csv").read_text()
+        self.assertIn("candidate_id,name,reason_code,finding,source_ids", exclusions)
+        self.assertIn(
+            "UNICHEM:2,Second drug,exact_disease_prior_use_or_testing,"
+            "The candidate has already been tested in the exact disease.,PMID:3",
+            exclusions,
+        )
+        self.assertFalse((self.root / "outputs" / "candidate_exclusions.jsonl").exists())
         self.assertEqual(core.status(self.root)["state"], "complete")
         self.assertEqual(core.build_outputs(self.root), manifest)
 
@@ -1663,12 +1706,13 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("Do not duplicate an indexed profile", pathology_guidance)
         self.assertIn("evidence_context", pathology_guidance)
         self.assertIn("Python assigns the final assertion ID", pathology_guidance)
-        self.assertIn("Use normal literature search", pathology_guidance)
-        self.assertIn("supplemented by relevant Life Science Research lookups", pathology_guidance)
+        self.assertNotIn("Life Science Research", pathology_guidance)
+        self.assertNotIn("structured lookup", pathology_guidance.casefold())
         landscape_guidance = contracts.STAGE_GUIDANCE["pathology_landscape_scan"]["task"]
         self.assertIn("coverage-gap register from the Monarch and DisMech index", landscape_guidance)
-        self.assertIn("normal literature research", landscape_guidance)
-        self.assertIn("supplementary Life Science Research lookups", landscape_guidance)
+        self.assertIn("structured scientific lookup may be used transiently", landscape_guidance)
+        self.assertIn("sharpen an Asta query", landscape_guidance)
+        self.assertIn("does not replace the required Asta search", landscape_guidance)
         self.assertIn("Turn the resulting questions into the", landscape_guidance)
         self.assertIn("prescribed broad and focused Asta searches", landscape_guidance)
         seed_guidance = contracts.STAGE_GUIDANCE["candidate_seed_research"]["task"]
@@ -1680,8 +1724,8 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("do not use disease-specific drug literature", seed_guidance)
         self.assertIn("before searching for any drug", seed_guidance)
         self.assertIn("rescue_strategies", seed_guidance)
-        self.assertIn("normal literature and authoritative database research", seed_guidance)
-        self.assertIn("supplemented by relevant Life Science Research lookups", seed_guidance)
+        self.assertNotIn("Life Science Research", seed_guidance)
+        self.assertNotIn("structured lookup", seed_guidance.casefold())
         self.assertIn(
             "evidence dossier", contracts.STAGE_GUIDANCE["candidate_evidence_review"]["task"]
         )
@@ -1690,12 +1734,10 @@ class WorkflowTest(unittest.TestCase):
             contracts.STAGE_GUIDANCE["candidate_evidence_review"]["task"],
         )
         review_guidance = contracts.STAGE_GUIDANCE["candidate_evidence_review"]["task"]
-        self.assertIn("normal literature and authoritative database research", review_guidance)
-        self.assertIn("available as supplementary structured lookups", review_guidance)
         self.assertIn("ordinary literature discovery to evidence saturation", review_guidance)
-        self.assertIn("No particular research service", review_guidance)
-        self.assertIn("fixed query form", review_guidance)
-        self.assertIn("structured lookups are optional supplements", review_guidance)
+        self.assertNotIn("Life Science Research", review_guidance)
+        self.assertNotIn("structured lookup", review_guidance.casefold())
+        self.assertNotIn("research service", review_guidance.casefold())
         self.assertIn("controller alone owns canonical PMID", review_guidance)
         self.assertIn("strategy_ids", review_guidance)
         for guidance_text in (
@@ -1716,13 +1758,18 @@ class WorkflowTest(unittest.TestCase):
             "unresolved identity", " ".join(contracts.FIELD_RULES["candidate_audit"])
         )
 
-    def test_curation_policy_separates_identity_from_research_eligibility(self):
+    def test_curation_policy_has_one_markdown_owner(self):
         root = Path(__file__).resolve().parents[1]
-        policy_sources = {
+        authoritative_sources = {
             "guidance": contracts.STAGE_GUIDANCE["pathology_curation"]["task"],
-            "skill": (root / "SKILL.md").read_text(encoding="utf-8"),
             "packet contract": (
                 root / "references" / "packet-contract.md"
+            ).read_text(encoding="utf-8"),
+        }
+        summary_sources = {
+            "skill": (root / "SKILL.md").read_text(encoding="utf-8"),
+            "architecture": (
+                root / "references" / "architecture.md"
             ).read_text(encoding="utf-8"),
         }
         combined_policy = (
@@ -1732,9 +1779,12 @@ class WorkflowTest(unittest.TestCase):
             r"generic gene and lesion-specific claims do not both create research routes.*"
             r"distinct intervention variable"
         )
-        for label, text in policy_sources.items():
+        for label, text in authoritative_sources.items():
             with self.subTest(source=label):
                 self.assertRegex(" ".join(text.casefold().split()), combined_policy)
+        for label, text in summary_sources.items():
+            with self.subTest(summary=label):
+                self.assertNotRegex(" ".join(text.casefold().split()), combined_policy)
 
     def test_candidate_seed_guidance_combines_focal_anchor_with_linked_context(self):
         guidance = contracts.STAGE_GUIDANCE["candidate_seed_research"]["task"]
@@ -2012,14 +2062,12 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(
             [row["node_id"] for row in nodes], ["MONDO:1", "NODE:1", "NODE:2"]
         )
-        self.assertTrue(
-            any(
-                row["subject_id"] == "NODE:2"
-                and row["relation"] == "contextualizes"
-                and row["object_id"] == "NODE:1"
-                for row in edges
-            )
+        context_node = next(row for row in nodes if row["node_id"] == "NODE:2")
+        self.assertEqual(context_node["related_concept_ids"], ["NODE:1"])
+        self.assertFalse(
+            any(row.get("relation") == "contextualizes" for row in edges)
         )
+        self.assertTrue(all(row["original_edge_ids"] for row in edges))
         graph = {
             "source_nodes": nodes,
             "source_edges": edges,
@@ -2032,7 +2080,10 @@ class WorkflowTest(unittest.TestCase):
         )
         context = graph_rules._graph_node_context(graph, "NODE:2")
         self.assertIsNone(context["profile"])
-        self.assertEqual([row["node_id"] for row in context["related_nodes"]], ["NODE:1"])
+        self.assertEqual(context["related_nodes"], [])
+        self.assertEqual([row["node_id"] for row in context["context_nodes"]], ["NODE:1"])
+        focal_context = graph_rules._graph_node_context(graph, "NODE:1")
+        self.assertEqual([row["node_id"] for row in focal_context["context_nodes"]], ["NODE:2"])
         self.assertEqual(graph_rules._graph_support_ids(graph)["NODE:2"], {"SRC:2"})
 
         graph["documents"] = [
@@ -2857,14 +2908,6 @@ class WorkflowTest(unittest.TestCase):
 
     def test_audit_validation_is_review_independent_and_preserves_longshots(self):
         second_review = self.review("DRUG-B")
-        second_review["prior_art"] = {
-            "status": "human_intervention",
-            "summary": "An exact-disease human study was identified.",
-            "findings": [{
-                "finding": "The candidate was tested in an exact-disease human study.",
-                "source_ids": ["PMID:1"],
-            }],
-        }
         results = {
             "candidate_review": {"records": {
                 "documents": [
@@ -2938,66 +2981,74 @@ class WorkflowTest(unittest.TestCase):
         independently_assessed["assessments"].append(self.assessment("DRUG-B"))
         independently_assessed["excluded_candidates"] = []
         audit._validate_candidate_audit(independently_assessed, results)
-        second_review["prior_art"]["status"] = "established_use"
-        audit._validate_candidate_audit(records, results)
-        audit._validate_candidate_audit(independently_assessed, results)
 
-    def test_cross_dossier_candidate_evidence_forces_the_exclusion_gate(self):
+    def test_exact_disease_novelty_exclusion_dry_run(self):
         documents = [
             {"document_id": "PMID:1", "title": "Candidate action", "source": "test",
              "evidence_passages": [{"text": "Action evidence.", "locator": "abstract"}]},
-            {"document_id": "PMID:2", "title": "Pregabalin exact-disease experiment", "source": "test",
-             "evidence_passages": [{"text": "Pregabalin was administered in a controlled disease model.", "locator": "results"}]},
+            {"document_id": "PMID:2", "title": "Ketamine trial in FHM1", "source": "test",
+             "evidence_passages": [{"text": "Ketamine entered a registered therapeutic study in genetically confirmed FHM1.", "locator": "trial record"}]},
+            {"document_id": "PMID:3", "title": "Novel agent in a related disease", "source": "test",
+             "evidence_passages": [{"text": "Novel agent was studied only in a related disease.", "locator": "abstract"}]},
         ]
+        ketamine_review = self.review("DRUG-KET", "PMID:1")
+        ketamine_review["prior_art"] = {
+            "status": "human_intervention",
+            "summary": "A registered exact-disease therapeutic study was identified.",
+            "findings": [{
+                "finding": "Ketamine entered a registered therapeutic study in FHM1.",
+                "source_ids": ["PMID:2"],
+            }],
+        }
         results = {
             "evidence_graph": {"records": {}},
             "candidate_identity": {"records": {}},
             "candidate_seed_generation": {"records": {"rescue_strategies": []}},
             "candidate_review": {"records": {
                 "documents": documents,
-                "reviews": [self.review("DRUG-PREG", "PMID:1"),
-                            self.review("DRUG-OTHER", "PMID:2")],
+                "reviews": [ketamine_review,
+                            self.review("DRUG-OTHER", "PMID:3")],
             }},
         }
         candidates = [
-            {"candidate_id": "DRUG-PREG", "name": "Pregabalin"},
-            {"candidate_id": "DRUG-OTHER", "name": "Unrelated agent"},
+            {"candidate_id": "DRUG-KET", "name": "Ketamine"},
+            {"candidate_id": "DRUG-OTHER", "name": "Novel agent"},
         ]
         with patch.object(packets, "_canonical_candidates", return_value=candidates):
             context = packets._packet_context(self.root, "candidate_audit", None, results)
-        preg_sources = next(
+        ketamine_sources = next(
             row["source_ids"] for row in context["candidate_evidence_index"]
-            if row["candidate_id"] == "DRUG-PREG"
+            if row["candidate_id"] == "DRUG-KET"
         )
-        self.assertIn("PMID:2", preg_sources)
+        self.assertIn("PMID:2", ketamine_sources)
         dispositions = [
             {"candidate_id": row["candidate_id"], "source_id": source_id,
              "disposition": (
-                 "qualifying_experiment"
-                 if row["candidate_id"] == "DRUG-PREG" and source_id == "PMID:2"
+                 "exact_disease_prior_use_or_testing"
+                 if row["candidate_id"] == "DRUG-KET" and source_id == "PMID:2"
+                 else "relevant_not_tested"
+                 if row["candidate_id"] == "DRUG-OTHER" and source_id == "PMID:3"
                  else "irrelevant"
-             ), "reason": "Classified against the exact-disease experiment gate."}
+             ), "reason": "Classified against the exact-disease novelty gate."}
             for row in context["candidate_evidence_index"] for source_id in row["source_ids"]
         ]
         records = {
-            "assessments": [], "evidence_dispositions": dispositions,
+            "assessments": [self.assessment("DRUG-OTHER", "PMID:3")],
+            "evidence_dispositions": dispositions,
             "excluded_candidates": [
-                {"candidate_id": "DRUG-PREG", "reason_code": "unsupported_action",
+                {"candidate_id": "DRUG-KET", "reason_code": "unsupported_action",
                  "finding": "Wrong bounded disposition.", "source_ids": ["PMID:1"],
                  "source_integrity": self.exclusion_integrity(["PMID:1"])},
-                {"candidate_id": "DRUG-OTHER", "reason_code": "unsupported_action",
-                 "finding": "No supported action.", "source_ids": ["PMID:2"],
-                 "source_integrity": self.exclusion_integrity(["PMID:2"])},
             ],
         }
         with self.assertRaisesRegex(core.ProgramError, "must be excluded"):
             audit._validate_candidate_audit(
                 records, results, context["source_index"], context["candidate_evidence_index"]
             )
-        preg = records["excluded_candidates"][0]
-        preg.update({
-            "reason_code": "qualifying_exact_disease_experiment",
-            "finding": "The cross-dossier paper establishes a qualifying experiment.",
+        ketamine = records["excluded_candidates"][0]
+        ketamine.update({
+            "reason_code": "exact_disease_prior_use_or_testing",
+            "finding": "Ketamine has already entered a registered FHM1 therapeutic study.",
             "source_ids": ["PMID:2"],
             "source_integrity": self.exclusion_integrity(["PMID:2"]),
         })
@@ -3033,30 +3084,6 @@ class WorkflowTest(unittest.TestCase):
              "evidence_dispositions": []}, results
         )
         self.assertEqual(ranking._final_score(assessment), baseline_score)
-
-        redundant = json.loads(json.dumps(assessment))
-        redundant["net_assessment"] = {
-            "text": assessment["why_not"][0]["finding"],
-            "source_ids": ["PMID:1"],
-        }
-        redundant["source_integrity"] = self.source_integrity(redundant)
-        with self.assertRaisesRegex(core.ProgramError, "must not repeat"):
-            audit._validate_candidate_audit(
-                {"assessments": [redundant], "excluded_candidates": [],
-                 "evidence_dispositions": []}, results
-            )
-
-        redundant = json.loads(json.dumps(assessment))
-        redundant["net_assessment"] = {
-            "text": assessment["component_scores"]["drug_action_confidence"]["reason"],
-            "source_ids": ["PMID:1"],
-        }
-        redundant["source_integrity"] = self.source_integrity(redundant)
-        with self.assertRaisesRegex(core.ProgramError, "must not repeat"):
-            audit._validate_candidate_audit(
-                {"assessments": [redundant], "excluded_candidates": [],
-                 "evidence_dispositions": []}, results
-            )
 
         invalid = json.loads(json.dumps(assessment))
         invalid["component_scores"]["evidence_robustness"] = {
@@ -3283,51 +3310,45 @@ class WorkflowTest(unittest.TestCase):
             [("DRUG-A", 1, 80), ("DRUG-B", 1, 80), ("DRUG-C", 2, 52)],
         )
 
-    def test_card_renderer_uses_actual_id_and_omits_empty_optional_sections(self):
-        components = {
-            component: {
-                "value": 10,
-                "reason": "Bounded support.",
-                "source_ids": ["PMID:1"],
-            }
-            for component in contracts.SCORE_COMPONENTS
-        }
+    def test_card_renderer_contains_only_name_mechanism_and_reasons_why_not(self):
         payload = evidence_cards._cards_bytes([{
-            "drug_id": "CANDIDATE-UNRESOLVED",
             "name": "Candidate drug",
-            "aliases": [],
-            "score": 40,
-            "components": components,
-            "why": {"text": "Evidence supports nomination.", "source_ids": ["PMID:1"]},
-            "why_not": [],
-            "source_integrity": {
-                "checks": [
-                    {
-                        "source_id": "PMID:1",
-                        "scope": scope,
-                        "verdict": "partly_supports" if scope == "translational_feasibility" else "supports",
-                        "finding": "Direct support." if scope != "translational_feasibility" else "Only model-level support.",
-                    }
-                    for scope in (*contracts.SCORE_COMPONENTS, "net_assessment")
-                ],
+            "how_it_could_work": {
+                "text": "Target inhibition could reduce the disease-associated signalling excess.",
+                "source_ids": ["PMID:2", "PMID:1"],
             },
+            "reasons_why_not": [{
+                "text": "Relevant tissue exposure has not been established.",
+                "source_ids": ["PMID:3"],
+            }],
         }]).decode("utf-8")
 
-        self.assertIn("## Candidate drug", payload)
-        self.assertNotIn("CANDIDATE-UNRESOLVED", payload)
-        self.assertIn("Score: 40/80", payload)
-        self.assertIn("Source verification: 5 cited uses checked (4 supports, 1 partly supports)", payload)
-        self.assertIn(
-            "PMID:1 in translational_feasibility: partly supports — Only model-level support.",
+        self.assertEqual(
             payload,
+            "## Candidate drug\n\n"
+            "### How it could work\n\n"
+            "Target inhibition could reduce the disease-associated signalling excess. "
+            "[PMID:1; PMID:2]\n\n"
+            "### Reasons why not\n\n"
+            "Relevant tissue exposure has not been established. [PMID:3]\n",
         )
-        self.assertIn("Drug-action confidence: 10/20", payload)
-        self.assertIn(
-            "### Why\n\nEvidence supports nomination.\n\nReferences: PMID:1",
-            payload,
+
+    def test_card_prose_rejects_fragments_metadata_labels_and_ellipses(self):
+        self.assertEqual(
+            audit._validate_card_prose(
+                "Target inhibition could reduce pathological signalling.", "card"
+            ),
+            "Target inhibition could reduce pathological signalling.",
         )
-        self.assertNotIn("Aliases:", payload)
-        self.assertNotIn("### Why not", payload)
+        invalid = {
+            "Target inhibition": "complete sentence prose",
+            "Mechanism: target inhibition.": "metadata-labelled fragment",
+            "Target inhibition could reduce...": "ellipses",
+        }
+        for prose, error in invalid.items():
+            with self.subTest(prose=prose):
+                with self.assertRaisesRegex(core.ProgramError, error):
+                    audit._validate_card_prose(prose, "card")
 
     def test_assertions_merge_by_triple_with_context_and_controller_id(self):
         assertion = {

@@ -131,6 +131,12 @@ def _graph_node_context(records: Mapping[str, Any], node_id: str) -> dict[str, A
         for value in (edge["subject_id"], edge["object_id"])
         if str(value) != node_id
     }
+    context_ids = set(map(str, node.get("related_concept_ids", [])))
+    context_ids.update(
+        str(row["node_id"])
+        for row in nodes
+        if node_id in set(map(str, row.get("related_concept_ids", [])))
+    )
     return {
         "node": node,
         "profile": profiles[0] if profiles else None,
@@ -139,6 +145,12 @@ def _graph_node_context(records: Mapping[str, Any], node_id: str) -> dict[str, A
         "related_nodes": [
             {key: node_by_id[value][key] for key in GRAPH_INDEX_FIELDS}
             for value in sorted(related_ids)
+            if value in node_by_id
+            and node_by_id[value].get("node_type") != "disease_anchor"
+        ],
+        "context_nodes": [
+            {key: node_by_id[value][key] for key in GRAPH_INDEX_FIELDS}
+            for value in sorted(context_ids)
             if value in node_by_id
             and node_by_id[value].get("node_type") != "disease_anchor"
         ],

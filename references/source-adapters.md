@@ -1,5 +1,10 @@
 # Pathology source adapters
 
+This file owns source acquisition, service-call behavior, retry and recovery rules, receipts, and
+external identity transport. Worker result fields and scientific decision gates live in
+[packet-contract.md](packet-contract.md); controller-stage ownership lives in
+[architecture.md](architecture.md).
+
 Source ingestion begins with deterministic collection and screening. Responses are cached
 immutably under `<run>/sources/raw/`. One isolated, compact adjudication packet is emitted only
 when free-text sentences are flagged; subsequent packets receive normalized pathology records and
@@ -14,12 +19,16 @@ DisMech acquisition, one global worker uses the host-configured Asta MCP tools f
 literature discovery, following the official signatures at
 `https://allenai.org/asta/resources/mcp`. The packet carries a compact initial index, source edges, compact disease
 context, and coverage checklist. The worker runs one stable broad relevance search and focused
-searches for every open coverage gap. It preserves pending originals across cycles and applies the
-coverage-saturation rule defined in [SKILL.md](../SKILL.md#hard-boundaries), with no fixed search,
-paper, or proposal count. Completed receipts provide exact-ID deduplication while a live index tracks
+searches for every open coverage gap. It preserves pending originals across cycles until every gap
+is classified as resolved, searched-unresolved, or merged, with no fixed search, paper, or proposal
+count. Completed receipts provide exact-ID deduplication while a live index tracks
 duplicate/refinement/new mechanisms. For every retained original it retrieves
 at most three citing papers and runs one paper-specific snippet search per distinct paper. It does not recurse
 through citations, pathways, or authors.
+
+A targeted structured scientific lookup may resolve an entity, pathway, interaction, expression, or
+ontology ambiguity when that materially sharpens an Asta query. It remains transient and does not
+replace the required Asta search or the source-backed proposal returned from that search.
 
 The worker makes exactly one Asta call per orchestration step and inspects its complete response
 before constructing the next; calls are never batched, looped, or buffered. `get_citations`

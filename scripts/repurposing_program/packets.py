@@ -584,14 +584,9 @@ def _build_packet(
             "Return JSON only.",
         ]
     elif task == "pathology_node_research":
-        packet_rules = [
-            "Use normal literature research, with Life Science Research skills available as "
-            "supplementary structured lookups for the evidence question.",
-        ]
+        packet_rules = []
     elif task == "candidate_seed_research":
         packet_rules = [
-            "Use normal literature research, with Life Science Research skills available as "
-            "supplementary structured lookups for the evidence question.",
             "Each rescue_strategies row uses the supplied focal primary_node_id and a strategy_key "
             "that is local to this packet; the controller later creates strategy_id.",
             "In result_template, rescue_strategies contains one row-shaped placeholder with "
@@ -604,15 +599,15 @@ def _build_packet(
         ]
     elif task == "candidate_evidence_review":
         packet_rules = [
-            "Use normal literature research, with Life Science Research skills available as "
-            "supplementary structured lookups for the evidence question.",
             "Complete the prior-art assessment through ordinary literature discovery to evidence "
-            "saturation. Select sources and query forms for the evidence question; structured "
-            "lookups are optional supplements. Controller validation owns canonical publication "
+            "saturation. Select sources and query forms for the evidence question. Controller "
+            "validation owns canonical publication "
             "identity and title verification.",
             "For each candidate, match candidate.strategy_ids to rescue_strategies.strategy_id "
             "exactly and do not apply another candidate's strategy.",
         ]
+    elif task == "candidate_audit":
+        packet_rules = []
     else:
         packet_rules = [
             "Use only supplied or newly retrieved named sources; never invent citations.",

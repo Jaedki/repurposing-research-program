@@ -52,20 +52,9 @@ def _excluded_candidate_rows(
                 "name": candidate["name"],
                 "reason_code": exclusion["reason_code"],
                 "finding": exclusion["finding"],
-                "source_ids": sorted(set(map(str, exclusion["source_ids"]))),
-                "graph_node_ids": sorted(
-                    set(map(str, candidate["graph_node_ids"]))
+                "source_ids": "; ".join(
+                    sorted(set(map(str, exclusion["source_ids"])))
                 ),
-                "strategy_ids": sorted(
-                    set(map(str, candidate["strategy_ids"]))
-                ),
-                "pathology_source_ids": sorted(
-                    set(map(str, candidate["pathology_source_ids"]))
-                ),
-                "mechanism_source_ids": sorted(
-                    set(map(str, candidate["mechanism_source_ids"]))
-                ),
-                "source_integrity": exclusion["source_integrity"],
             }
         )
     return rows

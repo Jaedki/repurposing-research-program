@@ -44,7 +44,11 @@ def _write_output_files(
     card_rows = _evidence_card_rows(rows, results)
     _write_once(outputs / "candidate_cards.md", _cards_bytes(card_rows))
     excluded_rows = _excluded_candidate_rows(results, candidates)
-    _write_jsonl(outputs / "candidate_exclusions.jsonl", excluded_rows)
+    exclusion_fields = ["candidate_id", "name", "reason_code", "finding", "source_ids"]
+    _write_once(
+        outputs / "candidate_exclusions.csv",
+        _csv_bytes(excluded_rows, exclusion_fields),
+    )
     documents = sorted(
         _canonicalize_documents(run_root, _all_documents(results), verify_titles=False),
         key=lambda row: row["document_id"],
@@ -144,7 +148,7 @@ def _write_output_files(
         "Candidate nomination did not require a prior disease-drug literature association. "
         f"Audited candidates were ranked by an unweighted sum of "
         f"{len(SCORE_COMPONENTS)} 20-point components out of {MAX_SCORE}; "
-        "exact-disease established use or qualifying interpretable experiments and other bounded decisive failures were "
+        "exact-disease established use or prior testing and other bounded decisive failures were "
         "exclusionary.\n\n"
         f"{EXPERIMENTAL_USE_POLICY}\n"
     )
@@ -152,7 +156,7 @@ def _write_output_files(
     return [
         outputs / "candidates.csv",
         outputs / "candidate_cards.md",
-        outputs / "candidate_exclusions.jsonl",
+        outputs / "candidate_exclusions.csv",
         outputs / "citations.jsonl",
         outputs / "graph.json",
         outputs / "candidate_provenance.jsonl",

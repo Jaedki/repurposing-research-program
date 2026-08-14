@@ -1211,13 +1211,10 @@ class LandscapeWorkflowTest(unittest.TestCase):
             run_state._item_ids("evidence_graph", results),
             sorted(["NODE:1", phenotype_id]),
         )
-        _, edges = pathology._canonical_source_records(results)
-        self.assertTrue(any(
-            row["subject_id"] == biomarker_id
-            and row["relation"] == "contextualizes"
-            and row["object_id"] == phenotype_id
-            for row in edges
-        ))
+        nodes, edges = pathology._canonical_source_records(results)
+        biomarker = next(row for row in nodes if row["node_id"] == biomarker_id)
+        self.assertEqual(biomarker["related_concept_ids"], [phenotype_id])
+        self.assertFalse(any(row.get("relation") == "contextualizes" for row in edges))
 
     def test_retained_asta_concept_and_source_reach_its_research_packet(self):
         self.submit({
@@ -1483,7 +1480,7 @@ class DocumentationContractTest(unittest.TestCase):
         self.assertIn("S2:` followed by 40 hexadecimal characters", packet_contract)
         self.assertIn("Asta is not a Python source adapter", adapters)
         self.assertIn("Undermind is also an agent-used MCP service", adapters)
-        self.assertIn("interrupts the asynchronous launch", packet_contract)
+        self.assertIn("without interrupting it", adapters)
         self.assertNotIn("ASTA_AI2_API_KEY", skill)
         self.assertIn("ASTA_AI2_API_KEY", adapters)
 
@@ -1493,8 +1490,9 @@ class DocumentationContractTest(unittest.TestCase):
         agents_flat = " ".join(agents.split())
         skill = (root / "SKILL.md").read_text(encoding="utf-8")
 
-        self.assertIn("Normal literature search and primary-source reading", agents_flat)
-        self.assertIn("Science Research skills remain available", agents_flat)
+        self.assertIn("Research normally from the evidence question", agents_flat)
+        self.assertIn("Life Science Research or other structured scientific lookup", agents_flat)
+        self.assertIn("do not enumerate tools or narrate their selection", agents_flat)
         self.assertIn("searches and record lookups performed for this programme", agents_flat)
         self.assertIn("are explicitly", agents_flat)
         self.assertIn("authorized at NCBI PubMed and PMC, DOI metadata services, Asta", agents_flat)
@@ -1504,6 +1502,10 @@ class DocumentationContractTest(unittest.TestCase):
         self.assertIn("routine permission status, unused research services", agents_flat)
         self.assertIn("other public literature and scientific", agents_flat)
         self.assertIn("database services without additional per-call confirmation", agents_flat)
+        self.assertIn("fresh `fork_turns=none` agent", skill)
+        self.assertIn("its sibling\n   `AGENTS.md`", skill)
+        self.assertIn("Keep only this one packet worker active", skill)
+        self.assertIn("honour `Retry-After`", skill)
         self.assertIn(
             "Use the installed `scripts/orchestrate_program.py` for every controller action",
             skill,
@@ -1516,6 +1518,36 @@ class DocumentationContractTest(unittest.TestCase):
             "host-configured Undermind MCP service",
             contracts.STAGE_GUIDANCE["pathology_coverage_expansion"]["task"],
         )
+
+    def test_markdown_instruction_ownership_avoids_parallel_scientific_rules(self):
+        root = Path(__file__).resolve().parents[1]
+        agents = (root / "AGENTS.md").read_text(encoding="utf-8")
+        skill = (root / "SKILL.md").read_text(encoding="utf-8")
+        architecture = (root / "references" / "architecture.md").read_text(
+            encoding="utf-8"
+        )
+        packet_contract = (root / "references" / "packet-contract.md").read_text(
+            encoding="utf-8"
+        )
+        adapters = (root / "references" / "source-adapters.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("Instruction ownership", agents)
+        self.assertIn("Instruction ownership", skill)
+        self.assertIn("operative worker task", skill)
+        self.assertNotIn("Life Science Research", skill)
+
+        curation_rule = "Concept distinctness does not create a research job"
+        audit_rule = "Repurposing novelty is a binary gate"
+        service_rule = "180 seconds"
+        self.assertIn(curation_rule, packet_contract)
+        self.assertIn(audit_rule, packet_contract)
+        self.assertIn(service_rule, adapters)
+        for summary in (skill, architecture):
+            self.assertNotIn(curation_rule, summary)
+            self.assertNotIn(audit_rule, summary)
+            self.assertNotIn(service_rule, summary)
 
 
 class SparseSourceWorkflowTest(unittest.TestCase):

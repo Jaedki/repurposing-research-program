@@ -208,18 +208,21 @@ def _canonical_source_records(
             },
             key=lambda value: (value.casefold(), value),
         )
-        nodes.append(
-            {
-                "node_id": concept_id,
-                "label": str(concept["preferred_label"]),
-                "node_type": str(concept["concept_type"]),
-                "source_ids": source_ids,
-                "aliases": aliases,
-                "member_node_ids": members,
-                "disposition": str(concept["disposition"]),
-                "atomicity": concept["atomicity"],
-            }
-        )
+        projected = {
+            "node_id": concept_id,
+            "label": str(concept["preferred_label"]),
+            "node_type": str(concept["concept_type"]),
+            "source_ids": source_ids,
+            "aliases": aliases,
+            "member_node_ids": members,
+            "disposition": str(concept["disposition"]),
+            "atomicity": concept["atomicity"],
+        }
+        if concept["disposition"] == "context_only":
+            projected["related_concept_ids"] = sorted(
+                set(map(str, concept["related_concept_ids"]))
+            )
+        nodes.append(projected)
 
     grouped_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
     for edge in raw_edges:
@@ -253,43 +256,6 @@ def _canonical_source_records(
         current["original_edge_ids"] = sorted(
             {*map(str, current["original_edge_ids"]), str(edge["edge_id"])}
         )
-
-    node_by_id = {str(row["node_id"]): row for row in nodes}
-    for concept in concepts:
-        if concept["disposition"] != "context_only":
-            continue
-        subject = str(concept["concept_id"])
-        for object_id in map(str, concept["related_concept_ids"]):
-            relation = "contextualizes"
-            key = (subject, relation, object_id)
-            current = grouped_edges.setdefault(
-                key,
-                {
-                    "edge_id": _stable_id(
-                        "CURATED-EDGE",
-                        {
-                            "subject_id": subject,
-                            "relation": relation,
-                            "object_id": object_id,
-                        },
-                    ),
-                    "subject_id": subject,
-                    "relation": relation,
-                    "object_id": object_id,
-                    "evidence_summary": "",
-                    "source_ids": [],
-                    "original_edge_ids": [],
-                },
-            )
-            current["evidence_summary"] = _merge_text(
-                current["evidence_summary"], concept["reason"]
-            )
-            current["source_ids"] = sorted(
-                {
-                    *map(str, current["source_ids"]),
-                    *map(str, node_by_id[subject]["source_ids"]),
-                }
-            )
 
     return (
         sorted(nodes, key=lambda row: str(row["node_id"])),

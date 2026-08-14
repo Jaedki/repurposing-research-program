@@ -1,46 +1,51 @@
 # AGENTS.md
 
-## Purpose
+## Instruction ownership
 
-This file dictates agent judgment, behaviour, and communication. Use `SKILL.md`, the controller, and the current packet for workflow and data-contract instructions.
+- `AGENTS.md` owns general scientific conduct, research authorization, and communication.
+- `SKILL.md` owns the controller loop and major stage barriers.
+- The current controller packet owns the worker's task, scientific decision rules, result schema,
+  and validation command.
+- The files under `references/` document controller design for maintainers; do not treat repeated
+  summaries there as additional worker criteria.
 
-## General behaviour
+Do not blend parallel phrasings into a new rule. If the packet and installed controller genuinely
+conflict, preserve the packet state and report the defect.
 
-- Maintain scientific accuracy through thorough, literature-backed research
-- Explore creative mechanisms without overlooking obvious or simple routes to a useful result.
-- Apply only the judgments assigned to the current stage; do not anticipate later inclusion or exclusion decisions.
+## Scientific conduct
 
-## Contract adherence
+- Maintain scientific accuracy through thorough, literature-backed research. Explore creative
+  mechanisms without overlooking obvious routes.
+- Apply only the judgments owned by the current stage. Do not anticipate, redo, or evade a decision
+  assigned to another stage.
+- Evaluate every criterion in an all-criteria gate. When the supplied evidence does not establish a
+  criterion, use the packet's conservative disposition or gap outcome rather than inference.
+- Cite evidence that directly supports each material claim. Distinguish observations from synthesis
+  and identify inferred desired states as inferences.
+- Search and read freely, but return only canonical documents directly cited by a submitted claim,
+  counterclaim, identity decision, or limitation. Search results and snippets remain transient.
+- When using non-focal graph context, state the relationship it contributes and retain evidence for
+  the cited node or edge. Graph proximity and label similarity are not support.
+- Preserve causal biological evidence without turning an experimental perturbation into a candidate
+  hypothesis merely because it was used in the experiment.
+- Resolve decision-relevant ambiguity through further research where possible; otherwise state the
+  remaining uncertainty plainly.
 
-- Treat every mandatory criterion in `SKILL.md`, the current controller packet, and any
-  stage-specific reference it invokes as cumulative. A shorter summary in one location does not
-  weaken a more specific rule elsewhere.
-- When a disposition or eligibility rule is an all-criteria gate, evaluate every criterion. If the
-  supplied evidence does not establish one of them, use the contract's conservative disposition
-  or gap outcome rather than filling the missing premise by inference.
-- Do not satisfy atomicity through umbrella relabelling, generic wording, or an invented causal
-  explanation. Apply the supplied identity, independence, direction, compartment, and biological
-  normalisation tests as written.
-- Preserve the stage ownership defined by the programme; do not use a later stage to redo or evade
-  an earlier stage's judgment.
+Research normally from the evidence question and prefer primary sources. Use a relevant Life
+Science Research or other structured scientific lookup only when it materially answers that
+question; do not enumerate tools or narrate their selection. Asta and Undermind are used only when
+the current packet assigns their dedicated stage.
 
-## Evidence integrity
-
-- Cite evidence that directly supports each material claim, not merely the same topic. Distinguish observed findings from synthesis; an inferred desired state must follow from cited directional evidence and remain identified as an inference.
-- Search and read freely, but return only canonical documents directly cited by a submitted claim, counterclaim, identity decision, or limitation; search results and snippets remain transient.
-- When using non-focal graph context, state the relationship it contributes and retain a source attached to that node or edge. Graph proximity or label similarity alone is not support; unsupported links must be challenged.
-- Preserve causal biological evidence without allowing an experimental intervention to become a hypothesis merely because it was used as a perturbation.
-- Keep uncertainty explicit without allowing generic uncertainty language to overwhelm a useful, testable hypothesis. Resolve decision-relevant ambiguity with further research where possible; otherwise state it plainly, not with unfounded confidence.
-- Normal literature search and primary-source reading are the default for research packets. Life
-  Science Research skills remain available across those packets as supplementary structured
-  lookups selected for the evidence question; the packet's scientific task supplies the scope.
-- Non-secret, packet-scoped searches and record lookups performed for this programme are explicitly
-  authorized at NCBI PubMed and PMC, DOI metadata services, Asta, Undermind through the user's
-  connected account, and other public literature and scientific database services without
-  additional per-call confirmation. Permitted payloads are limited to packet-derived disease,
-  gene, candidate, mechanism, and public-identifier terms and the treatment-blind pathology
-  context assigned to the Asta or Undermind stage.
+Non-secret, packet-scoped searches and record lookups performed for this programme are explicitly
+authorized at NCBI PubMed and PMC, DOI metadata services, Asta, Undermind through the user's
+connected account, and other public literature and scientific database services without additional
+per-call confirmation. Permitted payloads are limited to packet-derived disease, gene, candidate,
+mechanism, public-identifier, and assigned treatment-blind pathology terms.
 
 ## Communication
 
-- Default to no optional commentary during routine execution. Apart from any higher-level runtime-required notice, use one concise operational message only for a blocker or decision requiring user action, a material state change that cannot wait for the final handoff, or a user-requested update. Do not narrate plans, compliance, routine permission status, unused research services, tool or controller steps, validation, packet contents, or anything that can wait for the final answer.
+Default to no optional commentary during routine execution. Apart from a higher-level
+runtime-required notice, send one concise operational message only for a blocker or user decision,
+a material state change that cannot wait for handoff, or a requested update. Do not narrate plans,
+compliance, routine permission status, unused research services, tool or controller steps,
+validation, packet contents, or information that can wait for the final answer.

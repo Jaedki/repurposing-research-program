@@ -29,6 +29,24 @@ def _component_score(value: Any, label: str) -> int:
     return value
 
 
+def _validate_card_prose(value: Any, label: str) -> str:
+    text = str(value).strip()
+    if not text:
+        raise ProgramError(f"{label} must be non-empty")
+    if "..." in text or "…" in text:
+        raise ProgramError(f"{label} must not use ellipses in place of complete prose")
+    if re.match(
+        r"^(?:mechanism|target|pathology|drug action|score|rank|audit|"
+        r"source verification|evidence)\s*:",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        raise ProgramError(f"{label} must be prose, not a metadata-labelled fragment")
+    if not re.search(r"[.!?][\"')\]]*$", text):
+        raise ProgramError(f"{label} must use complete sentence prose")
+    return text
+
+
 def _accepted_ids(
     results: Mapping[str, Mapping[str, Any]],
     stage: str,
@@ -151,7 +169,7 @@ def _validate_candidate_audit(
         for source_id in row.get("source_ids", [])
     }
     actual_pairs: list[tuple[str, str]] = []
-    qualifying: dict[str, dict[str, set[str]]] = {}
+    novelty_exclusions: dict[str, set[str]] = {}
     for index, row in enumerate(dispositions):
         label = f"evidence_dispositions[{index}]"
         candidate_id, source_id = str(row["candidate_id"]), str(row["source_id"])
@@ -164,10 +182,8 @@ def _validate_candidate_audit(
         if not str(row["reason"]).strip():
             raise ProgramError(f"{label}.reason must be non-empty")
         actual_pairs.append((candidate_id, source_id))
-        if row["disposition"] in {"qualifying_use", "qualifying_experiment"}:
-            qualifying.setdefault(candidate_id, {}).setdefault(
-                str(row["disposition"]), set()
-            ).add(source_id)
+        if row["disposition"] == "exact_disease_prior_use_or_testing":
+            novelty_exclusions.setdefault(candidate_id, set()).add(source_id)
     if len(actual_pairs) != len(set(actual_pairs)) or set(actual_pairs) != expected_pairs:
         raise ProgramError(
             "evidence_dispositions must cover candidate_evidence_index exactly; "
@@ -198,8 +214,7 @@ def _validate_candidate_audit(
         net = _validate_exact_object(
             row["net_assessment"], {"text", "source_ids"}, f"{label}.net_assessment"
         )
-        if not str(net["text"]).strip():
-            raise ProgramError(f"{label}.net_assessment.text must be non-empty")
+        _validate_card_prose(net["text"], f"{label}.net_assessment.text")
         _references(net, "source_ids", source_ids, f"{label}.net_assessment")
         _validate_cited_entries(
             row["aliases"],
@@ -213,21 +228,11 @@ def _validate_candidate_audit(
             text_field="finding",
             source_ids=source_ids,
         )
-        normalized_net = " ".join(str(net["text"]).split()).casefold()
-        card_details = [
-            (f"{label}.component_scores.{component}.reason", components[component]["reason"])
-            for component in SCORE_COMPONENTS
-        ] + [
-            (f"{label}.why_not[{why_not_index}].finding", finding["finding"])
-            for why_not_index, finding in enumerate(row["why_not"])
-        ]
-        for detail_label, detail in card_details:
-            normalized_detail = " ".join(str(detail).split()).casefold()
-            if normalized_detail in normalized_net or normalized_net in normalized_detail:
-                raise ProgramError(
-                    f"{label}.net_assessment.text must not repeat "
-                    f"{detail_label}"
-                )
+        for why_not_index, finding in enumerate(row["why_not"]):
+            _validate_card_prose(
+                finding["finding"],
+                f"{label}.why_not[{why_not_index}].finding",
+            )
         _validate_source_integrity(
             row["source_integrity"],
             expected_uses=_assessment_source_uses(row),
@@ -268,23 +273,18 @@ def _validate_candidate_audit(
             documents=documents,
             label=f"{label}.source_integrity",
         )
-        required_disposition = {
-            "exact_disease_use": "qualifying_use",
-            "qualifying_exact_disease_experiment": "qualifying_experiment",
-        }.get(str(row["reason_code"]))
-        if required_disposition and not (
+        if row["reason_code"] == "exact_disease_prior_use_or_testing" and not (
             set(map(str, row["source_ids"]))
-            & qualifying.get(str(row["candidate_id"]), {}).get(required_disposition, set())
+            & novelty_exclusions.get(str(row["candidate_id"]), set())
         ):
-            raise ProgramError(f"{label} lacks its qualifying evidence disposition")
+            raise ProgramError(f"{label} lacks its exact-disease evidence disposition")
     excluded_by_id = {str(row["candidate_id"]): row for row in exclusions}
-    for candidate_id, kinds in qualifying.items():
+    for candidate_id in novelty_exclusions:
         exclusion = excluded_by_id.get(candidate_id)
-        expected_reason = (
-            "exact_disease_use" if "qualifying_use" in kinds
-            else "qualifying_exact_disease_experiment"
-        )
-        if exclusion is None or exclusion["reason_code"] != expected_reason:
+        if (
+            exclusion is None
+            or exclusion["reason_code"] != "exact_disease_prior_use_or_testing"
+        ):
             raise ProgramError(
-                f"Candidate {candidate_id} has qualifying exact-disease evidence and must be excluded"
+                f"Candidate {candidate_id} has exact-disease use or testing and must be excluded"
             )

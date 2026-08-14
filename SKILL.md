@@ -1,198 +1,132 @@
 ---
 name: repurposing-research-program
-description: "Run a source-backed, agent-assisted programme to identify existing drugs for a supplied genetic disease and optional gene."
+description: "Run or resume a deterministic, source-backed pathology-first programme that identifies existing-drug repurposing hypotheses for a supplied genetic disease and optional gene."
 ---
 
 # Repurposing Research Program
 
-Identify existing drugs whose established mode of action could plausibly reverse, compensate for, slow, or ameliorate a specific evidence-backed element of the supplied disease pathology. A prior literature association between the drug and the disease is not required.
+Identify existing drugs whose established actions could plausibly alter a specific, evidence-backed
+element of disease pathology. Do not require a prior disease-drug association. Treat every result
+as an experimental hypothesis, never clinical advice or proof of efficacy.
 
-Treat every result as an experimental hypothesis, never clinical advice or proof of efficacy.
+## Instruction ownership
+
+- Use this file only for programme orchestration and the major stage barriers.
+- Use the current controller packet as the operative worker task, scientific decision contract,
+  result schema, and validation target.
+- Use `AGENTS.md` for general scientific conduct, routine-research authorization, and communication.
+- Use the references at the end of this file for maintainer-facing architecture, result fields, and
+  source-service behavior. They explain the controller; they do not add parallel worker criteria.
+
+Do not combine similar wording from several files into an implied stricter or broader rule. Report a
+real conflict between a packet and the installed controller as a controller defect.
 
 ## Run the programme
 
 Use the installed `scripts/orchestrate_program.py` for every controller action, invoked from this
-skill folder or by its absolute path.
+skill folder or by its absolute path. Install the pinned runtime dependencies once with
+`python -m pip install -r requirements.txt`.
 
-Install the pinned runtime dependencies once with `python -m pip install -r requirements.txt`.
-
-1. Start a fresh run unless the user explicitly asks to resume one created under the current
-   objective and stage sequence. Choose its run-folder path before `init` and reuse that exact path
-   in every controller command. Supply the exact MONDO ID if available; if not, indicate that the
-   ID is unknown and proceed without it:
+1. Start a fresh run unless the user explicitly asks to resume a compatible run. Choose one run
+   folder and reuse it for every command. Supply the exact MONDO ID when known:
 
    ```powershell
    python scripts/orchestrate_program.py init <run-folder> --disease "<disease>" [--gene <gene>] [--mondo MONDO:...]
    ```
 
-2. Call `next`. If a bounded deterministic source batch returns `needs_controller` with
-   `controller_progress`, call `next` again. Otherwise Python writes exactly one content packet
-   and returns its path and worker prompt.
+2. Call `next`:
 
-3. Start one new agent per packet with only this `SKILL.md`, the returned worker prompt, the current packet, and any read-only graph context explicitly retrieved through that packet—never prior packet content or a previous worker thread. Research workers investigate to evidence saturation with primary or authoritative sources and return in `records.documents` only the canonical documents directly cited by submitted claims, counterclaims, identity decisions, or limitations. Every returned document includes at least one concise `evidence_passages` entry with exact inspectable text and a locator. For PMID, PMCID, and DOI records, the controller retrieves and caches authoritative bibliographic metadata, rejects an ID/title mismatch, and supplies canonical publication identity in downstream source projections. The final auditor instead uses only the retained corpus supplied in its packet and returns no new documents. Every agent starts from `result_contract.result_template`, copies the nested row templates it needs, and validates before submission:
+   ```powershell
+   python scripts/orchestrate_program.py next <run-folder>
+   ```
+
+   If it returns `needs_controller` with progress, call `next` again. If it returns an agent packet,
+   use the persisted packet path and returned worker prompt exactly.
+
+3. Start one fresh `fork_turns=none` agent for that packet. Give it this `SKILL.md`, its sibling
+   `AGENTS.md`, the worker prompt, the persisted packet, and only read-only context explicitly
+   exposed by the packet. Keep only this one packet worker active, wait for it to finish without
+   polling or repeated nudges, and retire it before starting another. Do not give it prior packet
+   content or a previous worker thread. The worker starts from `result_contract.result_template`,
+   researches to the depth the evidence requires, and returns one JSON result.
+
+4. Validate and submit the same ready packet:
 
    ```powershell
    python scripts/orchestrate_program.py validate <run-folder> <result.json>
    python scripts/orchestrate_program.py submit <run-folder> <result.json>
    ```
 
-   If validation rejects a noncanonical result, preserve its research, amend only the reported
-   invalid field and direct dependants, and validate the same ready packet again. Validation never
-   accepts or mutates a result. Escalate a controller defect or a scientific gap that cannot satisfy
-   the contract.
+   If validation fails, preserve the research, amend only the reported invalid field and direct
+   dependants, and validate again. Validation never accepts or mutates a result. Report a genuine
+   controller defect as a defect. Record a scientific limitation that prevents contract satisfaction
+   as a gap. Do not work around either.
 
-4. Repeat `next -> new agent -> submit` as foreground actions. Do not replace this loop with a persistent or background supervisor. The controller progresses through:
+5. Repeat `next -> fresh agent -> validate -> submit` in the foreground. Keep the supervisor to
+   controller operations; packet research belongs to the fresh worker. Do not replace the loop with
+   a persistent or background supervisor. Use `status` for read-only progress checks. If model
+   transport reports a temporary rate limit, honour `Retry-After` and resume from persisted state.
+   When supervisor context becomes large, continue from `status` in a fresh task.
 
-   - deterministic Monarch and DisMech source screening, followed by one compact
-     pathology-source sentence adjudication packet when free text is flagged;
-   - pathology-only source normalization after Python applies the complete adjudication;
-   - one shallow, global `pathology_landscape_scan` that uses the host-configured Asta MCP tools
-     to identify supported missing or overly broad pathology claims without deep research;
-   - one global `pathology_coverage_expansion` that gives the complete post-Asta index to the
-     host-configured Undermind MCP service for one treatment-blind deep-search coverage challenge;
-   - one constrained curation packet that partitions every non-anchor Monarch, DisMech, and
-     projected Asta or Undermind node into run-local research, context-only, or excluded concepts;
-   - one deep pathology-research packet per curated research concept;
-   - a frozen, content-addressed living evidence graph;
-   - one mechanism-directed candidate-seed packet per researched pathology concept, with a compact frozen-graph index and read-only context lookup;
-   - deterministic UniChem lookup for every raw candidate seed, followed by one identity-review
-     packet covering every exact conflict, connectivity-only match, unsupported identifier, and
-     no-result seed;
-   - one evidence-dossier packet per pathology concept after candidate identity resolution;
-   - one closed-corpus independent audit that partitions every reviewed candidate into a scored
-     assessment or a bounded, cited exclusion;
-   - deterministic raw-score calculation and ranking by Python.
-
-5. When status is `ready_to_build`, run:
+6. When status is `ready_to_build`, run:
 
    ```powershell
    python scripts/orchestrate_program.py build <run-folder>
    ```
 
-Use `status` at any time. Resume only a run whose objective, stage sequence, and result contracts
-match the current controller; otherwise start a fresh run. Accepted results are immutable and
-content-addressed. Lean orchestration is not a limit on research depth: workers should investigate
-each packet as deeply as the evidence permits.
+Resume only when the case objective, stage sequence, and result contracts match the installed
+controller. Otherwise start a new run. Accepted results are immutable and content-addressed.
 
-## Hard boundaries
+## Stage sequence
 
-- Pathology construction is treatment-blind. The isolated source-adjudication packet is the
-  only packet allowed to contain flagged source sentences; it cannot create nodes or propagate
-  into pathology context. All subsequent pathology packets must not contain drug, compound,
-  treatment, therapeutic, or candidate fields or interpretations.
-- Candidate generation starts only after curation and every required pathology-concept result are accepted and Python freezes the graph snapshot.
-- `pathology_landscape_scan` owns the treatment-blind Asta discovery work; its packet supplies the
-  complete search, coverage, evidence, retry, and receipt contract.
-- `pathology_coverage_expansion` owns the treatment-blind Undermind coverage challenge; its packet
-  supplies the complete search, evidence, and receipt contract.
-- At curation, projected literature-discovery additions join the same `source_nodes` collection and
-  shared disease context as all other pathology claims; source origin is provenance rather than a
-  separate evidence tier.
-- Candidate generation begins by deriving one or more cited, directionally explicit rescue
-  strategies from the frozen focal pathology JSON before any drug search, and then keeps
-  `pathology element -> seed-stage rescue strategy -> established drug mode of action` as its main
-  anchor. Do not seek a strategy quota. Each strategy has the focal concept as its primary node and
-  may cite linked graph nodes only when they materially support the route. The worker compares the
-  rescued state with every linked-node profile and does not repeat the same state and route under a
-  linked node in reverse; a different objective, direction, or causal route remains distinct. Each
-  seeded strategy links to at least one candidate, while a route without a supported candidate is
-  retained as `no_supported_seed` rather than padded. A researched distinct mechanism or linked
-  graph node may supply the causal route only when its relationship to the focal concept and
-  candidate hypothesis is mechanistically justified.
-- Monarch associations are pathology-category allowlisted. DisMech treatment-oriented sections
-  and fields are excluded unconditionally. Flagged free text is batched once, classified without
-  search or rewriting, and retained only when the complete sentence is adjudicated pathology-only.
-  If focal MONDO coverage is absent, gene-and-disease-matched DisMech spectrum entries are labelled
-  discovery leads for literature coverage only; they never become focal source evidence.
-- Workers create research content only. Python controls source receipts, task order, item cursors, packet lineage, validation, persistence, candidate aggregation, ranking order, and outputs.
+The controller advances linearly through:
 
-## Evidence safeguards
+1. deterministic Monarch and DisMech screening;
+2. compact source-sentence adjudication when screening flags free text;
+3. pathology-only source normalization;
+4. `pathology_landscape_scan` for the shallow Asta landscape pass;
+5. `pathology_coverage_expansion` for the single Undermind coverage challenge;
+6. one constrained curation packet;
+7. one deep pathology-research packet per curated research concept;
+8. a frozen living evidence graph;
+9. one candidate-seed packet per researched concept;
+10. deterministic UniChem lookup and one identity-review packet when needed;
+11. one evidence-dossier packet per nonempty candidate-review batch;
+12. one closed-corpus independent candidate audit;
+13. deterministic scoring, ranking, and output construction.
 
-- Preserve source IDs, exact identity, contradictions, negative results, unresolved identity, exclusions, and explicit gaps.
-- Discovery-stage search outputs and service responses are transient. Retained proposals cite
-  canonical papers with inspectable evidence, and packets return only their specified non-secret
-  operation receipts.
-- Pathology research assertions are optional and may use only exact `node_id` values in the packet's `allowed_assertion_nodes`; keep newly researched mechanisms in the profile when they do not connect two allowed nodes.
-- If a focal research concept appears to contain nested mechanisms, compare each semantically with
-  that complete index and its atomicity metadata. Research every materially distinct causal or
-  downstream component in the profile's `distinct_mechanisms`, including biology that may enable a
-  specific later candidate route. Mark it `indexed_node` with the exact existing node ID,
-  `focal_detail`, or `unindexed_distinct`; do not duplicate another profile or create graph nodes
-  after curation.
-- Curation alone owns pathology splits, merges, concept identity, and research eligibility.
-  Literature-discovery stages may expose a broad claim through separate evidence-backed atomic proposals,
-  but those are decomposition candidates rather than ontology decisions. Every research concept records one
-  focal abnormal state, causal level, biological direction, compartment, and atomicity rationale.
-  Context-only and excluded concepts use `atomicity: null`; do
-  not invent state metadata for claims that do not support a research route. Keep separately supplied
-  states separate when they can occur independently, could justify distinct candidate-discovery
-  routes,
-  occupy different causal levels or compartments, or have materially different evidence. If a
-  lone source node bundles such states without separately supported proposals, retain it as
-  `context_only` and report the missing atomic subclaims as a gap; do not fabricate them. Keep
-  inseparable steps, assays, models,
-  biomarkers, populations, and alternate wording within one concept when they do not change that
-  state. Do not make a bundled claim appear atomic by replacing it with an umbrella label: the
-  focal abnormal state must identify one supplied biological control variable or process. Claims
-  spanning independently variable cell types, compartments, causal levels, cargo classes, or
-  molecular species remain separate when their biological normalisation differs. The curator does
-  not research or invent why a broad pathology exists; it uses only separately supported supplied
-  nodes and proposals, and otherwise assigns the broad claim `context_only` plus a decomposition
-  gap. The final concepts partition and `member_node_ids` are the sole split/merge record; do not
-  add parallel `proposed_splits`, `merge_targets`, or identity metadata. Later research preserves
-  this identity boundary and records contrary findings as gaps rather
-  than silently splitting, merging, or redefining the concept.
-- Curation separates concept identity from research eligibility: concept distinctness does not
-  create a research job, and researchability may not be deferred to deep research. A bare gene or
-  gene-disease association, risk factor, model genotype,
-  broad pathway, terminal outcome, or mutation label without supplied functional pathology is
-  normally context-only. Generic gene and lesion-specific claims do not both create research routes
-  unless each supplies a distinct intervention variable. Measurement-only biomarkers are context;
-  a biomarker-labelled causal process is classified by that mechanistic role rather than forced
-  into context. A phenotype receives `research` disposition only when every following criterion is
-  established by the supplied packet: (1) it is disease-attributed, meaning supported as part of
-  the focal disease rather than merely incidental, treatment-induced, age-related, or comorbid;
-  disease-attributed does not mean unique to that disease; (2) it has at least one direct,
-  source-supported causal or mechanistic link to a retained driver or mechanism, not merely
-  co-occurrence, graph proximity, or label similarity; (3) it expresses one physiological state
-  with one biological direction and supported compartment; (4) it is an independent objective,
-  not a subordinate sign, measurement, severity descriptor, or manifestation that would be
-  substantially subsumed by normalising an upstream retained concept; and (5) it is material
-  enough that changing it would preserve a major function or independently important disease
-  burden and justify its own candidate-discovery route. A directionally defined causal component
-  is not demoted merely because it sits inside a broader process. If any criterion is absent or uncertain,
-  retain the phenotype `context_only` and attach it to the relevant research concept. Curation
-  does not formulate a rescue state or assess drug availability; rescue direction is constructed
-  only at the start of candidate seed research.
-- Every graph assertion is keyed by its biological triple and retains cited evidence contexts for evidence type, model, stage, polarity, and summary; Python assigns the stable assertion ID.
-- Candidate graph provenance contains only graph nodes and assertion IDs explicitly selected by the seed worker, with one non-duplicative graph rationale. Focal-profile-only hypotheses may select no assertion.
-- Rescue strategies use packet-local keys rather than semantic controller merging. Python only
-  namespaces those keys for downstream provenance. Every candidate names one or more local strategy
-  keys and includes the primary node, materially linked nodes, and selected assertions belonging to
-  those strategies in its graph provenance. Strategy rows use a packet-local `strategy_key` and the
-  supplied focal `primary_node_id`; Python assigns the downstream `strategy_id`.
-- Seed workers review every immediate focal neighbour, source edge, and researched assertion before
-  searching, then retain only materially useful graph context. Candidate reviewers receive the exact
-  selected assertions plus a bounded source-edge projection for the selected nodes and cited
-  pathology sources; the full graph remains available to the audit.
-- Candidate evidence reviews use each candidate's `strategy_ids` to select only its matching rescue
-  strategies, use the frozen graph as disease context, retrieve primary or authoritative drug facts,
-  and build cited dossiers without scoring, ranking, or excluding candidates.
-- The independent audit receives the frozen graph, candidate-identity result, dossiers, and retained source content. It reads and weighs that evidence rather than restating a review and may not search, add evidence, or send a candidate for re-review.
-- Before scoring, the audit classifies every controller-indexed candidate/source pair, including
-  candidate evidence retained under a different dossier. Qualifying use or experimentation forces
-  the corresponding bounded exclusion.
-- Audit source integrity is decided at the exact point of use. Every source cited by a score component, net assessment, indexed alias, indexed reservation, or exclusion receives one concrete `supports`, `partly_supports`, `does_not_support`, or `contradicts` finding based on retained content. A generic integrity status or a direction to re-verify later is invalid; Python checks complete non-overlapping coverage, prevents publication aliases from being counted as independent support in one scope, and summarizes the results.
-- Long or uncertain hypotheses remain rankable with explicit reservations. Audit exclusion is limited to established exact-disease use, a qualifying exact-disease experiment, unsupported or opposite proposed action, demonstrated impossibility of relevant action or exposure, or an entity established not to be a repurposable drug or administered intervention. A qualifying experiment may be human or preclinical and favorable or unfavorable, but the retained corpus must establish relevant exposure, a credible counterfactual, and a disease-relevant outcome; mere registration, uncontrolled anecdote, or an unsuitable or inadequately controlled experiment remains ranked with a concise cited reservation. The audit packet supplies exact definitions; uncertainty or missing data never establishes an exclusion.
-- Each assessed candidate receives four cited integer component scores from 1 through 20: drug-action confidence, disease-mechanism relevance, mechanistic-bridge plausibility, and translational feasibility. Counterevidence never earns points: it lowers each component whose premise it directly challenges and otherwise remains an unscored reservation. Python sums the four components without weighting to a transparent score out of 80 and applies deterministic dense ranking.
-- Never persist API keys, access tokens, authorization headers, or secrets.
-- Placebo, vehicle, and sham are comparators, not candidates.
-- Unresolved identity stays visible and may be reviewed; it must not silently erase the programme.
-- Exact UniChem UCI matches merge automatically. Connectivity-only matches, conflicting
-  identifiers, unsupported candidates, and no results are interpretive identity work and never
-  imply either equivalence or uniqueness.
-- `complete` requires at least one audited, scored candidate and verified hashes for all accepted results and outputs.
+Asta and Undermind are required only in their named stages. Their presence in the sequence is not a
+general preference for research tools or sources. All other research follows the evidence question
+in the current packet.
 
-Read [architecture.md](references/architecture.md) for ownership, [packet-contract.md](references/packet-contract.md) for worker results, and [source-adapters.md](references/source-adapters.md) before changing source ingestion.
+## Programme barriers
 
-At handoff report `source_edges` as source edges and researched `assertions` as assertions; never use either term for the other. Before pathology-node research, the assertion count is zero. Also report the status, retained source count, pathology profile count, raw and deduplicated candidate counts, material gaps, and the experimental-use policy.
+- Keep pathology construction treatment-blind. The isolated source-adjudication packet is the only
+  packet that may contain flagged treatment-bearing source sentences.
+- Begin candidate generation only after curation, required pathology research, and graph freezing.
+- Derive rescue strategies from the frozen pathology before searching for drugs.
+- Keep pathology evidence and drug-action evidence separate; a paper directly linking the drug to
+  the disease is not required.
+- Let curation alone decide pathology identity, splitting, merging, and research eligibility.
+- Let candidate review assemble evidence without scoring or excluding.
+- Let the final auditor use only the retained closed corpus; it may not search or add evidence.
+- Let Python own ordering, receipts, hashes, packet lineage, validation, persistence, aggregation,
+  ranking, and outputs. Workers create research judgments only.
+
+The exact scientific gates and result fields for each barrier live in the emitted packet and are
+documented once in `references/packet-contract.md`.
+
+## References
+
+- Read [architecture.md](references/architecture.md) when changing stage ownership, controller
+  state, evidence flow, status semantics, or module boundaries.
+- Read [packet-contract.md](references/packet-contract.md) when changing worker tasks, scientific
+  gates, result fields, validation rules, or final audit semantics.
+- Read [source-adapters.md](references/source-adapters.md) before changing source ingestion,
+  bibliography or UniChem transport, or the Asta/Undermind service protocols.
+
+## Handoff
+
+Report status, retained source count, pathology profile count, raw and deduplicated candidate
+counts, material gaps, and the experimental-use policy. Report `source_edges` as source edges and
+researched `assertions` as assertions; before pathology-node research the assertion count is zero.
