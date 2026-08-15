@@ -51,8 +51,9 @@ can consider them while constructing rescue routes without mistaking curation pr
 biological support.
 
 The three global hypothesis stages run after graph freezing and before candidate seeding. They do
-not mutate the graph or nominate drugs. Their literature is exposed to seed workers only through
-the retained connection index and bounded connection lookup; it does not enter the audit corpus
+not mutate the graph or nominate drugs. The synthesis worker tags every question and connection
+with its mechanistically relevant frozen nodes; matching material is routed into each seed packet.
+Their literature does not enter the audit corpus
 unless a downstream candidate stage independently retrieves and cites the relevant evidence.
 
 ## Ownership

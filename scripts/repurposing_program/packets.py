@@ -30,7 +30,7 @@ from .evidence import (
     _source_index,
 )
 from .graph import _graph_index, _graph_node_context
-from .hypotheses import _connection_index, _connection_rows
+from .hypotheses import _connection_rows
 from .identity import (
     _canonical_candidates,
     _identity_candidate_options,
@@ -309,6 +309,17 @@ def _packet_context(
             "source_index": _source_catalog(source_documents),
         }
     if task == "candidate_seed_research":
+        question_tags = {
+            str(row["question_id"]): set(map(str, row["node_ids"]))
+            for row in _rows(
+                results["pathology_hypothesis_synthesis"]["records"], "question_node_tags"
+            )
+        }
+        focal_questions = [
+            row for row in _rows(
+                results["pathology_question_research"]["records"], "question_answers"
+            ) if str(item_id) in question_tags[str(row["question_id"])]
+        ]
         focal_connections = [
             row
             for row in _connection_rows(results)
@@ -319,8 +330,8 @@ def _packet_context(
             "focal_context": _graph_node_context(graph, str(item_id)),
             "graph_index": _graph_index(graph),
             "context_lookup": graph_lookup,
-            "connection_index": _connection_index(results),
-            "focal_connections": focal_connections,
+            "routed_question_answers": focal_questions,
+            "routed_connections": focal_connections,
             "connection_lookup": {
                 "argv": [
                     "python",
@@ -492,7 +503,7 @@ def _row_template(name: str) -> dict[str, Any]:
             "linked_node_ids": [], "connection_ids": [], "assertion_ids": [],
             "source_ids": [],
         })
-    elif name == "open_questions":
+    elif name in ("open_questions", "question_node_tags"):
         template["node_ids"] = []
     elif name == "question_answers":
         template.update({

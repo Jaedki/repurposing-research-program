@@ -392,10 +392,12 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "exact claim and graph-node IDs with a mechanistic direction, why it is genuinely "
             "unexpected, explicit assumptions, the strongest counterargument, the weakest causal "
             "link, a falsifying observation, limitations, and citations. An empty connection set is "
-            "valid when critique eliminates every proposal. Do not nominate drugs, rank candidates, "
+            "valid when critique eliminates every proposal. Tag every supplied question and retained "
+            "connection with all frozen graph nodes to which it is mechanistically relevant. Do not "
+            "nominate drugs, rank candidates, "
             "create graph edges, or mutate the frozen graph."
         ),
-        "collections": ["documents", "hypothesis_connections"],
+        "collections": ["documents", "question_node_tags", "hypothesis_connections"],
     },
     "candidate_seed_research": {
         "role": "mechanism-directed candidate seed researcher",
@@ -424,12 +426,7 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "evidence; use it as linked support only when a source edge or researched assertion "
             "establishes the claimed relationship. Include only context that materially contributes "
             "after that bounded review; a focal-only hypothesis remains valid. "
-            "After that review, cross-node use is never mandatory. "
-            "Supplied global connections are optional discovery leads, not graph evidence; record "
-            "a connection ID only when it materially informs the route, then validate that route "
-            "against the frozen pathology and independently cited evidence. "
-            "Do not pad the "
-            "list. A supplied linked graph node may support a symptomatic or compensatory candidate "
+            "A supplied linked graph node may support a symptomatic or compensatory candidate "
             "only when its relationship to the focal concept and candidate hypothesis is "
             "mechanistically justified. "
             "Retain a less-plausible seed only when it offers a discriminating, mechanism-relevant "
@@ -750,7 +747,7 @@ ROW_SCHEMAS = {
         "additional_fields": False,
         "field_contracts": {
             "node_ids": {
-                "type": "non-empty list of unique frozen graph node IDs",
+                "type": "all mechanistically relevant frozen graph node IDs",
             },
             "claim_ids": {
                 "type": "non-empty list of unique question-research claim IDs",
@@ -770,6 +767,13 @@ ROW_SCHEMAS = {
             "source_ids": {
                 "type": "non-empty list of unique source IDs supporting the connection",
             },
+        },
+    },
+    "question_node_tags": {
+        "required_fields": ["question_id", "node_ids"],
+        "additional_fields": False,
+        "field_contracts": {
+            "node_ids": {"type": "all mechanistically relevant frozen graph node IDs"},
         },
     },
     "rescue_strategies": {

@@ -351,9 +351,15 @@ def _validate_hypothesis_synthesis(
     records: Mapping[str, Any], results: Mapping[str, Mapping[str, Any]]
 ) -> None:
     documents = _validate_documents(records, canonical_ids=True)
+    question_tags = _contract_rows(records, "question_node_tags", "question_id")
     connections = _contract_rows(records, "hypothesis_connections", "connection_id")
     allowed_nodes = _graph_node_ids(results)
     claims = _claim_index(results)
+    question_ids = {str(row["question_id"]) for row in _question_answers(results)}
+    if {str(row["question_id"]) for row in question_tags} != question_ids:
+        raise ProgramError("question_node_tags must partition every supplied question exactly once")
+    for index, row in enumerate(question_tags):
+        _id_list(row["node_ids"], f"question_node_tags[{index}].node_ids", allowed_nodes)
     returned_sources = {str(row["document_id"]) for row in documents}
     answer_sources = {
         str(row["document_id"])

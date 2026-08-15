@@ -1325,8 +1325,14 @@ class WorkflowTest(unittest.TestCase):
             "PMID:4",
             {row["document_id"] for row in synthesis_packet["context"]["source_index"]},
         )
+        question_tags = [{"question_id": "Q1", "node_ids": ["NODE:1"]}]
+        with self.assertRaisesRegex(core.ProgramError, "partition every supplied question"):
+            hypotheses._validate_hypothesis_synthesis(
+                {"documents": [], "question_node_tags": [], "hypothesis_connections": []},
+                run_state._load_results(self.root),
+            )
         hypotheses._validate_hypothesis_synthesis(
-            {"documents": [], "hypothesis_connections": []},
+            {"documents": [], "question_node_tags": question_tags, "hypothesis_connections": []},
             run_state._load_results(self.root),
         )
         connection = {
@@ -1360,7 +1366,10 @@ class WorkflowTest(unittest.TestCase):
         })
         with self.assertRaisesRegex(core.ProgramError, "literature-delta claim"):
             hypotheses._validate_hypothesis_synthesis(
-                {"documents": [], "hypothesis_connections": [baseline_only_connection]},
+                {
+                    "documents": [], "question_node_tags": question_tags,
+                    "hypothesis_connections": [baseline_only_connection],
+                },
                 run_state._load_results(self.root),
             )
         alternative_connection = json.loads(json.dumps(connection))
@@ -1381,6 +1390,7 @@ class WorkflowTest(unittest.TestCase):
                 "documents": [{
                     "document_id": "PMID:5", "title": "Feedback verification", "source": "test",
                 }],
+                "question_node_tags": question_tags,
                 "hypothesis_connections": [connection, alternative_connection],
             },
             run_state._load_results(self.root),
@@ -1392,6 +1402,7 @@ class WorkflowTest(unittest.TestCase):
                 "documents": [{
                     "document_id": "PMID:5", "title": "Feedback verification", "source": "test",
                 }],
+                "question_node_tags": question_tags,
                 "hypothesis_connections": [invalid_connection],
             })
         invalid_connection = json.loads(json.dumps(connection))
@@ -1401,12 +1412,14 @@ class WorkflowTest(unittest.TestCase):
                 "documents": [{
                     "document_id": "PMID:5", "title": "Feedback verification", "source": "test",
                 }],
+                "question_node_tags": question_tags,
                 "hypothesis_connections": [invalid_connection],
             })
         self.submit(action, {
             "documents": [{
                 "document_id": "PMID:5", "title": "Feedback verification", "source": "test",
             }],
+            "question_node_tags": question_tags,
             "hypothesis_connections": [connection],
         })
 
@@ -1467,11 +1480,10 @@ class WorkflowTest(unittest.TestCase):
         )
         self.assertEqual(packet["context"]["focal_context"]["node"]["node_id"], "NODE:1")
         self.assertEqual(packet["context"]["focal_context"]["profile"]["node_id"], "NODE:1")
-        self.assertEqual(
-            [row["connection_id"] for row in packet["context"]["connection_index"]],
-            ["CONNECTION:1"],
-        )
-        self.assertEqual(packet["context"]["focal_connections"], [connection])
+        self.assertEqual(packet["context"]["routed_question_answers"], [answer])
+        self.assertEqual(packet["context"]["routed_connections"], [connection])
+        self.assertNotIn("connection_index", packet["context"])
+        self.assertNotIn("optional discovery leads", seed_instructions)
         self.assertEqual(
             packet["context"]["connection_lookup"]["argv"][-1], "<connection_id>"
         )
@@ -2065,7 +2077,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("graph_rationale", seed_guidance)
         self.assertIn("every immediate source edge", seed_guidance)
         self.assertIn("neighbouring node", seed_guidance)
-        self.assertIn("cross-node use is never mandatory", seed_guidance)
+        self.assertNotIn("cross-node use is never mandatory", seed_guidance)
         self.assertIn("do not use disease-specific drug literature", seed_guidance)
         self.assertIn("before searching for any drug", seed_guidance)
         self.assertIn("rescue_strategies", seed_guidance)
