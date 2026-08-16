@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any, Mapping
@@ -32,6 +33,7 @@ from .evidence import (
 from .graph import _graph_index, _graph_node_context
 from .hypotheses import _connection_rows
 from .identity import (
+    _candidate_prior_art_terms,
     _canonical_candidates,
     _identity_candidate_options,
     _identity_queue,
@@ -354,7 +356,7 @@ def _packet_context(
         batch = _find(_review_batches(results), "concept_id", str(item_id))
         candidate_ids = set(map(str, batch["candidate_ids"]))
         candidates = [
-            row
+            {**row, "prior_art_terms": _candidate_prior_art_terms(row, seeds)}
             for row in _canonical_candidates(results)
             if str(row["candidate_id"]) in candidate_ids
         ]
@@ -419,6 +421,7 @@ def _packet_context(
     )
     canonical_ids = {alias: str(row["document_id"]) for row in documents for alias in row.get("identifier_aliases", [])}
     reviews = _rows(results["candidate_review"]["records"], "reviews")
+    candidates = [{**row, "prior_art_terms": _candidate_prior_art_terms(row, seeds)} for row in _canonical_candidates(results)]
     aliases = {
         str(review["candidate_id"]): [str(row["name"]) for row in review["aliases"]]
         for review in reviews
@@ -436,16 +439,18 @@ def _packet_context(
     review_sources = {
         str(review["candidate_id"]): cited_sources(review) for review in reviews
     }
+    evidence_text = lambda document: json.dumps({key: document.get(key) for key in ("title", "abstract", "supporting_text", "snippets", "supports", "structured_content", "evidence_passages")}, sort_keys=True)
     candidate_evidence_index = []
-    for candidate in _canonical_candidates(results):
-        terms = {str(candidate["name"]), *aliases.get(str(candidate["candidate_id"]), [])}
-        patterns = [re.compile(rf"(?<!\w){re.escape(term)}(?!\w)", re.I)
-                    for term in terms if len(term.strip()) >= 3]
-        source_ids = [canonical_ids.get(value, value) for value in review_sources.get(str(candidate["candidate_id"]), set())]
+    for candidate in candidates:
+        terms = {*map(str, candidate["prior_art_terms"]), *aliases.get(str(candidate["candidate_id"]), [])}
+        graph_rows = [row for collection, id_field, candidate_field in (("source_nodes", "node_id", "graph_node_ids"), ("profiles", "node_id", "graph_node_ids"), ("source_edges", "edge_id", "source_edge_ids"), ("assertions", "assertion_id", "assertion_ids")) for row in _rows(graph, collection) if str(row[id_field]) in set(map(str, candidate[candidate_field]))]
+        structured = {*review_sources.get(str(candidate["candidate_id"]), set()), *candidate.get("identity", {}).get("source_ids", []), *candidate["pathology_source_ids"], *candidate["mechanism_source_ids"], *_cited_ids(graph_rows)}
+        structured_ids = {canonical_ids.get(value, value) for value in structured}
+        terms.update(match.group(1) for document in documents if str(document["document_id"]) in structured_ids for term in tuple(terms) for match in re.finditer(rf"(?i:{re.escape(term)})\s*\(([A-Z][A-Z0-9-]{{1,9}})\)", evidence_text(document)))
+        patterns = [re.compile(rf"(?<!\w){re.escape(term)}(?!\w)", re.I) for term in terms if len(term.strip()) >= 4 or (len(term.strip()) == 3 and term.isupper())]
+        source_ids = [canonical_ids.get(value, value) for value in structured]
         for document in documents:
-            text = " ".join([str(document.get("title", "")), *(
-                str(row.get("text", "")) for row in document.get("evidence_passages", [])
-                if isinstance(row, Mapping))])
+            text = evidence_text(document)
             if any(pattern.search(text) for pattern in patterns):
                 source_ids.append(str(document["document_id"]))
         candidate_evidence_index.append({
@@ -453,9 +458,9 @@ def _packet_context(
             "source_ids": sorted(set(source_ids)),
         })
     return {
-        "candidates": _canonical_candidates(results),
+        "candidates": candidates,
         "rescue_strategies": _rows(seeds, "rescue_strategies"),
-        "reviews": _rows(results["candidate_review"]["records"], "reviews"),
+        "reviews": [{"candidate_id": row["candidate_id"], "supporting_findings": row["supporting_findings"], "assumptions": row["assumptions"], "aliases": row["aliases"], "why_not": row["why_not"], "limitations": row["limitations"], "prior_art_findings": row["prior_art"]["findings"]} for row in reviews],
         "evidence_graph": graph,
         "candidate_identity": results["candidate_identity"]["records"],
         "source_index": _source_index(documents),
@@ -508,11 +513,12 @@ def _row_template(name: str) -> dict[str, Any]:
             "mechanism_source_ids": [],
         })
     elif name == "exclusions": template.update({"identifiers": {}, "strategy_keys": [], "source_ids": []})
-    elif name == "identity_groups": template.update({"identifiers": {}, "rejected_identifiers": {}, "ambiguous_identifiers": {}})
+    elif name == "identity_groups": template.update({"identifiers": {}, "rejected_identifiers": {}, "ambiguous_identifiers": {}, "related_names": []})
     elif name == "reviews":
         template.update({"supporting_findings": [], "assumptions": [], "why_not": [],
                          "aliases": [], "limitations": [], "prior_art": {
-                             "status": None, "summary": "", "findings": []}})
+                             "status": None, "summary": "", "searched_terms": [], "findings": []},
+                         "mechanistic_bridge": {"text": "", "source_ids": [], "evidence_locators": {}, "evidence_system": None, "epistemic_status": "inference", "entity_form": ""}})
     elif name == "assessments":
         template.update({"source_integrity": {"checks": []}, "component_scores": {
             component: {"value": None, "reason": "", "source_ids": []}

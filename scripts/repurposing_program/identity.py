@@ -352,6 +352,7 @@ def _canonical_candidates(
             "status": "resolved",
             "preferred_name": preferred_name,
             "identifiers": {"unichem_uci": candidate_id.split(":", 1)[1]},
+            "related_names": [],
         }
         candidates[candidate_id] = _merge_candidate_rows(rows, candidate_id, identity)
     if not reviewed:
@@ -369,6 +370,7 @@ def _canonical_candidates(
                 "preferred_name": group["preferred_name"],
                 "identifiers": _merge_identifiers(*(seeds[seed_id]["identifiers"] for seed_id in exact if seed_id not in group["member_seed_ids"]), group["identifiers"], {"unichem_uci": str(target).split(":", 1)[1]}),
                 "rejected_identifiers": group["rejected_identifiers"], "ambiguous_identifiers": group["ambiguous_identifiers"],
+                "related_names": group["related_names"],
                 "source_ids": sorted(set(map(str, group["source_ids"]))),
             }
             candidate_id = str(target)
@@ -379,10 +381,22 @@ def _canonical_candidates(
                 "preferred_name": group["preferred_name"],
                 "identifiers": group["identifiers"],
                 "rejected_identifiers": group["rejected_identifiers"], "ambiguous_identifiers": group["ambiguous_identifiers"],
+                "related_names": group["related_names"],
                 "source_ids": sorted(set(map(str, group["source_ids"]))),
             }
         candidates[candidate_id] = _merge_candidate_rows(rows, candidate_id, identity, include_seed_identifiers=False)
     return [candidates[key] for key in sorted(candidates)]
+
+
+def _candidate_prior_art_terms(
+    candidate: Mapping[str, Any], seed_records: Mapping[str, Any]
+) -> list[str]:
+    seeds = {str(row["seed_id"]): row for row in _rows(seed_records, "candidates")}
+    identity = candidate["identity"]
+    identifiers = [value for raw in identity["identifiers"].values() for value in (raw if isinstance(raw, list) else [raw])]
+    values = [candidate["name"], identity["preferred_name"], *identifiers, *(row["name"] for row in identity.get("related_names", [])),
+              *(seeds[seed_id]["name"] for seed_id in candidate["member_seed_ids"])]
+    return sorted({str(value).strip() for value in values if str(value).strip()}, key=lambda value: (value.casefold(), value))
 
 
 def _empty_identity_result(results: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
@@ -464,8 +478,18 @@ def _validate_candidate_identity(
                 f"{label}.canonical_candidate_id is required when a resolved group contains "
                 "one exact UniChem identity"
             )
-        if not _references(group, "source_ids", document_ids, label):
-            raise ProgramError(f"{label}.source_ids must cite authoritative identity evidence")
+        group_sources = _references(group, "source_ids", document_ids, label)
+        related_names = group.get("related_names")
+        if not isinstance(related_names, list): raise ProgramError(f"{label}.related_names must be a list")
+        seen_names: set[str] = set()
+        for related_index, related in enumerate(related_names):
+            related_label = f"{label}.related_names[{related_index}]"
+            if not isinstance(related, dict) or set(related) != {"name", "relation", "source_ids"}: raise ProgramError(f"{related_label} must contain exactly name, relation, and source_ids")
+            name, relation = str(related["name"]).strip(), related["relation"]
+            if not name or relation not in {"exact_candidate", "same_active_moiety", "related_form"}: raise ProgramError(f"{related_label} has an invalid name or relation")
+            if name.casefold() in seen_names or name.casefold() == str(group["preferred_name"]).casefold(): raise ProgramError(f"{label}.related_names names must be unique and non-canonical")
+            seen_names.add(name.casefold())
+            _references(related, "source_ids", group_sources, related_label)
     if sorted(covered) != sorted(queue_ids) or len(covered) != len(set(covered)):
         raise ProgramError("identity_groups must partition every queued seed exactly once")
     if len(targets) != len(set(targets)):

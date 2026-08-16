@@ -109,6 +109,9 @@ _CITATION_FIELDS = frozenset({"source_ids", "pathology_source_ids", "mechanism_s
 _SOURCE_CHECK_VERDICTS = frozenset({
     "supports", "partly_supports", "does_not_support", "contradicts",
 })
+EVIDENCE_SYSTEMS = frozenset({"human", "animal", "cell", "biochemical", "authoritative_database"})
+EPISTEMIC_STATUSES = frozenset({"direct_observation", "inference"})
+ENTITY_RELATIONSHIPS = frozenset({"exact_candidate", "same_active_moiety", "related_form", "class_or_analogue", "not_candidate_specific", "unresolved"})
 SCORE_MIN = 1
 SCORE_MAX = 20
 SCORE_COMPONENT_RUBRIC = {
@@ -475,12 +478,13 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "every candidate, first retrieve primary or authoritative sources that verify identity, "
             "target and action, pharmacology, relevant exposure, and measurable readouts, then map "
             "those facts to the supplied pathology. Build an evidence dossier rather than a score "
-            "or eligibility decision: state the hypothesis, cited supporting findings, a concise "
-            "mechanistic bridge, its explicit assumptions, cited why-not findings, and limitations. "
+            "or eligibility decision: state the hypothesis, passage-specific supporting findings, a cited "
+            "mechanistic bridge, its explicit assumptions, passage-specific why-not findings, and cited limitations. "
             "A long or unconventional bridge remains a valid hypothesis when its assumptions are "
             "clear. Only after constructing the mechanism, assess exact-disease prior art through "
-            "ordinary literature discovery to evidence saturation across supported candidate names or "
-            "salt forms and the disease and gene names. "
+            "ordinary literature discovery to evidence saturation across every supplied prior_art_term, "
+            "every newly supported alias, and the disease and gene names. Separate exact-candidate, "
+            "same-active-moiety, related-form, and class-or-analogue findings. "
             "The controller alone owns canonical PMID, PMCID, and DOI identity and title verification "
             "during validation and submission. Classify "
             "it as none found, preclinical only, human intervention, established use, or unclear. "
@@ -510,7 +514,8 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "weak evidence, long causal distance, uncertain exposure, related-disease evidence, and "
             "material assumptions remain scored with explicit why-not findings. For every assessment and "
             "exclusion, decide whether each cited source supports, partly supports, does not support, or "
-            "contradicts the exact place it is used. Do not defer this judgment or request re-verification. "
+            "contradicts the exact place it is used, naming the retained locator and entity relationship. "
+            "Reconstruct the argument independently; copied dossier conclusions or repeated generic findings are invalid. "
             "Counterevidence earns no points: lower any component whose premise "
             "it directly challenges; if it does not challenge a scored premise, retain it only as an "
             "unscored why-not finding. Assign one cited integer score from 1 through 20 "
@@ -906,10 +911,10 @@ ROW_SCHEMAS = {
     "identity_groups": {
         "required_fields": [
             "member_seed_ids", "canonical_candidate_id", "status", "preferred_name",
-            "identifiers", "rejected_identifiers", "ambiguous_identifiers", "reason", "source_ids",
+            "identifiers", "rejected_identifiers", "ambiguous_identifiers", "related_names", "reason", "source_ids",
         ],
         "additional_fields": False,
-        "field_types": {"identifiers": "object", "rejected_identifiers": "object", "ambiguous_identifiers": "object"},
+        "field_types": {"identifiers": "object", "rejected_identifiers": "object", "ambiguous_identifiers": "object", "related_names": "list"},
     },
     "reviews": {
         "required_fields": [
@@ -1168,6 +1173,7 @@ FIELD_RULES = {
         "each identity group cites at least one newly retained authoritative identity source",
         "same name alone is not identity evidence; preserve material salt, stereochemical, "
         "mixture, biologic, product, and combination distinctions",
+        "related_names contains only cited name, relation, and source_ids objects; relation is exact_candidate, same_active_moiety, or related_form and never authorizes merging",
         "treat suspected aliases, salts, and conflicting identifiers as one unresolved identity "
         "until authoritative evidence resolves them",
     ],
@@ -1179,17 +1185,20 @@ FIELD_RULES = {
         "match selected assertion_ids exactly and source edges match selected source_edge_ids exactly",
         "each review cites at least one document retained in this result through supporting_findings, "
         "why_not, prior_art findings, or aliases",
-        "hypothesis and mechanistic_bridge are concise non-empty text; mechanistic_bridge is an "
-        "explicit inference and never an exclusion gate",
-        "supporting_findings is a non-empty list of finding and source_ids objects",
-        "assumptions and limitations are lists of non-empty strings",
+        "hypothesis is concise non-empty text; mechanistic_bridge is a passage-specific cited inference and never an exclusion gate",
+        "supporting_findings is a non-empty list of passage-specific material findings",
+        "each supporting, bridge, why-not, prior-art, and limitation finding records source_ids, one locator per source, evidence system, direct-observation or inference status, and the entity form studied",
+        "a locator copies evidence_passages.locator exactly or names retained abstract, supporting_text, structured_content, raw_path, snippets[n], or supports[n] content",
+        "assumptions is a list of non-empty strings; limitations is a list of cited material findings",
         "aliases is a list of name and source_ids objects for drug names or salt forms explicitly "
         "used in cited evidence; use an empty list when none are supported",
         "why_not is a list of finding and source_ids objects containing only counterevidence "
         "encountered during the existing review; use an empty list when absent and do not search "
         "merely to populate it",
-        "prior_art has exactly status, summary, and findings; status is none_found, preclinical_only, "
+        "prior_art has exactly status, summary, searched_terms, and findings; searched_terms covers every supplied prior-art term and supported alias; status is none_found, preclinical_only, "
         "human_intervention, established_use, or unclear; positive statuses cite at least one finding",
+        "each prior-art finding classifies its identity relationship as exact_candidate, same_active_moiety, related_form, or class_or_analogue; only the first two can establish a positive prior-art status and no finding may contradict a known candidate identity relationship",
+        "none_found is a bounded search outcome, never proof that prior testing does not exist",
         "preclinical_only includes deliberate exact-disease testing in an animal, cell, organoid, or "
         "other disease-specific model; human_intervention includes actual human testing and a "
         "registered exact-disease therapeutic study",
@@ -1203,12 +1212,12 @@ FIELD_RULES = {
         "evidence_dispositions covers every candidate-source pair in context.candidate_evidence_index "
         "exactly once; exact_disease_prior_use_or_testing requires its matching exclusion",
         "source_integrity has exactly checks; do not return a summary status or generic declaration",
-        "each source-integrity check has source_id, scope, verdict, and finding and covers exactly "
+        "each source-integrity check has source_id, locator, entity_relation, scope, verdict, and finding and covers exactly "
         "one source use in a component score, net assessment, indexed alias, indexed why-not "
-        "finding, or exclusion; use the bare component name for component scope "
+        "finding, supplied review counterevidence (`review_why_not[n]`), or exclusion; use the bare component name for component scope "
         "and do not prefix it with component_scores.",
         "verdict is supports, partly_supports, does_not_support, or contradicts; inspect the supplied "
-        "passage, abstract, structured source content, or raw source record and make the decision now; "
+        "passage, abstract, structured source content, or raw source record at the named locator and make the decision now; "
         "never defer the decision as needing re-verification",
         "PMID, PMCID, and DOI aliases with the same canonical_publication_id are one source and "
         "must not be cited as independent support within the same scope",
@@ -1216,8 +1225,7 @@ FIELD_RULES = {
         "mechanistic_bridge_plausibility, and translational_feasibility",
         "each component has exactly value, reason, and source_ids; value is any integer from "
         "1 through 20 and Python sums the four values without weighting",
-        "each component has at least one supports or partly_supports source-integrity check; "
-        "a 20-point component has no does_not_support or contradicts checks",
+        "a component may be supported, unsupported, or contradicted by the retained corpus; a 20-point component has no does_not_support or contradicts checks",
         "counterevidence never earns positive scoring credit; lower every component whose premise "
         "it directly challenges and otherwise retain it only in why_not",
         "net_assessment has exactly text and source_ids; its text uses complete sentences and "

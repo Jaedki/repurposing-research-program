@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Iterable, Mapping
 
 from .contracts import (
     AUDIT_EXCLUSION_REASONS,
     EVIDENCE_DISPOSITIONS,
+    ENTITY_RELATIONSHIPS,
     SCORE_MAX,
     SCORE_MIN,
     SCORE_COMPONENTS,
@@ -15,6 +17,7 @@ from .contracts import (
 )
 from .errors import ProgramError
 from .evidence import _all_documents, _document_has_inspectable_content, _rows
+from .identity import _canonical_candidates
 from .validation import (
     _contract_rows,
     _ids,
@@ -75,11 +78,16 @@ def _assessment_source_uses(row: Mapping[str, Any]) -> set[tuple[str, str]]:
     return uses
 
 
+def _review_counterevidence_uses(review: Mapping[str, Any]) -> set[tuple[str, str]]:
+    return {(str(source_id), f"review_why_not[{index}]") for index, finding in enumerate(review["why_not"]) for source_id in finding["source_ids"]}
+
+
 def _validate_source_integrity(
     value: Any,
     *,
     expected_uses: set[tuple[str, str]],
     documents: Mapping[str, Mapping[str, Any]],
+    candidate_source_ids: set[str],
     label: str,
 ) -> None:
     integrity = _validate_exact_object(value, {"checks"}, label)
@@ -90,18 +98,21 @@ def _validate_source_integrity(
     for index, check in enumerate(checks):
         check_label = f"{label}.checks[{index}]"
         check = _validate_exact_object(
-            check, {"source_id", "scope", "verdict", "finding"}, check_label
+            check, {"source_id", "locator", "entity_relation", "scope", "verdict", "finding"}, check_label
         )
         source_id = str(check["source_id"])
         scope = str(check["scope"])
         verdict = str(check["verdict"])
         finding = str(check["finding"]).strip()
+        locator = str(check["locator"]).strip()
         if verdict not in _SOURCE_CHECK_VERDICTS:
             raise ProgramError(
                 f"{check_label}.verdict must be one of {sorted(_SOURCE_CHECK_VERDICTS)}"
             )
         if not finding:
             raise ProgramError(f"{check_label}.finding must be non-empty")
+        if check["entity_relation"] not in ENTITY_RELATIONSHIPS:
+            raise ProgramError(f"{check_label}.entity_relation is invalid")
         if re.search(
             r"\b(?:re-?verify|unverif(?:ied|iable)|needs? (?:independent )?verification|"
             r"verify later|requires? verification|(?:cannot|could not|unable to) verify|"
@@ -115,10 +126,15 @@ def _validate_source_integrity(
         document = documents.get(source_id)
         if document is None:
             raise ProgramError(f"{check_label}.source_id is not in the retained corpus")
+        if source_id not in candidate_source_ids:
+            raise ProgramError(f"{check_label}.source_id is not associated with this candidate")
         if not _document_has_inspectable_content(document):
             raise ProgramError(
                 f"{check_label}.source_id has no inspectable content in the retained corpus"
             )
+        locators = {str(p.get("locator")) for p in document.get("evidence_passages", []) if isinstance(p, Mapping)} | {field for field in ("abstract", "raw_path", "supporting_text", "structured_content") if document.get(field)} | {f"{field}[{index}]" for field in ("snippets", "supports") for index, item in enumerate(document.get(field, [])) if str(item).strip()}
+        if not locator or locator not in locators:
+            raise ProgramError(f"{check_label}.locator is not retained by that source")
         actual_uses.append((source_id, scope))
     if len(actual_uses) != len(set(actual_uses)):
         raise ProgramError(f"{label}.checks contains duplicate source-use checks")
@@ -140,6 +156,29 @@ def _validate_source_integrity(
                 f"{label}.checks cites publication {canonical_id} more than once in {scope} "
                 f"through identifier aliases {sorted({prior, source_id})}"
             )
+
+
+def _validate_audit_independence(records: Mapping[str, Any], results: Mapping[str, Mapping[str, Any]]) -> None:
+    words = lambda value: re.findall(r"[a-z0-9]+", str(value).casefold())
+    reviews = {str(row["candidate_id"]): row for row in _rows(results["candidate_review"]["records"], "reviews")}
+    outputs = [*_rows(records, "assessments"), *_rows(records, "excluded_candidates")]
+    repeated: dict[str, set[str]] = {}
+    for row in outputs:
+        candidate_id, audit_text = str(row["candidate_id"]), " ".join(words(json.dumps(row, sort_keys=True)))
+        review = reviews[candidate_id]; bridge = review.get("mechanistic_bridge", {})
+        hidden = [review.get("hypothesis", ""), bridge.get("text", "") if isinstance(bridge, Mapping) else bridge, review.get("prior_art", {}).get("summary", "")]
+        if any(len(phrase := words(value)) >= 12 and any(" ".join(phrase[index:index + 12]) in audit_text for index in range(len(phrase) - 11)) for value in hidden): raise ProgramError(f"Candidate {candidate_id} audit substantially copies a hidden dossier conclusion")
+        findings = [check["finding"] for check in row["source_integrity"]["checks"]] + [value["finding"] for value in row.get("why_not", [])] + [value["reason"] for value in row.get("component_scores", {}).values()] + [row.get("net_assessment", {}).get("text", ""), row.get("finding", "")]
+        for finding in findings:
+            if len(parts := words(finding)) >= 8: repeated.setdefault(" ".join(parts), set()).add(candidate_id)
+    if any(len(candidate_ids) >= 3 for candidate_ids in repeated.values()): raise ProgramError("candidate audit repeats a generic source-integrity finding across candidates")
+    if "candidate_seed_generation" in results:
+        strategies = {str(row["strategy_id"]): row for row in _rows(results["candidate_seed_generation"]["records"], "rescue_strategies")}
+        candidates = {str(row["candidate_id"]): row for row in _canonical_candidates(results)}
+        for row in _rows(records, "assessments"):
+            route = " ".join(str(strategies[strategy_id].get(field, "")) for strategy_id in candidates[str(row["candidate_id"])]["strategy_ids"] for field in ("pathological_state", "rescuable_state", "desired_direction", "mechanistic_basis"))
+            terms = {value for value in words(route) if len(value) >= 6 and value not in {"disease", "process", "activity", "mechanism", "candidate", "pathological", "desired"}}
+            if terms and not terms & set(words(row["net_assessment"]["text"])): raise ProgramError(f"Candidate {row['candidate_id']} net assessment does not identify its actual rescue route")
 
 
 def _validate_candidate_audit(
@@ -168,6 +207,8 @@ def _validate_candidate_audit(
         for row in (candidate_evidence_index or [])
         for source_id in row.get("source_ids", [])
     }
+    candidate_sources = {str(row["candidate_id"]): set(map(str, row.get("source_ids", []))) for row in (candidate_evidence_index or [])}
+    reviews_by_id = {str(row["candidate_id"]): row for row in _rows(results["candidate_review"]["records"], "reviews")}
     actual_pairs: list[tuple[str, str]] = []
     novelty_exclusions: dict[str, set[str]] = {}
     for index, row in enumerate(dispositions):
@@ -235,8 +276,9 @@ def _validate_candidate_audit(
             )
         _validate_source_integrity(
             row["source_integrity"],
-            expected_uses=_assessment_source_uses(row),
+            expected_uses=_assessment_source_uses(row) | _review_counterevidence_uses(reviews_by_id[str(row["candidate_id"])]),
             documents=documents,
+            candidate_source_ids=candidate_sources.get(str(row["candidate_id"]), source_ids),
             label=f"{label}.source_integrity",
         )
         for component in SCORE_COMPONENTS:
@@ -245,11 +287,6 @@ def _validate_candidate_audit(
                 for check in row["source_integrity"]["checks"]
                 if str(check["scope"]) == component
             }
-            if not verdicts & {"supports", "partly_supports"}:
-                raise ProgramError(
-                    f"{label}.component_scores.{component} must have at least one "
-                    "supports or partly_supports source-integrity check"
-                )
             if components[component]["value"] == SCORE_MAX and verdicts & {
                 "does_not_support", "contradicts"
             }:
@@ -269,8 +306,9 @@ def _validate_candidate_audit(
         exclusion_sources = _references(row, "source_ids", source_ids, label)
         _validate_source_integrity(
             row["source_integrity"],
-            expected_uses={(source_id, "exclusion") for source_id in exclusion_sources},
+            expected_uses={(source_id, "exclusion") for source_id in exclusion_sources} | _review_counterevidence_uses(reviews_by_id[str(row["candidate_id"])]),
             documents=documents,
+            candidate_source_ids=candidate_sources.get(str(row["candidate_id"]), source_ids),
             label=f"{label}.source_integrity",
         )
         if row["reason_code"] == "exact_disease_prior_use_or_testing" and not (
@@ -288,3 +326,4 @@ def _validate_candidate_audit(
             raise ProgramError(
                 f"Candidate {candidate_id} has exact-disease use or testing and must be excluded"
             )
+    _validate_audit_independence(records, results)

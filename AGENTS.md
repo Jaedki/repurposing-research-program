@@ -31,9 +31,8 @@ conflict, preserve the packet state and report the defect.
 - Resolve decision-relevant ambiguity through further research where possible; otherwise state the
   remaining uncertainty plainly.
 
-Research normally from the evidence question and prefer primary sources. Use a relevant Life
-Science Research or other structured scientific lookup only when it materially answers that
-question; do not enumerate tools or narrate their selection. Asta and Undermind are used only when
+Research normally from the evidence question and prefer primary sources. You may find it helpful to use relevant Life
+Science Research skills; do not enumerate tools or narrate their selection. Asta and Undermind are used only when
 the current packet assigns their dedicated stage.
 
 Non-secret, packet-scoped searches and record lookups performed for this programme are explicitly
@@ -44,8 +43,7 @@ mechanism, public-identifier, and assigned treatment-blind pathology terms.
 
 ## Communication
 
-Default to no optional commentary during routine execution. Apart from a higher-level
-runtime-required notice, send one concise operational message only for a blocker or user decision,
+Default to no optional commentary during routine execution. Apart from a runtime-required notice, send one concise operational message only for a blocker or user decision,
 a material state change that cannot wait for handoff, or a requested update. Do not narrate plans,
 compliance, routine permission status, unused research services, tool or controller steps,
 validation, packet contents, or information that can wait for the final answer.

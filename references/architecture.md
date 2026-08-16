@@ -92,6 +92,18 @@ The compact exclusion list is exported as CSV; detailed source-integrity records
 accepted audit result. Evidence-backed exclusions made during seed search remain separate in
 `seed_exclusions.jsonl`; their authority does not include exact-disease prior-art decisions.
 
+Candidate review receives a deterministic prior-art term set from confirmed identity, cited
+identity relationships, and seed names, then adds any newly supported aliases. Review findings retain exact passage locators,
+evidence systems, epistemic status, and studied entity form. The closed-audit packet projects those
+structured findings but withholds dossier hypotheses, bridge conclusions, and prior-art summaries.
+Its candidate evidence index starts from structured review, identity, candidate-provenance, and
+explicitly linked graph citations, then supplements them by matching meaningful identity terms and
+defined acronyms across retained passages, locators, abstracts, support text, and structured content.
+Relationship names expand searches and indexing but never merge candidates; known relationship
+metadata also rejects a contradictory prior-art identity classification.
+Audit checks are candidate-associated and locator-specific; simple substantial-copy,
+repeated-generic-finding, and missing-route anomalies reject the audit submission for correction.
+
 ## Status
 
 - `needs_controller`: `next` can perform a deterministic source, merge, freeze, or aggregation action.

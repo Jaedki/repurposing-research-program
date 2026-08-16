@@ -1561,7 +1561,7 @@ class DocumentationContractTest(unittest.TestCase):
         skill = (root / "SKILL.md").read_text(encoding="utf-8")
 
         self.assertIn("Research normally from the evidence question", agents_flat)
-        self.assertIn("Life Science Research or other structured scientific lookup", agents_flat)
+        self.assertIn("may find it helpful to use relevant Life Science Research skills", agents_flat)
         self.assertIn("do not enumerate tools or narrate their selection", agents_flat)
         self.assertIn("searches and record lookups performed for this programme", agents_flat)
         self.assertIn("are explicitly", agents_flat)

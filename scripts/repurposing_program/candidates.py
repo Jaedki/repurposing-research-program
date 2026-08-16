@@ -5,12 +5,12 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping
 
-from .contracts import PRIOR_ART_STATUSES, SEED_EXCLUSION_REASONS, _COMPARATORS
+from .contracts import EPISTEMIC_STATUSES, EVIDENCE_SYSTEMS, ENTITY_RELATIONSHIPS, PRIOR_ART_STATUSES, SEED_EXCLUSION_REASONS, _COMPARATORS
 from .errors import ProgramError
 from .evidence import _all_documents, _cited_ids, _find, _rows
 from .graph import _graph_support_ids
 from .hypotheses import _connection_rows
-from .identity import _candidate_queries, _canonical_candidates
+from .identity import _candidate_prior_art_terms, _candidate_queries, _canonical_candidates
 from .pathology import _research_concepts
 from .validation import (
     _contract_rows,
@@ -401,6 +401,18 @@ def _validate_string_list(value: Any, label: str) -> None:
         raise ProgramError(f"{label} must be a list of non-empty strings")
 
 
+def _validate_review_finding(value: Any, label: str, text_field: str, documents: Mapping[str, Mapping[str, Any]], extra_fields: set[str] | None = None) -> None:
+    fields = {text_field, "source_ids", "evidence_locators", "evidence_system", "epistemic_status", "entity_form"} | (extra_fields or set())
+    row = _validate_exact_object(value, fields, label)
+    if not str(row[text_field]).strip() or not str(row["entity_form"]).strip(): raise ProgramError(f"{label}.{text_field} and entity_form must be non-empty")
+    refs = _references(row, "source_ids", set(documents), label)
+    locators = row["evidence_locators"]
+    if not isinstance(locators, Mapping) or set(map(str, locators)) != refs: raise ProgramError(f"{label}.evidence_locators must map every source_id exactly once")
+    bad_locator = next((source_id for source_id in refs if str(locators[source_id]) not in ({str(p.get("locator")) for p in documents[source_id].get("evidence_passages", []) if isinstance(p, Mapping)} | {field for field in ("abstract", "raw_path", "supporting_text", "structured_content") if documents[source_id].get(field)} | {f"{field}[{index}]" for field in ("snippets", "supports") for index, item in enumerate(documents[source_id].get(field, [])) if str(item).strip()})), None)
+    if bad_locator: raise ProgramError(f"{label}.evidence_locators[{bad_locator}] is not retained by that source")
+    if row["evidence_system"] not in EVIDENCE_SYSTEMS or row["epistemic_status"] not in EPISTEMIC_STATUSES: raise ProgramError(f"{label} has an invalid evidence_system or epistemic_status")
+
+
 def _validate_review_item(
     records: Mapping[str, Any], item_id: str, results: Mapping[str, Mapping[str, Any]]
 ) -> None:
@@ -412,37 +424,28 @@ def _validate_review_item(
     if review_ids != expected_ids:
         raise ProgramError("candidate review must cover exactly the supplied batch candidates")
     retained_ids = {str(row["document_id"]) for row in documents}
-    source_ids = {
-        *(value for row in _all_documents(results) for value in {str(row["document_id"]), *map(str, row.get("identifier_aliases", []))}),
-        *retained_ids,
-    }
+    all_documents = [*_all_documents(results), *documents]
+    documents_by_id = {value: row for row in all_documents for value in {str(row["document_id"]), *map(str, row.get("identifier_aliases", []))}}
+    source_ids = set(documents_by_id)
     for index, row in enumerate(reviews):
         label = f"reviews[{index}]"
         _required(row, ("candidate_id", "hypothesis", "mechanistic_bridge"), label)
-        _validate_cited_entries(
-            row["supporting_findings"],
-            label=f"{label}.supporting_findings",
-            text_field="finding",
-            source_ids=source_ids,
-        )
+        _validate_review_finding(row["mechanistic_bridge"], f"{label}.mechanistic_bridge", "text", documents_by_id)
+        for collection in ("supporting_findings", "why_not", "limitations"):
+            if not isinstance(row[collection], list): raise ProgramError(f"{label}.{collection} must be a list")
+            for finding_index, finding in enumerate(row[collection]):
+                _validate_review_finding(finding, f"{label}.{collection}[{finding_index}]", "finding", documents_by_id)
         if not row["supporting_findings"]:
             raise ProgramError(f"{label}.supporting_findings must not be empty")
         _validate_string_list(row["assumptions"], f"{label}.assumptions")
-        _validate_string_list(row["limitations"], f"{label}.limitations")
         _validate_cited_entries(
             row["aliases"],
             label=f"{label}.aliases",
             text_field="name",
             source_ids=source_ids,
         )
-        _validate_cited_entries(
-            row["why_not"],
-            label=f"{label}.why_not",
-            text_field="finding",
-            source_ids=source_ids,
-        )
         prior_art = _validate_exact_object(
-            row["prior_art"], {"status", "summary", "findings"},
+            row["prior_art"], {"status", "summary", "searched_terms", "findings"},
             f"{label}.prior_art"
         )
         if prior_art["status"] not in PRIOR_ART_STATUSES:
@@ -451,18 +454,28 @@ def _validate_review_item(
             )
         if not str(prior_art["summary"]).strip():
             raise ProgramError(f"{label}.prior_art.summary must be non-empty")
-        _validate_cited_entries(
-            prior_art["findings"],
-            label=f"{label}.prior_art.findings",
-            text_field="finding",
-            source_ids=source_ids,
-        )
+        if prior_art["status"] == "none_found" and not re.search(r"\b(?:search(?:es|ed|ing)?|locat(?:e|ed)|found|identified)\b", str(prior_art["summary"]), re.I):
+            raise ProgramError(f"{label}.prior_art.summary must describe the bounded search outcome")
+        _validate_string_list(prior_art["searched_terms"], f"{label}.prior_art.searched_terms")
+        for finding_index, finding in enumerate(prior_art["findings"]):
+            _validate_review_finding(finding, f"{label}.prior_art.findings[{finding_index}]", "finding", documents_by_id, {"identity_relation"})
+            if finding["identity_relation"] not in ENTITY_RELATIONSHIPS - {"not_candidate_specific", "unresolved"}: raise ProgramError(f"{label}.prior_art.findings[{finding_index}].identity_relation is invalid")
+        candidate = next((value for value in _canonical_candidates(results) if str(value["candidate_id"]) == str(row["candidate_id"])), None) if "candidate_seed_generation" in results else None
+        expected_terms = [*(_candidate_prior_art_terms(candidate, results["candidate_seed_generation"]["records"]) if candidate else []), *(alias["name"] for alias in row["aliases"])]
+        if {value.casefold() for value in prior_art["searched_terms"]} != {str(value).casefold() for value in expected_terms}: raise ProgramError(f"{label}.prior_art.searched_terms must cover every supplied term and supported alias")
+        relation_terms = {str(term).casefold(): "exact_candidate" for term in (_candidate_prior_art_terms(candidate, results["candidate_seed_generation"]["records"]) if candidate else [])}
+        relation_terms.update({str(item["name"]).casefold(): str(item["relation"]) for item in (candidate or {}).get("identity", {}).get("related_names", [])})
+        for finding in prior_art["findings"]:
+            permitted = {relation for term, relation in relation_terms.items() if len(term) >= 3 and re.search(rf"(?<!\w){re.escape(term)}(?!\w)", str(finding["entity_form"]), re.I)}
+            if permitted and finding["identity_relation"] not in permitted: raise ProgramError(f"{label}.prior_art finding conflicts with the candidate identity relationship")
         if prior_art["status"] in {
             "preclinical_only", "human_intervention", "established_use"
         } and not prior_art["findings"]:
             raise ProgramError(
                 f"{label}.prior_art.findings must not be empty for status {prior_art['status']}"
             )
+        if prior_art["status"] in {"preclinical_only", "human_intervention", "established_use"} and not any(finding["identity_relation"] in {"exact_candidate", "same_active_moiety"} for finding in prior_art["findings"]):
+            raise ProgramError(f"{label}.prior_art positive status requires exact-candidate or same-active-moiety evidence")
         cited_ids = _cited_ids(row)
         unknown = cited_ids - source_ids
         if unknown:
