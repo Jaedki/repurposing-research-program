@@ -101,6 +101,11 @@ Every top-level DisMech section is accounted for. Sections that can express dist
 - `phenotypes`, `histopathology`, and `imaging_findings` become `phenotype` nodes;
 - `genetic`, `variants`, `environmental`, and `infectious_agent` become `driver` nodes.
 
+DisMech `downstream` and `sequelae` relationships retain edge-local citations when supplied. When
+the record reports a relationship without one, the edge cites the immutable DisMech source record
+and carries `evidence_scope=source_record`; endpoint-node citations are never borrowed. This keeps
+the relationship available as an exploratory lead without overstating primary evidential support.
+
 All remaining pathology-safe sections are retained once in `disease_context` rather than expanded into low-value nodes. This includes disease description, classifications, mappings, inheritance, progression, stages, subtypes, prevalence, epidemiology, datasets, models, diagnostic context, discussions, and other source metadata. The controller retains the complete context and provenance. Curation receives source nodes, edges, and only compact disease-defining context; repeated research packets receive the same bounded context.
 
 Treatment, clinical-trial, intervention, regimen, surrogate-endpoint, and related sections or

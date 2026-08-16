@@ -217,6 +217,7 @@ def _canonical_source_records(
             "member_node_ids": members,
             "disposition": str(concept["disposition"]),
             "atomicity": concept["atomicity"],
+            "evidence_basis": [{"member_node_id": member, "source_ids": sorted(map(str, raw_by_id[member]["source_ids"]))} for member in members],
         }
         if concept["disposition"] == "context_only":
             projected["related_concept_ids"] = sorted(
@@ -245,6 +246,7 @@ def _canonical_source_records(
                 "evidence_summary": "",
                 "source_ids": [],
                 "original_edge_ids": [],
+                "evidence_scopes": [],
             },
         )
         current["evidence_summary"] = _merge_text(
@@ -256,6 +258,7 @@ def _canonical_source_records(
         current["original_edge_ids"] = sorted(
             {*map(str, current["original_edge_ids"]), str(edge["edge_id"])}
         )
+        current["evidence_scopes"] = sorted({*map(str, current["evidence_scopes"]), str(edge.get("evidence_scope", "unspecified"))})
 
     return (
         sorted(nodes, key=lambda row: str(row["node_id"])),

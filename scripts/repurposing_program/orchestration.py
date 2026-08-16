@@ -155,9 +155,14 @@ def _item_gaps(
     results: Mapping[str, Mapping[str, Any]],
     stage: str,
     task: str,
+    *,
+    bind_items: bool = False,
 ) -> list[Any]:
     accepted = _item_results(root, task, _item_ids(stage, results))
-    return [gap for result in accepted.values() for gap in result.get("gaps", [])]
+    return [
+        {"node_id": item_id, "statement": gap} if bind_items else gap
+        for item_id, result in accepted.items() for gap in result.get("gaps", [])
+    ]
 
 
 def _build_graph_result(
@@ -174,7 +179,7 @@ def _build_graph_result(
         _item_cited_documents(
             root, results, "evidence_graph", "pathology_node_research"
         ),
-        _item_gaps(root, results, "evidence_graph", "pathology_node_research"),
+        _item_gaps(root, results, "evidence_graph", "pathology_node_research", bind_items=True),
     )
 
 

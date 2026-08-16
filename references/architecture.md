@@ -45,7 +45,10 @@ The graph becomes candidate input only after its immutable `snapshot_id` is writ
 
 The chain is sufficient without a paper directly joining the drug to the disease.
 
-Graph edges originate only from retained source edges or accepted researched assertions. Curation's
+Graph edges originate only from retained source edges or accepted researched assertions. A
+source-reported DisMech relationship without an edge-local citation retains the DisMech record as
+its provenance and is labelled `source_record`; it never inherits endpoint-node citations.
+Curation's
 `related_concept_ids` remain a separate administrative `context_nodes` projection so a seed worker
 can consider them while constructing rescue routes without mistaking curation proximity for sourced
 biological support.
@@ -55,6 +58,9 @@ not mutate the graph or nominate drugs. The synthesis worker tags every question
 with its mechanistically relevant frozen nodes; matching material is routed into each seed packet.
 Their literature does not enter the audit corpus
 unless a downstream candidate stage independently retrieves and cites the relevant evidence.
+Profile gaps and uncertainty are indexed separately from biological edges and returned only with
+the bound node context. They constrain interpretation without automatically suppressing an
+exploratory candidate route.
 
 ## Ownership
 

@@ -767,9 +767,8 @@ def _normalize_dismech_sections(
                         f"DisMech edge target could not be resolved uniquely: {label} -> {target}"
                     )
                     continue
-                source_ids = _evidence_documents(documents, edge) or list(
-                    nodes[node_id]["source_ids"]
-                )
+                edge_source_ids = _evidence_documents(documents, edge)
+                source_ids = edge_source_ids or [file_document_id]
                 edges.append(
                     {
                         "edge_id": _stable_id(
@@ -786,6 +785,7 @@ def _normalize_dismech_sections(
                         "object_id": targets[0],
                         "evidence_summary": str(edge.get("description") or relation),
                         "source_ids": source_ids,
+                        "evidence_scope": "edge_citation" if edge_source_ids else "source_record",
                         "confidence": str(edge.get("causal_link_type") or "curated"),
                     }
                 )

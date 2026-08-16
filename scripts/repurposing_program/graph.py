@@ -140,8 +140,10 @@ def _graph_node_context(records: Mapping[str, Any], node_id: str) -> dict[str, A
     return {
         "node": node,
         "profile": profiles[0] if profiles else None,
+        "scope_evidence": ({"uncertainty": profiles[0].get("uncertainty", ""), "contradictions": profiles[0].get("contradictions", []), "gaps": profiles[0].get("gaps", [])} if profiles else None),
         "source_edges": sorted(source_edges, key=lambda row: str(row["edge_id"])),
         "assertions": sorted(assertions, key=lambda row: str(row["assertion_id"])),
+        "gaps": [row for row in records.get("gap_index", []) if str(row["node_id"]) == node_id],
         "related_nodes": [
             {key: node_by_id[value][key] for key in GRAPH_INDEX_FIELDS}
             for value in sorted(related_ids)
@@ -166,13 +168,25 @@ def _assemble_graph_result(
 ) -> dict[str, Any]:
     source = results["pathology_sources"]["records"]
     canonical_nodes, canonical_edges = _canonical_source_records(results)
+    profile_rows = _merge_unique(profiles, "node_id", "profiles")
+    indexed_gaps = {
+        (str(profile["node_id"]), "profile.gaps", " ".join(str(gap).split()))
+        for profile in profile_rows for gap in profile.get("gaps", []) if str(gap).strip()
+    } | {
+        (str(profile["node_id"]), "profile.uncertainty", " ".join(str(profile["uncertainty"]).split()))
+        for profile in profile_rows if str(profile.get("uncertainty", "")).strip()
+    } | {
+        (str(gap["node_id"]), "result.gaps", " ".join(str(gap["statement"]).split()))
+        for gap in gaps if isinstance(gap, Mapping) and str(gap.get("statement", "")).strip()
+    }
     records = {
         "source_nodes": canonical_nodes,
         "source_edges": canonical_edges,
         "source_receipts": _rows(source, "source_receipts"),
         "disease_context": _rows(source, "disease_context"),
-        "profiles": _merge_unique(profiles, "node_id", "profiles"),
+        "profiles": profile_rows,
         "assertions": _merge_assertions(assertions),
+        "gap_index": [{"gap_id": _stable_id("GAP", {"node_id": node_id, "bound_object": bound_object, "statement": statement}), "node_id": node_id, "bound_object": bound_object, "statement": statement} for node_id, bound_object, statement in sorted(indexed_gaps)],
     }
     landscape = results.get("pathology_landscape_scan", {}).get("records")
     landscape_documents = (

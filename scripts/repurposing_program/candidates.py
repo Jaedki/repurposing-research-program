@@ -59,6 +59,14 @@ def _assertion_nodes(
     }
 
 
+def _relation_connects(
+    row: Mapping[str, Any], node_id: str, strategy_nodes: set[str]
+) -> bool:
+    endpoints = {str(row["subject_id"]), str(row["object_id"])}
+    supports = any(context.get("polarity") == "supports" for context in row.get("evidence_context", [{"polarity": "supports"}]))
+    return supports and node_id in endpoints and len(endpoints) == 2 and endpoints <= strategy_nodes
+
+
 def _strategy_signature(row: Mapping[str, Any]) -> tuple[Any, ...]:
     normalize = lambda value: " ".join(str(value).casefold().split())
     return (
@@ -142,6 +150,7 @@ def _validate_seed_item(
     assertions_by_id = {
         str(row["assertion_id"]): row for row in _rows(graph, "assertions")
     }
+    source_edges_by_id = {str(row["edge_id"]): row for row in _rows(graph, "source_edges")}
     connections_by_id = {
         str(row["connection_id"]): row for row in _connection_rows(results)
     }
@@ -186,6 +195,7 @@ def _validate_seed_item(
             f"{label}.assertion_ids",
             allowed=set(assertions_by_id),
         )
+        edge_refs = _id_list(strategy["source_edge_ids"], f"{label}.source_edge_ids", allowed=set(source_edges_by_id))
         connection_refs = _id_list(
             strategy["connection_ids"],
             f"{label}.connection_ids",
@@ -224,6 +234,23 @@ def _validate_seed_item(
             raise ProgramError(
                 f"{label}.source_ids do not support graph nodes: {unsupported}"
             )
+        available_relations = [*assertions_by_id.values(), *source_edges_by_id.values()]
+        selected_relations = [
+            *(assertions_by_id[value] for value in assertion_refs),
+            *(source_edges_by_id[value] for value in edge_refs),
+        ]
+        uncovered_linked = sorted(
+            node_id for node_id in linked_refs
+            if any(_relation_connects(row, node_id, strategy_nodes) for row in available_relations)
+            and not any(_relation_connects(row, node_id, strategy_nodes) for row in selected_relations)
+            and not any(
+                node_id in set(map(str, connections_by_id[value]["node_ids"]))
+                and len(strategy_nodes & set(map(str, connections_by_id[value]["node_ids"]))) > 1
+                for value in connection_refs
+            )
+        )
+        if uncovered_linked:
+            raise ProgramError(f"{label} must select available graph support for linked nodes: {uncovered_linked}")
         if strategy["search_outcome"] not in _STRATEGY_SEARCH_OUTCOMES:
             raise ProgramError(
                 f"{label}.search_outcome must be seeded or no_supported_seed"
@@ -273,6 +300,7 @@ def _validate_seed_item(
             f"{label}.assertion_ids",
             allowed=set(assertions_by_id),
         )
+        edge_refs = _id_list(row["source_edge_ids"], f"{label}.source_edge_ids", allowed=set(source_edges_by_id))
         missing_assertion_nodes = sorted({
             node_id
             for node_id in _assertion_nodes(assertion_refs, assertions_by_id)
@@ -308,6 +336,9 @@ def _validate_seed_item(
                 f"{label}.assertion_ids must include referenced strategy assertions: "
                 f"{missing_strategy_assertions}"
             )
+        strategy_edges = {str(edge_id) for strategy_key in strategy_refs for edge_id in strategy_by_key[strategy_key]["source_edge_ids"]}
+        if missing_strategy_edges := sorted(strategy_edges - edge_refs):
+            raise ProgramError(f"{label}.source_edge_ids must include referenced strategy edges: {missing_strategy_edges}")
         pathology_refs = _references(row, "pathology_source_ids", pathology_source_ids, label)
         unsupported = sorted(
             node_id

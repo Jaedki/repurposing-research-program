@@ -98,6 +98,20 @@ class DisMechNormalizationTest(unittest.TestCase):
         self.assertEqual(documents["PMID:1"]["title"], "First title")
         self.assertEqual(documents["PMID:1"]["snippets"], ["first", "second"])
 
+    def test_source_reported_edge_does_not_inherit_endpoint_citations(self):
+        sanitized = {"pathophysiology": [
+            {"name": "Upstream state", "evidence": [{"reference": "PMID:1"}],
+             "downstream": [{"target": "Downstream state", "description": "may influence"}]},
+            {"name": "Downstream state", "evidence": [{"reference": "PMID:2"}]},
+        ]}
+
+        _, _, edges, _, _ = sources._normalize_dismech_sections(
+            sanitized, "MONDO:1", "DISMECH-FILE-TEST"
+        )
+
+        self.assertEqual(edges[0]["source_ids"], ["DISMECH-FILE-TEST"])
+        self.assertEqual(edges[0]["evidence_scope"], "source_record")
+
     def test_dismech_receipt_hashes_every_cached_source_artifact(self):
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory) / "sources" / "raw"

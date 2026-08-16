@@ -384,39 +384,16 @@ def _packet_context(
                 *candidate.get("identity", {}).get("source_ids", []),
             )
         }
-        graph_nodes = _rows(graph, "source_nodes")
-        disease_anchor_ids = {
-            str(row["node_id"])
-            for row in graph_nodes
-            if row.get("node_type") == "disease_anchor"
-        }
-        graph_source_edges = _rows(graph, "source_edges")
+        source_edges_by_id = {str(row["edge_id"]): row for row in _rows(graph, "source_edges")}
         assertions_by_id = {
             str(row["assertion_id"]): row
             for row in _rows(graph, "assertions")
         }
         selected_graph_evidence = []
         for candidate in candidates:
-            selected_node_ids = set(map(str, candidate["graph_node_ids"]))
-            pathology_source_ids = set(map(str, candidate["pathology_source_ids"]))
-            allowed_edge_endpoints = selected_node_ids | disease_anchor_ids
-            candidate_source_edges = []
-            for edge in graph_source_edges:
-                edge_endpoints = {
-                    str(edge["subject_id"]), str(edge["object_id"])
-                }
-                if (
-                    edge_endpoints <= allowed_edge_endpoints
-                    and selected_node_ids & edge_endpoints
-                    and pathology_source_ids & set(map(str, edge["source_ids"]))
-                ):
-                    candidate_source_edges.append(edge)
             selected_graph_evidence.append({
                 "candidate_id": str(candidate["candidate_id"]),
-                "source_edges": sorted(
-                    candidate_source_edges,
-                    key=lambda row: str(row["edge_id"]),
-                ),
+                "source_edges": [source_edges_by_id[edge_id] for edge_id in candidate.get("source_edge_ids", [])],
                 "assertions": [
                     assertions_by_id[str(assertion_id)]
                     for assertion_id in candidate["assertion_ids"]
@@ -501,7 +478,7 @@ def _row_template(name: str) -> dict[str, Any]:
             template[field] = []
     elif name == "rescue_strategies":
         template.update({
-            "linked_node_ids": [], "connection_ids": [], "assertion_ids": [],
+            "linked_node_ids": [], "connection_ids": [], "assertion_ids": [], "source_edge_ids": [],
             "source_ids": [],
         })
     elif name in ("open_questions", "question_node_tags"):
@@ -526,6 +503,7 @@ def _row_template(name: str) -> dict[str, Any]:
             "strategy_keys": [],
             "graph_node_ids": [],
             "assertion_ids": [],
+            "source_edge_ids": [],
             "pathology_source_ids": [],
             "mechanism_source_ids": [],
         })
@@ -692,7 +670,7 @@ def _build_packet(
             "After route-specific searching, set each search_outcome to seeded only when at least "
             "one candidate copies that exact strategy_key; otherwise use no_supported_seed. Every "
             "candidate copies one or more seeded keys and includes their primary node, linked "
-            "nodes, and assertions in its own graph provenance.",
+            "nodes, assertions, and source edges in its own graph provenance.",
         ]
     elif task == "candidate_evidence_review":
         packet_rules = [

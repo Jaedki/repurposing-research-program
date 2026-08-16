@@ -21,6 +21,7 @@ def _provenance_rows(
                 "strategy_ids": sorted(map(str, candidate["strategy_ids"])),
                 "graph_node_ids": sorted(node_ids),
                 "assertion_ids": sorted(map(str, candidate["assertion_ids"])),
+                "source_edge_ids": sorted(map(str, candidate.get("source_edge_ids", []))),
                 "graph_rationale": candidate["graph_rationale"],
                 "pathology_source_ids": sorted(
                     map(str, candidate["pathology_source_ids"])

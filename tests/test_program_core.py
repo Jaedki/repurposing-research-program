@@ -826,6 +826,7 @@ class WorkflowTest(unittest.TestCase):
                 "mechanistic_basis": "The focal profile establishes increased kinase activity.",
                 "ownership_rationale": "The rescued state is the focal node's control variable.",
                 "assertion_ids": [],
+                "source_edge_ids": [],
                 "source_ids": ["SRC:1"],
                 "search_outcome": strategy_outcome,
                 "search_summary": (
@@ -987,6 +988,7 @@ class WorkflowTest(unittest.TestCase):
             "strategy_ids": ["STRATEGY:1"],
             "graph_node_ids": [],
             "assertion_ids": [],
+            "source_edge_ids": [],
             "pathology_source_ids": [],
             "mechanism_source_ids": ["PMID:12"],
             "identity": {"source_ids": []},
@@ -1503,11 +1505,12 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("template", candidate_contract)
         self.assertIn("identifiers", candidate_contract["required_fields"])
         self.assertIn("assertion_ids", candidate_contract["required_fields"])
+        self.assertIn("source_edge_ids", candidate_contract["required_fields"])
         self.assertIn("strategy_keys", candidate_contract["required_fields"])
         self.assertIn("graph_rationale", candidate_contract["required_fields"])
         self.assertNotIn("identity", candidate_contract["required_fields"])
         for field in (
-            "strategy_keys", "graph_node_ids", "assertion_ids", "pathology_source_ids",
+            "strategy_keys", "graph_node_ids", "assertion_ids", "source_edge_ids", "pathology_source_ids",
             "mechanism_source_ids",
         ):
             self.assertEqual(candidate_contract["template"][field], [])
@@ -1553,6 +1556,7 @@ class WorkflowTest(unittest.TestCase):
             for row in packet["context"]["focal_context"]["assertions"]
         }
         selected_assertion_id = assertions_by_relation["contributes_to"]
+        selected_source_edge_id = packet["context"]["focal_context"]["source_edges"][0]["edge_id"]
         self.assertEqual(
             [row["node_id"] for row in packet["context"]["graph_index"]], ["NODE:1"]
         )
@@ -1590,6 +1594,7 @@ class WorkflowTest(unittest.TestCase):
                 ),
                 "ownership_rationale": "The rescued signalling state belongs to NODE:1.",
                 "assertion_ids": [],
+                "source_edge_ids": [],
                 "source_ids": ["SRC:1"],
                 "search_outcome": "seeded",
                 "search_summary": "The feedback route produced two supported candidate seeds.",
@@ -1602,6 +1607,7 @@ class WorkflowTest(unittest.TestCase):
                     "mechanism_hypothesis": "inhibits the process",
                     "graph_node_ids": ["NODE:1"],
                     "assertion_ids": [selected_assertion_id],
+                    "source_edge_ids": [selected_source_edge_id],
                     "graph_rationale": (
                         "The selected contributes_to assertion establishes the focal disease link."
                     ),
@@ -1615,6 +1621,7 @@ class WorkflowTest(unittest.TestCase):
                     "mechanism_hypothesis": "modulates the process",
                     "graph_node_ids": ["NODE:1"],
                     "assertion_ids": [],
+                    "source_edge_ids": [],
                     "graph_rationale": (
                         "The focal pathology profile alone establishes the disease context."
                     ),
@@ -1633,6 +1640,10 @@ class WorkflowTest(unittest.TestCase):
         invalid_records = json.loads(json.dumps(seed_records))
         invalid_records["candidates"][0]["graph_node_ids"] = ["MONDO:1"]
         with self.assertRaisesRegex(core.ProgramError, "unknown IDs"):
+            self.submit(action, invalid_records)
+        invalid_records = json.loads(json.dumps(seed_records))
+        invalid_records["candidates"][0]["source_edge_ids"] = ["EDGE:UNKNOWN"]
+        with self.assertRaisesRegex(core.ProgramError, "source_edge_ids contains unknown IDs"):
             self.submit(action, invalid_records)
         invalid_records = json.loads(json.dumps(seed_records))
         invalid_records["candidates"][0]["unexpected_field"] = "not in the contract"
@@ -1728,6 +1739,7 @@ class WorkflowTest(unittest.TestCase):
             [selected_assertion_id],
         )
         self.assertEqual(selected_graph_evidence["UNICHEM:2"]["assertions"], [])
+        self.assertEqual(selected_graph_evidence["UNICHEM:2"]["source_edges"], [])
         seeds = json.loads(
             (self.root / "results" / "candidate_seed_generation.json").read_text()
         )
@@ -2295,6 +2307,10 @@ class WorkflowTest(unittest.TestCase):
         nodes, edges = pathology._canonical_source_records(results)
         self.assertEqual([row["node_id"] for row in nodes], ["MONDO:1", "NODE:1"])
         self.assertEqual(nodes[1]["member_node_ids"], ["NODE:1", "NODE:2"])
+        self.assertEqual(nodes[1]["evidence_basis"], [
+            {"member_node_id": "NODE:1", "source_ids": ["SRC:1"]},
+            {"member_node_id": "NODE:2", "source_ids": ["SRC:1"]},
+        ])
         self.assertEqual(len(edges), 1)
         self.assertEqual(edges[0]["subject_id"], "NODE:1")
         self.assertEqual(edges[0]["object_id"], "MONDO:1")
@@ -2411,6 +2427,34 @@ class WorkflowTest(unittest.TestCase):
             {"SRC:NODE", "SRC:SUPPORTS"},
         )
 
+    def test_scope_limits_and_gaps_stay_visible_without_suppressing_seeding(self):
+        results = {
+            "pathology_sources": source_result(),
+            "pathology_curation": {"records": {"concepts": [{
+                "concept_id": "NODE:1", "preferred_label": "Process",
+                "concept_type": "mechanism", "member_node_ids": ["NODE:1"],
+                "aliases": [], "disposition": "research", "reason": "Exploratory route",
+                "related_concept_ids": [], "atomicity": curation_atomicity(),
+            }]}},
+        }
+        profile = self.profile("NODE:1", "mechanism")["profiles"][0]
+        profile.update({"uncertainty": "Supported only in a combined mouse model.",
+                        "gaps": ["The single-gene contribution remains unresolved."]})
+
+        graph = graph_rules._assemble_graph_result(
+            results, [profile], [], self.profile("NODE:1", "mechanism")["documents"],
+            [{"node_id": "NODE:1", "statement": "Human transfer remains untested."}],
+        )
+        context = graph_rules._graph_node_context(graph["records"], "NODE:1")
+
+        self.assertEqual(context["scope_evidence"]["uncertainty"], profile["uncertainty"])
+        self.assertEqual(len(context["gaps"]), 3)
+        self.assertEqual(run_state._item_ids("candidate_seed_generation", results), ["NODE:1"])
+        self.assertEqual(
+            [row["gap_id"] for row in context["gaps"]],
+            [row["gap_id"] for row in graph_rules._graph_node_context(graph["records"], "NODE:1")["gaps"]],
+        )
+
     def test_only_research_concepts_create_work_items(self):
         source = source_result()
         source["records"]["documents"].append(
@@ -2508,6 +2552,7 @@ class WorkflowTest(unittest.TestCase):
                 "mechanistic_basis": "The focal pathology profile supports this direction.",
                 "ownership_rationale": "The rescued kinase state belongs to NODE:1.",
                 "assertion_ids": [],
+                "source_edge_ids": [],
                 "source_ids": ["SRC:1", "SRC:2"],
                 "search_outcome": "seeded",
                 "search_summary": "The route produced a supported candidate seed.",
@@ -2521,6 +2566,7 @@ class WorkflowTest(unittest.TestCase):
                     "strategy_keys": ["strategy-1"],
                     "graph_node_ids": ["NODE:1", "NODE:2"],
                     "assertion_ids": [],
+                    "source_edge_ids": [],
                     "graph_rationale": (
                         "The focal profile and linked context node support the hypothesis."
                     ),
@@ -2565,7 +2611,44 @@ class WorkflowTest(unittest.TestCase):
             candidate_rules._validate_seed_item(seed_records, "NODE:1", results)
         seed_records["rescue_strategies"][0]["source_ids"].append("SRC:2")
         seed_records["candidates"][0]["pathology_source_ids"].append("SRC:2")
+        with self.assertRaisesRegex(core.ProgramError, "select available graph support"):
+            candidate_rules._validate_seed_item(seed_records, "NODE:1", results)
+        creative_results = json.loads(json.dumps(results))
+        creative_results["evidence_graph"]["records"]["assertions"] = []
+        candidate_rules._validate_seed_item(seed_records, "NODE:1", creative_results)
+        counterevidence_results = json.loads(json.dumps(results))
+        counterevidence_results["evidence_graph"]["records"]["assertions"][0][
+            "evidence_context"
+        ][0]["polarity"] = "contradicts"
+        candidate_rules._validate_seed_item(
+            seed_records, "NODE:1", counterevidence_results
+        )
+        connection_results = json.loads(json.dumps(results))
+        connection_results["pathology_hypothesis_synthesis"] = {"records": {
+            "hypothesis_connections": [{
+                "connection_id": "CONNECTION:LINK",
+                "node_ids": ["NODE:1", "NODE:2"],
+            }]
+        }}
+        connection_seed = json.loads(json.dumps(seed_records))
+        connection_seed["rescue_strategies"][0]["connection_ids"] = [
+            "CONNECTION:LINK"
+        ]
+        candidate_rules._validate_seed_item(
+            connection_seed, "NODE:1", connection_results
+        )
+        seed_records["rescue_strategies"][0]["assertion_ids"] = [
+            selected_assertion["assertion_id"]
+        ]
+        seed_records["candidates"][0]["assertion_ids"] = [
+            selected_assertion["assertion_id"]
+        ]
         candidate_rules._validate_seed_item(seed_records, "NODE:1", results)
+
+        missing_edge_propagation = json.loads(json.dumps(seed_records))
+        missing_edge_propagation["rescue_strategies"][0]["source_edge_ids"] = [edges[0]["edge_id"]]
+        with self.assertRaisesRegex(core.ProgramError, "include referenced strategy edges"):
+            candidate_rules._validate_seed_item(missing_edge_propagation, "NODE:1", results)
 
         perturbation_shortcut = json.loads(json.dumps(seed_records))
         perturbation_shortcut["documents"] = [
@@ -2598,6 +2681,7 @@ class WorkflowTest(unittest.TestCase):
             "mechanistic_basis": "The focal profile supports an independent compensatory route.",
             "ownership_rationale": "The preserved function belongs to the focal NODE:1 state.",
             "assertion_ids": [],
+            "source_edge_ids": [],
             "source_ids": ["SRC:1"],
             "search_outcome": "seeded",
             "search_summary": "The compensatory route produced a supported candidate seed.",
@@ -2610,6 +2694,7 @@ class WorkflowTest(unittest.TestCase):
             "identifiers": {"chembl": "CHEMBL2"},
             "strategy_keys": ["strategy-2"],
             "graph_node_ids": ["NODE:1"],
+            "assertion_ids": [],
             "pathology_source_ids": ["SRC:1"],
         })
         multiple["candidates"].append(second_candidate)
@@ -3153,8 +3238,10 @@ class WorkflowTest(unittest.TestCase):
             )
         ]
         seeds[0]["assertion_ids"] = ["ASSERTION:A"]
+        seeds[0]["source_edge_ids"] = ["EDGE:A"]
         seeds[0]["graph_rationale"] = "Assertion A supports the first origin concept."
         seeds[1]["assertion_ids"] = ["ASSERTION:B"]
+        seeds[1]["source_edge_ids"] = ["EDGE:B"]
         seeds[1]["graph_rationale"] = "Assertion B supports the second origin concept."
         prior = {
             "candidate_seed_generation": {
@@ -3187,6 +3274,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(candidates[0]["candidate_id"], "UNICHEM:121892")
         self.assertEqual(candidates[0]["member_seed_ids"], ["SEED-A", "SEED-B"])
         self.assertEqual(candidates[0]["assertion_ids"], ["ASSERTION:A", "ASSERTION:B"])
+        self.assertEqual(candidates[0]["source_edge_ids"], ["EDGE:A", "EDGE:B"])
         self.assertIn("first origin concept", candidates[0]["graph_rationale"])
         self.assertIn("second origin concept", candidates[0]["graph_rationale"])
         records["identity_groups"][0]["member_seed_ids"] = ["SEED-A"]
@@ -3887,6 +3975,7 @@ class WorkflowTest(unittest.TestCase):
             "strategy_ids": [f"STRATEGY:{concept_id}"],
             "graph_node_ids": [node_id],
             "assertion_ids": [],
+            "source_edge_ids": [],
             "graph_rationale": f"The focal profile for {node_id} is sufficient.",
             "pathology_source_ids": [f"PATH:{node_id}"],
             "mechanism_source_ids": [f"MOA:{node_id}"],
@@ -3906,6 +3995,7 @@ class WorkflowTest(unittest.TestCase):
             "strategy_ids": [f"STRATEGY:{concept_id}"],
             "graph_node_ids": [concept_id],
             "assertion_ids": [],
+            "source_edge_ids": [],
             "graph_rationale": f"The focal profile for {concept_id} is sufficient.",
             "pathology_source_ids": [f"PATH:{concept_id}"],
             "mechanism_source_ids": [f"MOA:{concept_id}"],

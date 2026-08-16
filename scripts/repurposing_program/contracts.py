@@ -274,9 +274,10 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "justify a distinct candidate-discovery route; causal nesting alone does not make the "
             "component context-only. For every research concept, report one focal abnormal state, "
             "causal level, biological direction, compartment, and atomicity rationale. "
+            "Treat member_node_ids as the compact evidence basis; permit a provisional or transferred interpretation when its reason names the model, compartment, or causal assumption instead of pretending it is direct. "
             "Set atomicity to null for context_only and exclude concepts; do not invent state metadata for claims that do not support a research route. "
             "Keep separately supplied states separate when independently variable, at different causal levels or compartments, or materially differently evidenced. "
-            "A lone bundled source node without supported separate proposals is context_only plus a gap; do not fabricate subclaims. "
+            "A lone bundled source node may remain one broad exploratory research concept when it names a usable abnormal process; do not fabricate or separately seed unsupported subclaims. "
             "Shared genes, ontology IDs, pathways, anatomy, or "
             "causal relationships do not establish equivalence; represent overlap or causality with "
             "the supplied source edges or later researched assertions, not by merging concepts. Keep bare entities, disease "
@@ -295,7 +296,7 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "from administrative metadata alone. After resolving identity, assign disposition "
             "independently. Researchability may not be deferred to deep research. A distinct "
             "concept is research only when the supplied packet already establishes a specific "
-            "abnormal biological state or process, a specific well-supported causal lesion that "
+            "abnormal biological state or process, a specific evidenced or explicitly provisional causal lesion that "
             "defines its own pathology route and biological direction, or a major "
             "phenotype defining a distinct intervention objective. Every research reason must name its abnormal state and distinct intervention variable; generic eligibility wording is invalid. A bare gene or gene-disease "
             "association, risk factor, model genotype, broad pathway, terminal outcome, or mutation "
@@ -316,8 +317,7 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "context_only and attach them to relevant research concepts; uncertainty never "
             "upgrades a claim to research. Exclude only malformed or "
             "irrelevant records, generic ontology noise, and self-referential disease concepts. "
-            "When uncertain, keep concepts separate for identity but do not upgrade uncertain "
-            "research eligibility. Do not introduce or discuss drugs or treatments."
+            "When uncertain, keep concepts separate and use research only when a usable intervention variable and its assumption are explicit. Do not introduce or discuss drugs or treatments."
         ),
         "collections": ["concepts"],
     },
@@ -327,6 +327,7 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "Research this one curated pathology concept in exceptional disease-specific "
             "depth. Explain its normal state, pathological change, causal role, mechanisms, "
             "biological context, uncertainty, contradictions, and gaps. Preserve the supplied "
+            "scope but record model, genotype, compartment, and causal limits explicitly in uncertainty, contradictions, or gaps; these limits inform later hypotheses rather than deleting the concept. "
             "curation identity and atomicity boundary; do not split, merge, redefine, or formulate "
             "a rescue objective for the concept during pathology research. Label synthesis as "
             "inference and cite the directional evidence it follows from. "
@@ -404,8 +405,8 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
         "task": (
             "For this frozen researched pathology concept and its linked context, first read the "
             "complete focal pathology JSON, its distinct mechanisms, and the supplied graph "
-            "context; before searching for any drug, formulate one or more source-grounded "
-            "rescue_strategies. Do not seek a quota: retain only materially distinct biological "
+            "context and focal_context.scope_evidence; before searching for any drug, formulate one or more source-grounded rescue_strategies. Indirect or provisional biology may still motivate an exploratory candidate when the transfer and falsifiable assumption are explicit. "
+            "Do not seek a quota: retain only materially distinct biological "
             "objectives or causal or compensatory routes. Each strategy lives in this focal "
             "primary node and may name linked graph nodes only when they materially support its "
             "route. Compare the proposed rescuable state with every linked node profile through "
@@ -416,10 +417,11 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "Then search each retained strategy separately for established drug actions and "
             "generate a focused set of diverse existing-drug seeds. Record no_supported_seed "
             "rather than padding a strategy that yields no supported candidate. "
-            "List only graph assertion IDs actually used and explain the selected graph support "
+            "List only graph assertion and source-edge IDs actually used and explain the selected graph support "
             "once in graph_rationale without repeating the drug mechanism hypothesis. An empty "
-            "assertion_ids list is valid when the focal profile alone supports the hypothesis, "
+            "assertion_ids and source_edge_ids lists are valid when the focal profile alone supports the hypothesis, "
             "but graph_rationale must say so. Include only materially used graph nodes. "
+            "When a direct graph relation exists for a linked node, select the relation actually used or a retained connection spanning the strategy nodes; absence of a direct relation does not block a profile-grounded exploratory route. "
             "Before searching, review the focal profile and every immediate source edge, researched "
             "assertion, neighbouring node, and administrative context node supplied in focal_context. "
             "A context-node association may prompt a rescue-pathway check but is not biological "
@@ -462,8 +464,7 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "Treat the supplied frozen pathology profiles, candidate-linked rescue strategies, and "
             "candidate-specific selected_graph_evidence "
             "as authoritative disease context. Its assertions are exactly those selected by assertion_id; "
-            "its source edges are limited to selected-node edges supported by the candidate's cited "
-            "pathology sources. For each candidate, use its strategy_ids to select only matching rows "
+            "its source edges are exactly those selected by source_edge_id. For each candidate, use its strategy_ids to select only matching rows "
             "from context.rescue_strategies; do not combine it with another candidate's strategy. Do "
             "not infer graph support from evidence outside that projection. For "
             "every candidate, first retrieve primary or authoritative sources that verify identity, "
@@ -782,7 +783,7 @@ ROW_SCHEMAS = {
         "required_fields": [
             "strategy_key", "primary_node_id", "linked_node_ids", "connection_ids", "pathological_state",
             "rescuable_state", "desired_direction", "mechanistic_basis",
-            "ownership_rationale", "assertion_ids", "source_ids", "search_outcome",
+            "ownership_rationale", "assertion_ids", "source_edge_ids", "source_ids", "search_outcome",
             "search_summary",
         ],
         "additional_fields": False,
@@ -849,7 +850,7 @@ ROW_SCHEMAS = {
         "required_fields": [
             "candidate_id", "name", "identifiers", "mechanism_hypothesis",
             "strategy_keys",
-            "graph_node_ids", "assertion_ids", "graph_rationale", "pathology_source_ids",
+            "graph_node_ids", "assertion_ids", "source_edge_ids", "graph_rationale", "pathology_source_ids",
             "mechanism_source_ids",
         ],
         "additional_fields": False,
@@ -1008,10 +1009,10 @@ FIELD_RULES = {
         "the observed change rather than saying only abnormal or dysregulated; compartment gives "
         "the supported subcellular, cell-type, tissue, anatomical, or systemic context",
         "atomicity_rationale explains why it is one intervention variable and distinguishes linked "
-        "causes, consequences, assays, biomarkers, and outcomes; unsupported specificity makes the "
-        "concept context_only rather than supplying a placeholder",
+        "causes, consequences, assays, biomarkers, and outcomes; provisional specificity states its "
+        "model or transfer assumption rather than masquerading as direct evidence",
         "the concepts partition and member_node_ids are the sole split/merge record; a bundled lone "
-        "source node is context_only plus a gap, not fabricated subclaims; do not return proposed_splits, "
+        "source node may remain one broad exploratory route but cannot create fabricated subclaims; do not return proposed_splits, "
         "merge_targets, or parallel identity metadata",
         "concept_type is driver, mechanism, phenotype, or context",
         "disposition is research, context_only, or exclude; every decision has a concise reason",
@@ -1030,6 +1031,7 @@ FIELD_RULES = {
         "each context_only concept links to at least one research concept through "
         "related_concept_ids; other dispositions use an empty list",
         "aliases and member_node_ids are JSON lists; uncertain equivalence remains separate",
+        "member_node_ids are the compact evidence basis; provisional model or compartment transfer is allowed when the reason states the assumption",
     ],
     "pathology_node_research": [
         "return exactly one profile whose node_id and node_type match the supplied curated concept",
@@ -1049,6 +1051,7 @@ FIELD_RULES = {
         "each evidence_context cites retained sources and records evidence_type as human, animal, "
         "cell, biochemical, or inferred; model; stage; polarity as supports or contradicts; and "
         "one context-specific summary; no treatment content",
+        "record scope limits in uncertainty, contradictions, or gaps; they remain visible downstream and do not automatically suppress exploratory seeding",
     ],
     "pathology_open_questions": [
         "return between one and ten materially distinct open questions; do not fill a quota",
@@ -1107,7 +1110,7 @@ FIELD_RULES = {
         "strategy_key values are unique within this packet; primary_node_id exactly copies the "
         "focal node; linked_node_ids contains only materially used non-primary graph nodes and may "
         "be empty; connection_ids contains only materially used retained global connections and may "
-        "be empty; assertion_ids contains only graph assertions actually used by that strategy",
+        "be empty; assertion_ids and source_edge_ids contain only graph relations actually used by that strategy; source_record edges are exploratory leads rather than primary corroboration",
         "ownership_rationale explains why the rescued state lives in the primary node after "
         "comparison with every linked node; do not repeat the same state and route under a linked "
         "node in reverse, while genuinely different rescue objectives, directions, or causal "
@@ -1131,10 +1134,10 @@ FIELD_RULES = {
         "graph_node_ids includes the supplied researched concept and may include other indexed "
         "non-anchor concepts materially used by the hypothesis; pathology_source_ids support "
         "those concepts",
-        "assertion_ids lists only graph assertions materially used; it may be empty when the focal "
+        "assertion_ids and source_edge_ids list only graph relations materially used; they may be empty when the focal "
         "profile is sufficient, and graph_rationale explains the selected graph support once "
         "without repeating mechanism_hypothesis",
-        "each candidate graph selection includes the primary and linked nodes and assertion_ids of "
+        "each candidate graph selection includes the primary and linked nodes, assertion_ids, and source_edge_ids of "
         "every strategy_key it references",
         "before searching, review every immediate source edge, researched assertion, neighbouring "
         "node, and administrative context node in focal_context; a context-node association may "
@@ -1166,8 +1169,7 @@ FIELD_RULES = {
         "for each candidate, match candidate.strategy_ids exactly to context.rescue_strategies."
         "strategy_id and do not use strategies linked only to another candidate",
         "use only the candidate-specific selected_graph_evidence supplied for graph support: assertions "
-        "match selected assertion_ids exactly and source edges are bounded by selected nodes and cited "
-        "pathology sources",
+        "match selected assertion_ids exactly and source edges match selected source_edge_ids exactly",
         "each review cites at least one document retained in this result through supporting_findings, "
         "why_not, prior_art findings, or aliases",
         "hypothesis and mechanistic_bridge are concise non-empty text; mechanistic_bridge is an "
