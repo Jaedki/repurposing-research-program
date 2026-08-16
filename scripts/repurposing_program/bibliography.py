@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 
 from .contracts import _PUBLICATION_ID
 from .errors import ProgramError
-from .evidence import _equivalent_document_titles, _rows, _year
+from .evidence import _equivalent_document_titles, _merge_documents, _rows, _year
 from .storage import _canonical_bytes, _read_json, _sha256, _write_json
 
 
@@ -243,13 +243,14 @@ def _canonicalize_documents(
     root: Path,
     documents: Iterable[dict[str, Any]],
     *,
-    verify_titles: bool,
+    verify_titles: bool, preserve_titles: bool = False,
 ) -> list[dict[str, Any]]:
     rows = [dict(row) for row in documents]
     metadata = _resolve_bibliographic_metadata(root, rows)
     output: list[dict[str, Any]] = []
     for row in rows:
         document_id = str(row["document_id"])
+        submitted_title = row.get("title")
         canonical = metadata.get(document_id)
         if canonical is None:
             output.append(row)
@@ -264,8 +265,12 @@ def _canonicalize_documents(
                 )
             row["submitted_title"] = row.get("title")
         row.update({key: value for key, value in canonical.items() if value not in (None, "", [])})
+        if preserve_titles: row["title"] = submitted_title
         output.append(row)
     return output
+
+def _canonicalize_document_corpus(root: Path, documents: Iterable[dict[str, Any]], *, verify_titles: bool) -> list[dict[str, Any]]:
+    return _merge_documents(_canonicalize_documents(root, documents, verify_titles=verify_titles), canonical_publications=True)
 
 
 def _validate_bibliographic_documents(root: Path, records: Mapping[str, Any]) -> None:

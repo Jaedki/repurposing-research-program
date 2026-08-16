@@ -551,6 +551,32 @@ class InstructionContractTest(unittest.TestCase):
 
 
 class SourceAdjudicationWorkflowTest(unittest.TestCase):
+    def test_bibliography_enrichment_cannot_replace_the_screened_pathology_title(self):
+        result = source_result()
+        result["records"]["documents"][0].update(
+            {"document_id": "PMID:11", "title": "Neutral pathology evidence"}
+        )
+        for collection in ("source_nodes", "source_edges", "disease_context"):
+            for row in result["records"][collection]:
+                row["source_ids"] = ["PMID:11"]
+        metadata = {"PMID:11": {
+            "title": "Drug X treatment restores function", "canonical_publication_id": "PMID:11",
+            "identifier_aliases": ["PMID:11"], "metadata_source": "PubMed",
+        }}
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            orchestration, "screen_pathology_sources", side_effect=source_screening_result
+        ), patch.object(
+            orchestration, "fetch_pathology_sources", return_value=result
+        ), patch.object(
+            bibliography, "_resolve_bibliographic_metadata", return_value=metadata
+        ):
+            root = Path(directory)
+            core.initialize(root, "Disease", mondo="MONDO:1")
+            core.next_action(root)
+            accepted = json.loads(storage._result_path(root, "pathology_sources").read_text())
+        self.assertEqual(accepted["records"]["documents"][0]["title"], "Neutral pathology evidence")
+        self.assertNotIn("Drug X treatment", json.dumps(accepted))
+
     def test_source_validation_still_rejects_treatment_fields_in_pathology_content(self):
         result = source_result()
         pathology._validate_source_result(result)
@@ -657,7 +683,8 @@ class SourceAdjudicationWorkflowTest(unittest.TestCase):
                     "asta_call_receipts": completed_asta_receipts(),
                     "coverage_checks": [
                         {"gap": gap, "status": "searched_unresolved",
-                         "reason": "The completed search found no additional mechanism."}
+                         "reason": "The completed search found no additional mechanism.",
+                         "operation_ids": ["ASTA-OP-SEARCH-2"], "source_ids": []}
                         for gap in json.loads(Path(action["packet_path"]).read_text())
                         ["context"]["coverage_checklist"]
                     ],
@@ -688,7 +715,9 @@ class SourceAdjudicationWorkflowTest(unittest.TestCase):
                         "search_path": "/workspaces/workspace-1/deep-searches/test",
                         "outcome": "completed",
                         "ranked_result_count": 1,
+                        "ranked_result_ids": ["PMID:999"],
                         "pdf_count": 0,
+                        "paper_dispositions": {},
                     }],
                 },
                 "gaps": [],
@@ -765,7 +794,8 @@ class WorkflowTest(unittest.TestCase):
             )
             records.setdefault("coverage_checks", [
                 {"gap": gap, "status": "searched_unresolved",
-                 "reason": "The completed searches resolved or bounded this coverage area."}
+                 "reason": "The completed searches resolved or bounded this coverage area.",
+                 "operation_ids": ["ASTA-OP-SEARCH-2"], "source_ids": []}
                 for gap in packet["context"]["coverage_checklist"]
             ])
         if action["next_task"] == "pathology_coverage_expansion":
@@ -775,7 +805,13 @@ class WorkflowTest(unittest.TestCase):
                 "search_path": "/workspaces/workspace-1/deep-searches/test",
                 "outcome": "completed",
                 "ranked_result_count": max(1, len(records.get("documents", []))),
+                "ranked_result_ids": [
+                    row["document_id"] for row in records.get("documents", [])
+                ] or ["PMID:999"],
                 "pdf_count": len(records.get("documents", [])),
+                "paper_dispositions": {
+                    row["document_id"]: "retained" for row in records.get("documents", [])
+                },
             }])
         if action["next_task"] == "candidate_seed_research":
             strategy_outcome = "seeded" if records.get("candidates") else "no_supported_seed"
@@ -931,12 +967,17 @@ class WorkflowTest(unittest.TestCase):
             }]}},
         }
 
-        context = packets._packet_context(
-            self.root, "pathology_node_research", "NODE:1", results
-        )
+        metadata = bibliographic_metadata(self.root, [document])
+        metadata["PMID:11"]["title"] = "Drug X treatment restores function"
+        with patch.object(bibliography, "_resolve_bibliographic_metadata", return_value=metadata):
+            context = packets._packet_context(
+                self.root, "pathology_node_research", "NODE:1", results
+            )
 
         self.assertEqual(context["source_index"][0]["canonical_publication_id"], "PMID:11")
         self.assertEqual(context["source_index"][0]["year"], 2026)
+        self.assertEqual(context["source_index"][0]["title"], "Pathology")
+        self.assertNotIn("Drug X treatment", json.dumps(context))
         self.assertNotIn("canonical_publication_id", document)
 
     def test_candidate_review_source_index_has_canonical_publication_metadata(self):
@@ -2526,6 +2567,25 @@ class WorkflowTest(unittest.TestCase):
         seed_records["candidates"][0]["pathology_source_ids"].append("SRC:2")
         candidate_rules._validate_seed_item(seed_records, "NODE:1", results)
 
+        perturbation_shortcut = json.loads(json.dumps(seed_records))
+        perturbation_shortcut["documents"] = [
+            {"document_id": "PMID:1", "title": "Upstream perturbation", "source": "test"}
+        ]
+        perturbation_shortcut["candidates"][0]["mechanism_source_ids"] = ["PMID:1"]
+        with self.assertRaisesRegex(core.ProgramError, "retained drug-MOA source"):
+            candidate_rules._validate_seed_item(perturbation_shortcut, "NODE:1", results)
+
+        perturbation_alias = json.loads(json.dumps(perturbation_shortcut))
+        pathology_document = next(
+            row for row in results["evidence_graph"]["records"]["documents"]
+            if row["document_id"] == "PMID:1"
+        )
+        pathology_document["identifier_aliases"] = ["PMID:1", "DOI:10.1000/perturbation"]
+        perturbation_alias["documents"][0]["document_id"] = "DOI:10.1000/perturbation"
+        perturbation_alias["candidates"][0]["mechanism_source_ids"] = ["DOI:10.1000/perturbation"]
+        with self.assertRaisesRegex(core.ProgramError, "retained drug-MOA source"):
+            candidate_rules._validate_seed_item(perturbation_alias, "NODE:1", results)
+
         multiple = json.loads(json.dumps(seed_records))
         second_strategy = {
             "strategy_key": "strategy-2",
@@ -2643,10 +2703,25 @@ class WorkflowTest(unittest.TestCase):
 
         records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
         records["profiles"][0]["established_pathology_observations"] = [
-            {"observation": "unsupported", "source_ids": ["PMID:999"]}
+            {"observation": "unsupported", "evidence_role": "natural_pathology", "source_ids": ["PMID:999"]}
         ]
         with self.assertRaisesRegex(core.ProgramError, "unknown IDs"):
             self.submit(action, records)
+
+        records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
+        records["profiles"][0]["established_pathology_observations"] = [{
+            "observation": "A perturbation clarified causal biology.",
+            "evidence_role": "candidate_evidence", "source_ids": ["PMID:1"],
+        }]
+        with self.assertRaisesRegex(core.ProgramError, "evidence_role is invalid"):
+            self.submit(action, records)
+
+        records["profiles"][0]["established_pathology_observations"][0]["evidence_role"] = (
+            "experimental_perturbation"
+        )
+        pathology._validate_pathology_item(
+            records, action["next_item_id"], run_state._load_results(self.root)
+        )
 
         records = self.profile(action["next_item_id"], packet["context"]["node"]["node_type"])
         records["assertions"] = [self.assertion(action["next_item_id"], "MONDO:1")]
@@ -2832,6 +2907,7 @@ class WorkflowTest(unittest.TestCase):
                 "source_ids": ["UPSTREAM:1"],
                 "established_pathology_observations": [{
                     "observation": "Observed directional change",
+                    "evidence_role": "experimental_perturbation",
                     "source_ids": ["PMID:10"],
                 }],
             }],

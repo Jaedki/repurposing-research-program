@@ -258,7 +258,8 @@ class LandscapeWorkflowTest(unittest.TestCase):
         packet = json.loads(Path(self.action["packet_path"]).read_text(encoding="utf-8"))
         records.setdefault("coverage_checks", [
             {"gap": gap, "status": "searched_unresolved",
-             "reason": "The completed searches explicitly bounded this coverage area."}
+             "reason": "The completed searches explicitly bounded this coverage area.",
+             "operation_ids": ["ASTA-OP-SEARCH-2"], "source_ids": []}
             for gap in packet["context"]["coverage_checklist"]
         ])
         records.setdefault(
@@ -300,7 +301,9 @@ class LandscapeWorkflowTest(unittest.TestCase):
                         "search_path": "/workspaces/workspace-1/deep-searches/test",
                         "outcome": "completed",
                         "ranked_result_count": 1,
+                        "ranked_result_ids": ["PMID:999"],
                         "pdf_count": 0,
+                        "paper_dispositions": {},
                     }],
                 },
                 "gaps": [],
@@ -336,7 +339,13 @@ class LandscapeWorkflowTest(unittest.TestCase):
             "search_path": "/workspaces/workspace-1/deep-searches/test",
             "outcome": "completed",
             "ranked_result_count": max(1, len(records.get("documents", []))),
+            "ranked_result_ids": [
+                row["document_id"] for row in records.get("documents", [])
+            ] or ["PMID:999"],
             "pdf_count": len(records.get("documents", [])),
+            "paper_dispositions": {
+                row["document_id"]: "retained" for row in records.get("documents", [])
+            },
         }])
         result = {
             "stage": "pathology_coverage_expansion",
@@ -483,6 +492,25 @@ class LandscapeWorkflowTest(unittest.TestCase):
         self.assertIn(node["node_id"], supplied)
         self.assertEqual(supplied[node["node_id"]]["source_ids"], ["PMID:201"])
 
+    def test_retained_undermind_document_requires_a_read_disposition(self):
+        action = self.coverage_action()
+        records = {
+            "documents": [document("PMID:201", "Missing pathology")],
+            "coverage_proposals": [proposal(
+                "Missing pathology", "A disease-linked process is increased.", "PMID:201"
+            )],
+            "undermind_search_receipts": [{
+                "workspace_id": "workspace-1",
+                "search_name": json.loads(Path(action["packet_path"]).read_text())["context"]["undermind_search_name"],
+                "search_path": "/workspaces/workspace-1/deep-searches/test",
+                "outcome": "completed", "ranked_result_count": 1, "pdf_count": 1,
+                "ranked_result_ids": ["PMID:201"],
+                "paper_dispositions": {},
+            }],
+        }
+        with self.assertRaisesRegex(core.ProgramError, "retained paper disposition"):
+            self.submit_coverage(action, records)
+
     def test_excluded_undermind_document_does_not_enter_frozen_graph(self):
         action = self.coverage_action()
         self.submit_coverage(action, {
@@ -577,7 +605,9 @@ class LandscapeWorkflowTest(unittest.TestCase):
                 "search_path": "/workspaces/workspace-1/deep-searches/empty",
                 "outcome": "completed",
                 "ranked_result_count": 0,
+                "ranked_result_ids": [],
                 "pdf_count": 0,
+                "paper_dispositions": {},
             }],
         }
         with self.assertRaisesRegex(core.ProgramError, "at least one ranked result"):
@@ -600,7 +630,9 @@ class LandscapeWorkflowTest(unittest.TestCase):
                 "search_path": "/workspaces/workspace-1/deep-searches/unrelated",
                 "outcome": "completed",
                 "ranked_result_count": 1,
+                "ranked_result_ids": ["PMID:999"],
                 "pdf_count": 0,
+                "paper_dispositions": {},
             }],
         }
         with self.assertRaisesRegex(core.ProgramError, "completed supplied logical search"):
@@ -875,13 +907,44 @@ class LandscapeWorkflowTest(unittest.TestCase):
                 "asta_call_receipts": completed_asta_receipts(1)[:2],
             })
 
-    def test_original_validator_accepts_one_completed_empty_search(self):
-        status = self.submit({
-            "documents": [],
-            "landscape_proposals": [],
-            "asta_call_receipts": completed_asta_receipts(0)[:1],
-        })
-        self.assertEqual(status["next_task"], "pathology_curation")
+    def test_unresolved_coverage_requires_a_focused_search(self):
+        with self.assertRaisesRegex(core.ProgramError, "focused search"):
+            self.submit({
+                "documents": [],
+                "landscape_proposals": [],
+                "asta_call_receipts": completed_asta_receipts(0)[:1],
+                "coverage_checks": [{
+                    "gap": gap, "status": "searched_unresolved", "reason": "Broad only.",
+                    "operation_ids": ["ASTA-OP-SEARCH-1"], "source_ids": [],
+                } for gap in json.loads(Path(self.action["packet_path"]).read_text())["context"]["coverage_checklist"]],
+            })
+
+    def test_resolved_coverage_requires_a_retained_proposal_source(self):
+        packet = json.loads(Path(self.action["packet_path"]).read_text())
+        with self.assertRaisesRegex(core.ProgramError, "source_ids must be a non-empty list"):
+            self.submit({
+                "documents": [document("PMID:101", "Specific mechanism")],
+                "landscape_proposals": [proposal(
+                    "Specific mechanism", "A disease-linked process is increased.", "PMID:101"
+                )],
+                "asta_call_receipts": completed_asta_receipts(1),
+                "coverage_checks": [{
+                    "gap": gap, "status": "resolved", "reason": "Claimed resolved.",
+                    "operation_ids": ["ASTA-OP-SEARCH-2"], "source_ids": [],
+                } for gap in packet["context"]["coverage_checklist"]],
+            })
+
+    def test_undermind_ranked_identifiers_must_reconcile_the_count(self):
+        action = self.coverage_action()
+        packet = json.loads(Path(action["packet_path"]).read_text())
+        records = {"documents": [], "coverage_proposals": [], "undermind_search_receipts": [{
+            "workspace_id": "workspace-1", "search_name": packet["context"]["undermind_search_name"],
+            "search_path": "/workspaces/workspace-1/deep-searches/test", "outcome": "completed",
+            "ranked_result_count": 2, "ranked_result_ids": ["PMID:999"], "pdf_count": 0,
+            "paper_dispositions": {},
+        }]}
+        with self.assertRaisesRegex(core.ProgramError, "ranked-result identifiers"):
+            self.submit_coverage(action, records)
 
     def test_coverage_drives_more_than_four_searches_and_requires_terminal_checks(self):
         receipts = [
@@ -1594,7 +1657,8 @@ class SparseSourceWorkflowTest(unittest.TestCase):
                     "asta_call_receipts": completed_asta_receipts(1),
                     "coverage_checks": [
                         {"gap": gap, "status": "resolved",
-                         "reason": "The completed search covered this pathology area."}
+                         "reason": "The completed search covered this pathology area.",
+                         "operation_ids": ["ASTA-OP-SEARCH-2"], "source_ids": ["PMID:101"]}
                         for gap in packet["context"]["coverage_checklist"]
                     ],
                 },
@@ -1622,7 +1686,9 @@ class SparseSourceWorkflowTest(unittest.TestCase):
                         "search_path": "/workspaces/workspace-1/deep-searches/test",
                         "outcome": "completed",
                         "ranked_result_count": 1,
+                        "ranked_result_ids": ["PMID:999"],
                         "pdf_count": 0,
+                        "paper_dispositions": {},
                     }],
                 },
                 "gaps": [],

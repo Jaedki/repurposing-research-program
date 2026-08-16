@@ -54,7 +54,9 @@ the projected proposals on equal terms with Monarch and DisMech claims and decid
 truly distinct. Only documents attached to proposals surviving curation can enter the frozen graph.
 Receipt validation rejects early no-response claims, missing retries, citation abandonment without
 snippet evaluation, blocking request/authentication defects, and a scan with no completed relevance
-search. The coverage register must classify every gap as resolved, searched-unresolved, or merged.
+search. The coverage register must classify every gap as resolved, searched-unresolved, or merged,
+link tested gaps to completed search operations, cite retained proposal sources for resolutions,
+and use a focused search for unresolved gaps.
 
 Configure `ASTA_AI2_API_KEY` in the MCP host. The controller never reads it, constructs Asta
 requests, writes authentication headers, or caches raw MCP exchanges.
@@ -72,7 +74,8 @@ canonical underlying papers cited by an actual proposal are returned, with inspe
 passages; search and account data remain transient.
 
 `coverage_proposals` use the same scientific shape as Asta proposals. One non-secret completion
-receipt records workspace, search name and path, ranked-result count, and PDF count. Python validates their
+receipt records workspace, search name and path, ranked-result IDs and count, PDF count, and a compact
+disposition for every paper actually read. Python validates their
 evidence and assigns `UNDERMIND-NODE-<hash>` IDs; the final curator treats them on the same terms as
 all other source nodes and alone decides concept identity. The packet remains active until its
 search receipt records a completed outcome.
@@ -125,7 +128,7 @@ normalized as focal nodes, context, or evidence.
 
 ## Publication identity
 
-PMID, PMCID, and DOI references from source adapters and research workers use the same small controller-owned validation path. Responses from the NCBI identifier converter, PubMed or PubMed Central summary service, and DOI resolver are cached immutably under `<run>/sources/raw/bibliography/`. The controller uses them only to validate and project bibliographic identity; it does not infer scientific support from metadata. A submitted publication title that materially disagrees with the identifier stops acceptance; formatting and minor wording variants share one generic near-match check. Known aliases are retained under one canonical publication identity in downstream source projections, while the originally cited document ID remains stable for provenance.
+PMID, PMCID, and DOI references from source adapters and research workers use the same small controller-owned validation path. Responses from the NCBI identifier converter, PubMed or PubMed Central summary service, and DOI resolver are cached immutably under `<run>/sources/raw/bibliography/`. The controller uses them only to validate and project bibliographic identity; it does not infer scientific support from metadata. A submitted publication title that materially disagrees with the identifier stops acceptance; formatting and minor wording variants share one generic near-match check. Known aliases are retained under one canonical publication identity in downstream source projections, while the originally cited document ID remains stable for provenance. Treatment-blind pathology projections retain their already screened submitted title when canonical metadata is added; canonical titles are restored only after the pathology barriers.
 
 ## UniChem candidate identity
 

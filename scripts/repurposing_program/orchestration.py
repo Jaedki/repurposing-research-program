@@ -342,6 +342,7 @@ def _advance_controller(
             root,
             _rows(result["records"], "documents"),
             verify_titles=False,
+            preserve_titles=True,
         )
         _validate_source_result(result)
     elif stage == "evidence_graph":

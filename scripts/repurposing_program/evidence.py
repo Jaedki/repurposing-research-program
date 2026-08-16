@@ -194,7 +194,7 @@ def _source_index(
     return [
         {key: row[key] for key in fields if key in row}
         for row in documents
-        if source_ids is None or str(row["document_id"]) in source_ids
+        if source_ids is None or source_ids & {str(row["document_id"]), *map(str, row.get("identifier_aliases", []))}
     ]
 
 
@@ -212,20 +212,23 @@ def _merge_unique(
     return [merged[key] for key in sorted(merged)]
 
 
-def _merge_documents(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+def _merge_documents(rows: Iterable[dict[str, Any]], *, canonical_publications: bool = False) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
     identity_fields = {"title", "year", "canonical_publication_id"}
     for row in rows:
         document_id = str(row.get("document_id", "")).strip()
         if not document_id:
             raise ProgramError("documents.document_id is required")
-        current = merged.setdefault(document_id, {"document_id": document_id})
+        key = str(row.get("canonical_publication_id") or document_id) if canonical_publications else document_id
+        current = merged.setdefault(key, {"document_id": key})
+        if canonical_publications:
+            row = {**row, "identifier_aliases": sorted({document_id, *row.get("identifier_aliases", [])})}
         for field, value in row.items():
             if field == "document_id" or value in (None, "", []):
                 continue
             conflict = field in identity_fields and field in current and current[field] != value
             if field == "title" and conflict:
-                conflict = not _equivalent_document_titles(
+                conflict = not canonical_publications and not _equivalent_document_titles(
                     document_id, current[field], value
                 )
             if field == "year" and conflict:
@@ -304,5 +307,5 @@ def _all_documents(results: Mapping[str, Mapping[str, Any]]) -> list[dict[str, A
             }
             if isinstance(result.get("records"), Mapping)
             for row in _cited_documents(result["records"])
-        )
+        ), canonical_publications=True
     )

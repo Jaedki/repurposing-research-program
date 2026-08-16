@@ -334,8 +334,8 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             f"{PATHOLOGY_ASSERTION_ENDPOINT_RULE} Express each "
             "researched graph assertion as a biological triple with one or "
             "more evidence_context entries that preserve evidence type, model, stage, polarity, "
-            "summary, and citations; Python assigns the final assertion ID. Retain only "
-            "established pathology observations; an empty list is valid. Keep discovery "
+            "summary, and citations; Python assigns the final assertion ID. Retain only established "
+            "pathology observations and label natural versus experimental-perturbation evidence; an empty list is valid. Keep discovery "
             "pathology-led: do not search for candidates, therapies, repurposing, or disease-drug "
             "associations. When an intervention appears in a source, retain only directly supported "
             "causal biology and pathology; do not use its therapeutic interpretation, efficacy, "
@@ -436,7 +436,9 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "Search from the supplied target or process to established drug action; do not use "
             "disease-specific drug literature or queries combining the disease with drug, "
             "treatment, therapy, trial, or repurposing terms. Cite pathology and mode-of-action "
-            "evidence separately."
+            "evidence separately. A causal experimental perturbation is not a candidate merely "
+            "because it appears upstream; retain it only after independent rescue derivation and "
+            "with drug-action evidence absent from the frozen pathology corpus."
         ),
         "collections": ["documents", "rescue_strategies", "candidates", "exclusions"],
     },
@@ -601,14 +603,14 @@ ROW_SCHEMAS = {
         },
     },
     "coverage_checks": {
-        "required_fields": ["gap", "status", "reason"],
+        "required_fields": ["gap", "status", "reason", "operation_ids", "source_ids"],
         "additional_fields": False,
         "field_contracts": {"status": {"allowed_values": sorted(ASTA_COVERAGE_STATUSES)}},
     },
     "undermind_search_receipts": {
         "required_fields": [
             "workspace_id", "search_name", "search_path", "outcome",
-            "ranked_result_count", "pdf_count",
+            "ranked_result_count", "ranked_result_ids", "pdf_count", "paper_dispositions",
         ],
         "additional_fields": False,
         "field_contracts": {"outcome": {"allowed_values": ["completed"]}},
@@ -957,8 +959,8 @@ FIELD_RULES = {
         "a positive completed relevance search includes get_citations and snippet_search operations; "
         "documents or proposals require a completed snippet_search with a positive result_count",
         "at least one relevance search completes; every terminal call failure has a non-empty gap",
-        "coverage_checks includes every context.coverage_checklist area exactly once, may add "
-        "distinct discovered gaps, and marks each resolved, searched_unresolved, or merged with a reason",
+        "coverage_checks includes every context.coverage_checklist area exactly once, links each tested gap to completed search operation_ids, cites proposal source_ids when resolved, "
+        "and uses a focused search for searched_unresolved",
         "provisional_type is driver, mechanism, phenotype, biomarker, or context",
         "each proposal is a specific disease-linked abnormal biological claim that is missing from "
         "or more specific than the supplied index",
@@ -979,8 +981,8 @@ FIELD_RULES = {
         "materially more specific than the supplied post-Asta index",
         "each proposal contains one pathological state or process at one causal level and cites a "
         "returned canonical document whose full text was inspected through read_pdfs",
-        "every returned document is cited by at least one proposal; zero proposals are valid only "
-        "with the completed, non-empty supplied logical-search receipt",
+        "ranked_result_ids exactly reconcile ranked_result_count; every returned document is cited "
+        "by a proposal and has a retained paper_disposition; every read paper is dispositioned",
         "retain only directly supported pathology and no therapeutic interpretation; Undermind "
         "proposals are decomposition candidates and cannot create IDs or curate concepts",
     ],
@@ -1040,7 +1042,7 @@ FIELD_RULES = {
         "limitations and source_ids are lists, indexed_node_id is required only for indexed_node, "
         "and every entry cites direct evidence",
         PATHOLOGY_ASSERTION_ENDPOINT_RULE,
-        "established_pathology_observations is a list of observation and source_ids objects; "
+        "established_pathology_observations records observation, natural_pathology or experimental_perturbation evidence_role, and source_ids; "
         "use an empty list rather than inventing an assay, threshold, or biomarker",
         "assertions contain subject_id, relation, object_id, and evidence_context only; Python "
         "assigns assertion_id from the biological triple",

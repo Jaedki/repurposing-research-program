@@ -189,6 +189,25 @@ class DatabaseDocumentTitleTests(unittest.TestCase):
                 ]
             )
 
+    def test_downstream_corpus_collapses_publication_aliases_and_unions_passages(self):
+        results = {
+            "stage_a": {"records": {"documents": [{
+                "document_id": "PMID:123", "canonical_publication_id": "DOI:10.1000/example",
+                "identifier_aliases": ["PMID:123", "DOI:10.1000/example"], "title": "Paper",
+                "evidence_passages": [{"text": "First", "locator": "p1"}],
+            }], "claims": [{"source_ids": ["PMID:123"]}]}},
+            "stage_b": {"records": {"documents": [{
+                "document_id": "DOI:10.1000/example", "canonical_publication_id": "DOI:10.1000/example",
+                "identifier_aliases": ["PMID:123", "DOI:10.1000/example"], "title": "Paper",
+                "evidence_passages": [{"text": "Second", "locator": "p2"}],
+            }], "claims": [{"source_ids": ["DOI:10.1000/example"]}]}},
+        }
+
+        documents = evidence._all_documents(results)
+
+        self.assertEqual([row["document_id"] for row in documents], ["DOI:10.1000/example"])
+        self.assertEqual(len(documents[0]["evidence_passages"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

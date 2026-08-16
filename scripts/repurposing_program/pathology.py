@@ -622,6 +622,8 @@ def _validate_landscape_scan(
     if not checks:
         raise ProgramError("pathology_landscape_scan requires a completed coverage register")
     seen: set[str] = set()
+    search_ids = list(dict.fromkeys(str(row["operation_id"]) for row in _contract_rows(records, "asta_call_receipts") if row["tool"] == "search_papers_by_relevance" and row["outcome"] == "completed"))
+    proposal_source_ids = {str(source_id) for row in proposals for source_id in row["source_ids"]}
     for index, check in enumerate(checks):
         label = f"coverage_checks[{index}]"
         gap = str(check["gap"]).strip()
@@ -629,6 +631,14 @@ def _validate_landscape_scan(
             raise ProgramError(f"{label}.gap and reason must be non-empty")
         if check["status"] not in ASTA_COVERAGE_STATUSES:
             raise ProgramError(f"{label}.status must be one of {sorted(ASTA_COVERAGE_STATUSES)}")
+        operation_ids = check["operation_ids"]
+        if not isinstance(operation_ids, list) or any(not isinstance(value, str) for value in operation_ids) or len(operation_ids) != len(set(operation_ids)) or set(operation_ids) - set(search_ids):
+            raise ProgramError(f"{label}.operation_ids must be unique completed relevance-search IDs")
+        if check["status"] != "merged" and not operation_ids:
+            raise ProgramError(f"{label} must identify the search that resolved or tested the gap")
+        if check["status"] in {"resolved", "searched_unresolved"} and not (set(map(str, operation_ids)) - {search_ids[0]}): raise ProgramError(f"{label}.{check['status']} requires a focused search")
+        if check["status"] == "resolved": _references(check, "source_ids", proposal_source_ids, label)
+        elif check["source_ids"] != []: raise ProgramError(f"{label}.source_ids is only valid for resolved coverage")
         normalized = " ".join(gap.split()).casefold()
         if normalized in seen:
             raise ProgramError("coverage_checks contains duplicate gaps")
@@ -653,17 +663,27 @@ def _validate_coverage_expansion(
     for field in ("workspace_id", "search_path"):
         if not isinstance(receipt[field], str) or not receipt[field].strip():
             raise ProgramError(f"undermind_search_receipts[0].{field} must be non-empty")
-    for field in ("ranked_result_count", "pdf_count"):
-        value = receipt[field]
-        if type(value) is not int or value < 0:
-            raise ProgramError(f"undermind_search_receipts[0].{field} must be non-negative")
+    if any(type(receipt[field]) is not int or receipt[field] < 0 for field in ("ranked_result_count", "pdf_count")):
+        raise ProgramError("Undermind ranked-result and PDF counts must be non-negative integers")
     if receipt["ranked_result_count"] == 0:
         raise ProgramError(
             "Undermind completion receipt must report at least one ranked result; "
             "an empty search keeps pathology_coverage_expansion active"
         )
+    ranked_ids = receipt["ranked_result_ids"]
+    if not isinstance(ranked_ids, list) or len(ranked_ids) != len(set(map(str, ranked_ids))) or len(ranked_ids) != receipt["ranked_result_count"] or receipt["pdf_count"] > len(ranked_ids): raise ProgramError("Undermind ranked-result identifiers or PDF count are inconsistent")
     if documents and receipt["pdf_count"] < len(documents):
         raise ProgramError("Undermind receipt pdf_count cannot omit retained full-text documents")
+    dispositions = receipt["paper_dispositions"]
+    allowed = {"retained", "counterclaim", "limitation", "identity", "duplicate", "no_material_evidence"}
+    if not isinstance(dispositions, dict) or any(not str(key).strip() or not isinstance(value, str) or value not in allowed for key, value in dispositions.items()):
+        raise ProgramError("undermind_search_receipts[0].paper_dispositions is invalid")
+    if len(dispositions) > receipt["pdf_count"]:
+        raise ProgramError("Undermind read-paper dispositions cannot exceed available PDFs")
+    if set(dispositions) - set(map(str, ranked_ids)): raise ProgramError("Undermind read papers must come from the ranked result")
+    if any(dispositions.get(str(row["document_id"])) != "retained" for row in documents):
+        raise ProgramError("Every retained Undermind document needs a retained paper disposition")
+    if len(dispositions) != receipt["pdf_count"]: raise ProgramError("Undermind paper_dispositions must account for every read PDF")
 
 
 def _validate_curation(
@@ -868,8 +888,9 @@ def _validate_pathology_item(
         )
     for index, observation in enumerate(observations):
         label = f"profiles[0].established_pathology_observations[{index}]"
-        if set(observation) != {"observation", "source_ids"}:
-            raise ProgramError(f"{label} must contain only observation and source_ids")
+        if set(observation) != {"observation", "source_ids", "evidence_role"}:
+            raise ProgramError(f"{label} must contain only observation, evidence_role, and source_ids")
+        if observation["evidence_role"] not in {"natural_pathology", "experimental_perturbation"}: raise ProgramError(f"{label}.evidence_role is invalid")
         _required(observation, ("observation",), label)
         _references(observation, "source_ids", source_ids, label)
     for index, row in enumerate(assertions):

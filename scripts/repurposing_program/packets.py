@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 
-from .bibliography import _canonicalize_documents
+from .bibliography import _canonicalize_document_corpus, _canonicalize_documents
 from .candidates import _review_batches
 from .contracts import (
     ASTA_CITATION_LIMIT,
@@ -253,7 +253,7 @@ def _packet_context(
             "disease_context": disease_context,
             "source_index": _source_index(
                 _canonicalize_documents(
-                    run_root, documents, verify_titles=False
+                    run_root, documents, verify_titles=False, preserve_titles=True
                 ),
                 _cited_ids(
                     [node, *member_nodes, *related_nodes, *edges, *disease_context]
@@ -433,13 +433,14 @@ def _packet_context(
             ],
             "selected_graph_evidence": selected_graph_evidence,
             "source_index": _source_index(
-                _canonicalize_documents(run_root, documents, verify_titles=False),
+                _canonicalize_document_corpus(run_root, documents, verify_titles=False),
                 review_source_ids,
             ),
         }
-    documents = _canonicalize_documents(
+    documents = _canonicalize_document_corpus(
         run_root, _all_documents(results), verify_titles=False
     )
+    canonical_ids = {alias: str(row["document_id"]) for row in documents for alias in row.get("identifier_aliases", [])}
     reviews = _rows(results["candidate_review"]["records"], "reviews")
     aliases = {
         str(review["candidate_id"]): [str(row["name"]) for row in review["aliases"]]
@@ -463,7 +464,7 @@ def _packet_context(
         terms = {str(candidate["name"]), *aliases.get(str(candidate["candidate_id"]), [])}
         patterns = [re.compile(rf"(?<!\w){re.escape(term)}(?!\w)", re.I)
                     for term in terms if len(term.strip()) >= 3]
-        source_ids = list(review_sources.get(str(candidate["candidate_id"]), set()))
+        source_ids = [canonical_ids.get(value, value) for value in review_sources.get(str(candidate["candidate_id"]), set())]
         for document in documents:
             text = " ".join([str(document.get("title", "")), *(
                 str(row.get("text", "")) for row in document.get("evidence_passages", [])
@@ -626,7 +627,8 @@ def _build_packet(
             "For minimal search and citation retries request only title, year, and url with the "
             "smallest useful limit; for snippet retries use a concise query and limit 1.",
             "Run one stable broad disease-mechanism relevance search, then focused searches for "
-            "each gap that remains unsearched; there is no fixed focused-search or proposal count.",
+            "each gap that remains unsearched; link coverage_checks to completed search operation_ids; "
+            "there is no fixed focused-search or proposal count.",
             f"For relevance searches request fields=title,year,url,tldr and limit={ASTA_RELEVANCE_SEARCH_LIMIT}; retain a pending queue of every relevant original needed to test the coverage register.",
             "Finish citation and snippet calls for one queued original at a time, preserve the "
             "remaining queue across search cycles, and stop only after every coverage check is resolved, searched_unresolved, or merged.",
@@ -667,6 +669,7 @@ def _build_packet(
             "Return only canonical underlying papers cited by an actual proposal, each with an "
             "inspectable passage and locator verified from read_pdfs. Deep-search summaries and "
             "abstract rankings are discovery leads, not retained evidence.",
+            "List every ranked paper in ranked_result_ids and account in paper_dispositions for every paper read, including material negative and non-retained results.",
             "If a tool reports rate_limited, wait and retry. Operational failure cannot be submitted as completed coverage; keep this packet active for recovery.",
             "Do not persist goals, queries, raw responses, reports, account data, or credentials; return only the non-secret completion receipt requested by result_contract.",
             "Return JSON only.",
@@ -749,7 +752,7 @@ def _build_packet(
         ]
     if task == "pathology_landscape_scan":
         result_template["records"]["coverage_checks"] = [
-            {"gap": gap, "status": None, "reason": ""}
+            {"gap": gap, "status": None, "reason": "", "operation_ids": [], "source_ids": []}
             for gap in context["coverage_checklist"]
         ]
     unsigned = {

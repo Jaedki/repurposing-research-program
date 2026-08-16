@@ -146,6 +146,7 @@ def _validate_seed_item(
         str(row["connection_id"]): row for row in _connection_rows(results)
     }
     pathology_source_ids = _ids(_rows(graph, "documents"), "document_id", "documents")
+    pathology_source_aliases = {value for row in _rows(graph, "documents") for value in {str(row["document_id"]), *map(str, row.get("identifier_aliases", []))}}
     returned_seed_source_ids = {str(row["document_id"]) for row in documents}
     strategy_source_ids = {*pathology_source_ids, *returned_seed_source_ids}
     if not strategies:
@@ -235,11 +236,7 @@ def _validate_seed_item(
         seen_signatures.add(signature)
         strategy_by_key[str(strategy["strategy_key"])] = strategy
 
-    new_mechanism_source_ids = returned_seed_source_ids
-    mechanism_source_ids = {
-        *pathology_source_ids,
-        *new_mechanism_source_ids,
-    }
+    new_mechanism_source_ids = returned_seed_source_ids - pathology_source_aliases
     for index, row in enumerate(candidates):
         label = f"candidates[{index}]"
         _candidate_queries(row)
@@ -321,7 +318,7 @@ def _validate_seed_item(
             raise ProgramError(
                 f"{label}.pathology_source_ids do not support graph nodes: {unsupported}"
             )
-        mechanism_refs = _references(row, "mechanism_source_ids", mechanism_source_ids, label)
+        mechanism_refs = _references(row, "mechanism_source_ids", pathology_source_ids | returned_seed_source_ids, label)
         if not mechanism_refs & new_mechanism_source_ids:
             raise ProgramError(f"{label}.mechanism_source_ids needs a retained drug-MOA source")
 
@@ -359,7 +356,7 @@ def _validate_review_item(
         raise ProgramError("candidate review must cover exactly the supplied batch candidates")
     retained_ids = {str(row["document_id"]) for row in documents}
     source_ids = {
-        *(str(row["document_id"]) for row in _all_documents(results)),
+        *(value for row in _all_documents(results) for value in {str(row["document_id"]), *map(str, row.get("identifier_aliases", []))}),
         *retained_ids,
     }
     for index, row in enumerate(reviews):

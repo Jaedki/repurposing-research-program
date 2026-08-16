@@ -160,7 +160,7 @@ def _validate_candidate_audit(
             "assessments and excluded_candidates must partition every reviewed candidate exactly once"
         )
     corpus = source_index if source_index is not None else _all_documents(results)
-    documents = {str(row["document_id"]): row for row in corpus}
+    documents = {value: row for row in corpus for value in {str(row["document_id"]), *map(str, row.get("identifier_aliases", []))}}
     source_ids = set(documents)
     dispositions = _contract_rows(records, "evidence_dispositions")
     expected_pairs = {

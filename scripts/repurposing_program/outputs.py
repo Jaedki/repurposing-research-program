@@ -7,7 +7,7 @@ import io
 from pathlib import Path
 from typing import Any, Mapping
 
-from .bibliography import _canonicalize_documents
+from .bibliography import _canonicalize_document_corpus
 from .candidate_exports import _excluded_candidate_rows, _provenance_rows
 from .contracts import EXPERIMENTAL_USE_POLICY, MAX_SCORE, SCORE_COMPONENTS, STAGES
 from .errors import ProgramError
@@ -50,7 +50,7 @@ def _write_output_files(
         _csv_bytes(excluded_rows, exclusion_fields),
     )
     documents = sorted(
-        _canonicalize_documents(run_root, _all_documents(results), verify_titles=False),
+        _canonicalize_document_corpus(run_root, _all_documents(results), verify_titles=False),
         key=lambda row: row["document_id"],
     )
     _write_jsonl(outputs / "citations.jsonl", documents)
