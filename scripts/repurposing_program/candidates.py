@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping
 
-from .contracts import PRIOR_ART_STATUSES, _COMPARATORS
+from .contracts import PRIOR_ART_STATUSES, SEED_EXCLUSION_REASONS, _COMPARATORS
 from .errors import ProgramError
 from .evidence import _all_documents, _cited_ids, _find, _rows
 from .graph import _graph_support_ids
@@ -141,7 +142,8 @@ def _validate_seed_item(
             )
     strategies = _contract_rows(records, "rescue_strategies", "strategy_key")
     candidates = _contract_rows(records, "candidates", "candidate_id")
-    _contract_rows(records, "exclusions")
+    exclusions = _contract_rows(records, "exclusions")
+    dispositions = {str(row["context_id"]): row for row in _contract_rows(records, "context_dispositions", "context_id")}
     graph = results["evidence_graph"]["records"]
     concept = _find(_research_concepts(results), "concept_id", item_id)
     concept_id = str(concept["concept_id"])
@@ -154,15 +156,18 @@ def _validate_seed_item(
     connections_by_id = {
         str(row["connection_id"]): row for row in _connection_rows(results)
     }
+    routed_question_ids = {str(row["question_id"]) for row in _rows(results["pathology_hypothesis_synthesis"]["records"], "question_node_tags") if item_id in set(map(str, row["node_ids"]))}
+    routed_connection_ids = {key for key, row in connections_by_id.items() if item_id in set(map(str, row["node_ids"]))}
+    routed_context_ids = routed_question_ids | routed_connection_ids
     pathology_source_ids = _ids(_rows(graph, "documents"), "document_id", "documents")
     pathology_source_aliases = {value for row in _rows(graph, "documents") for value in {str(row["document_id"]), *map(str, row.get("identifier_aliases", []))}}
     returned_seed_source_ids = {str(row["document_id"]) for row in documents}
-    strategy_source_ids = {*pathology_source_ids, *returned_seed_source_ids}
     if not strategies:
         raise ProgramError("candidate seed research requires at least one rescue_strategy")
 
     strategy_by_key: dict[str, dict[str, Any]] = {}
     seen_signatures: set[tuple[Any, ...]] = set()
+    used_context_ids: set[str] = set()
     for index, strategy in enumerate(strategies):
         label = f"rescue_strategies[{index}]"
         _required(
@@ -183,6 +188,13 @@ def _validate_seed_item(
                 raise ProgramError(f"{label}.{field} must be non-empty text")
         if str(strategy["primary_node_id"]) != concept_id:
             raise ProgramError(f"{label}.primary_node_id must equal the focal item concept")
+        search_basis = _validate_exact_object(strategy["search_basis"], {"target_process", "desired_direction", "pharmacological_action"}, f"{label}.search_basis")
+        if any(not isinstance(value, str) or not value.strip() for value in search_basis.values()) or search_basis["desired_direction"] != strategy["desired_direction"]:
+            raise ProgramError(f"{label}.search_basis must state a target/process, matching desired direction, and pharmacological action")
+        disease = results["pathology_source_screening"]["resolved_disease"]
+        basis_text = " ".join(search_basis.values())
+        if any(value and re.search(rf"(?<!\w){re.escape(str(value))}(?!\w)", basis_text, re.I) for value in (disease.get("name"), disease.get("mondo_id"))) or re.search(r"\b(?:treatments?|therap(?:y|ies)|trials?|repurpos\w*)\b", basis_text, re.I):
+            raise ProgramError(f"{label}.search_basis must remain disease- and treatment-blind")
         linked_refs = _id_list(
             strategy["linked_node_ids"],
             f"{label}.linked_node_ids",
@@ -196,11 +208,13 @@ def _validate_seed_item(
             allowed=set(assertions_by_id),
         )
         edge_refs = _id_list(strategy["source_edge_ids"], f"{label}.source_edge_ids", allowed=set(source_edges_by_id))
+        question_refs = _id_list(strategy["question_ids"], f"{label}.question_ids", allowed=routed_question_ids)
         connection_refs = _id_list(
             strategy["connection_ids"],
             f"{label}.connection_ids",
-            allowed=set(connections_by_id),
+            allowed=routed_connection_ids,
         )
+        used_context_ids.update(question_refs | connection_refs)
         strategy_nodes = {concept_id, *linked_refs}
         missing_assertion_nodes = sorted(
             node_id for node_id in _assertion_nodes(assertion_refs, assertions_by_id)
@@ -221,9 +235,7 @@ def _validate_seed_item(
                 f"{label}.connection_ids must overlap the strategy's primary or linked nodes: "
                 f"{unrelated_connections}"
             )
-        strategy_sources = _references(
-            strategy, "source_ids", strategy_source_ids, label
-        )
+        strategy_sources = _references(strategy, "source_ids", pathology_source_ids, label)
         if len(strategy_sources) != len(strategy["source_ids"]):
             raise ProgramError(f"{label}.source_ids must be unique")
         unsupported = sorted(
@@ -262,6 +274,20 @@ def _validate_seed_item(
             )
         seen_signatures.add(signature)
         strategy_by_key[str(strategy["strategy_key"])] = strategy
+
+    if set(dispositions) != routed_context_ids:
+        raise ProgramError("context_dispositions must account for every routed question and connection exactly once")
+    for context_id, row in dispositions.items():
+        if row["disposition"] not in {"used", "reviewed_not_used", "not_relevant", "still_unresolved"} or (row["disposition"] == "used") != (context_id in used_context_ids) or not isinstance(row["reason"], str) or not row["reason"].strip():
+            raise ProgramError(f"context_dispositions[{context_id}] must give a valid use disposition and reason")
+
+    for index, row in enumerate(exclusions):
+        label = f"exclusions[{index}]"; _candidate_queries(row)
+        _required(row, ("name", "finding", "concern"), label)
+        if any(not isinstance(row[field], str) or not row[field].strip() for field in ("name", "finding", "concern")) or row["reason_code"] not in SEED_EXCLUSION_REASONS:
+            raise ProgramError(f"{label} must state an allowed seed-stage reason, finding, and concern")
+        _id_list(row["strategy_keys"], f"{label}.strategy_keys", allowed=set(strategy_by_key), allow_empty=False)
+        _id_list(row["source_ids"], f"{label}.source_ids", allowed=pathology_source_ids | returned_seed_source_ids, allow_empty=False)
 
     new_mechanism_source_ids = returned_seed_source_ids - pathology_source_aliases
     for index, row in enumerate(candidates):
@@ -349,7 +375,7 @@ def _validate_seed_item(
             raise ProgramError(
                 f"{label}.pathology_source_ids do not support graph nodes: {unsupported}"
             )
-        mechanism_refs = _references(row, "mechanism_source_ids", pathology_source_ids | returned_seed_source_ids, label)
+        mechanism_refs = _references(row, "mechanism_source_ids", returned_seed_source_ids, label)
         if not mechanism_refs & new_mechanism_source_ids:
             raise ProgramError(f"{label}.mechanism_source_ids needs a retained drug-MOA source")
 

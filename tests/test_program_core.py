@@ -838,8 +838,14 @@ class WorkflowTest(unittest.TestCase):
             default_strategy_key = records["rescue_strategies"][0].get(
                 "strategy_key", "strategy-1"
             )
+            for strategy in records["rescue_strategies"]:
+                strategy.setdefault("question_ids", [])
+                strategy.setdefault("search_basis", {"target_process": "kinase signalling", "desired_direction": strategy["desired_direction"], "pharmacological_action": "modulate kinase activity"})
             for candidate in records.get("candidates", []):
                 candidate.setdefault("strategy_keys", [default_strategy_key])
+            used_context = {str(value) for strategy in records["rescue_strategies"] for field in ("question_ids", "connection_ids") for value in strategy[field]}
+            routed_context = [*(str(row["question_id"]) for row in packet["context"]["routed_question_answers"]), *(str(row["connection_id"]) for row in packet["context"]["routed_connections"])]
+            records.setdefault("context_dispositions", [{"context_id": value, "disposition": "used" if value in used_context else "reviewed_not_used", "reason": "Used by a retained strategy." if value in used_context else "Reviewed but did not materially change this route."} for value in routed_context])
         if add_evidence_passages:
             for document in records.get("documents", []):
                 document.setdefault("evidence_passages", [{
@@ -1479,7 +1485,9 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(strategy_contract["template"]["primary_node_id"], "NODE:1")
         self.assertIn("strategy_key", strategy_contract["required_fields"])
         self.assertIn("linked_node_ids", strategy_contract["required_fields"])
+        self.assertIn("question_ids", strategy_contract["required_fields"])
         self.assertIn("connection_ids", strategy_contract["required_fields"])
+        self.assertIn("search_basis", strategy_contract["required_fields"])
         self.assertIn("desired_direction", strategy_contract["required_fields"])
         self.assertEqual(
             strategy_contract["field_contracts"]["search_outcome"]["allowed_values"],
@@ -1494,6 +1502,9 @@ class WorkflowTest(unittest.TestCase):
         ]
         self.assertEqual(len(template_strategy), 1)
         self.assertEqual(template_strategy[0]["primary_node_id"], "NODE:1")
+        self.assertEqual(template_strategy[0]["question_ids"], [])
+        self.assertEqual(set(template_strategy[0]["search_basis"]), {"target_process", "desired_direction", "pharmacological_action"})
+        self.assertEqual(packet["result_contract"]["records"]["context_dispositions"]["field_contracts"]["disposition"]["allowed_values"], ["used", "reviewed_not_used", "not_relevant", "still_unresolved"])
         self.assertEqual(
             document_contract["template"]["evidence_passages"],
             [{"text": None, "locator": None}],
@@ -1629,7 +1640,15 @@ class WorkflowTest(unittest.TestCase):
                     "mechanism_source_ids": ["PMID:2"],
                 },
             ],
-            "exclusions": [],
+            "exclusions": [{
+                "name": "Unsupported agent",
+                "identifiers": {},
+                "strategy_keys": ["strategy-1"],
+                "reason_code": "no_established_action",
+                "finding": "The retained action source did not establish the required activity.",
+                "source_ids": ["PMID:2"],
+                "concern": "No established action supports this seed.",
+            }],
         }
         invalid_records = json.loads(json.dumps(seed_records))
         invalid_records["rescue_strategies"][0]["connection_ids"] = [
@@ -1755,6 +1774,9 @@ class WorkflowTest(unittest.TestCase):
             seeds["records"]["candidates"][0]["strategy_ids"],
             [linked_strategy_id],
         )
+        self.assertEqual({row["disposition"] for row in seeds["records"]["context_dispositions"]}, {"used", "reviewed_not_used"})
+        self.assertIn("used=1, reviewed_not_used=1", seeds["notes"][0])
+        self.assertEqual(seeds["records"]["exclusions"][0]["strategy_ids"], [linked_strategy_id])
         self.submit(
             action,
             {
@@ -2005,6 +2027,8 @@ class WorkflowTest(unittest.TestCase):
             exclusions,
         )
         self.assertFalse((self.root / "outputs" / "candidate_exclusions.jsonl").exists())
+        self.assertTrue((self.root / "outputs" / "seed_exclusions.jsonl").exists())
+        self.assertIn("Unsupported agent", (self.root / "outputs" / "seed_exclusions.jsonl").read_text())
         self.assertEqual(core.status(self.root)["state"], "complete")
         self.assertEqual(core.build_outputs(self.root), manifest)
 
@@ -2495,8 +2519,10 @@ class WorkflowTest(unittest.TestCase):
             )
         ]
         results = {
+            "pathology_source_screening": source_screening_result(),
             "pathology_sources": source,
             "pathology_curation": {"records": {"concepts": concepts}},
+            "pathology_hypothesis_synthesis": {"records": {"question_node_tags": [], "hypothesis_connections": []}},
         }
         pathology._validate_curation(results["pathology_curation"]["records"], results)
         self.assertEqual(run_state._item_ids("evidence_graph", results), ["NODE:1"])
@@ -2545,7 +2571,9 @@ class WorkflowTest(unittest.TestCase):
                 "strategy_key": "strategy-1",
                 "primary_node_id": "NODE:1",
                 "linked_node_ids": ["NODE:2"],
+                "question_ids": [],
                 "connection_ids": [],
+                "search_basis": {"target_process": "kinase signalling", "desired_direction": "decrease excessive kinase activity", "pharmacological_action": "inhibit kinase activity"},
                 "pathological_state": "increased kinase signalling",
                 "rescuable_state": "kinase signalling within its physiological range",
                 "desired_direction": "decrease excessive kinase activity",
@@ -2574,6 +2602,7 @@ class WorkflowTest(unittest.TestCase):
                     "mechanism_source_ids": ["PMID:2"],
                 }
             ],
+            "context_dispositions": [],
             "exclusions": [],
         }
         missing_strategy = json.loads(json.dumps(seed_records))
@@ -2625,6 +2654,7 @@ class WorkflowTest(unittest.TestCase):
         )
         connection_results = json.loads(json.dumps(results))
         connection_results["pathology_hypothesis_synthesis"] = {"records": {
+            "question_node_tags": [],
             "hypothesis_connections": [{
                 "connection_id": "CONNECTION:LINK",
                 "node_ids": ["NODE:1", "NODE:2"],
@@ -2634,9 +2664,18 @@ class WorkflowTest(unittest.TestCase):
         connection_seed["rescue_strategies"][0]["connection_ids"] = [
             "CONNECTION:LINK"
         ]
+        connection_seed["context_dispositions"] = [{"context_id": "CONNECTION:LINK", "disposition": "used", "reason": "Used by the linked strategy."}]
         candidate_rules._validate_seed_item(
             connection_seed, "NODE:1", connection_results
         )
+        unaccounted_context = json.loads(json.dumps(connection_seed))
+        unaccounted_context["context_dispositions"] = []
+        with self.assertRaisesRegex(core.ProgramError, "account for every routed"):
+            candidate_rules._validate_seed_item(unaccounted_context, "NODE:1", connection_results)
+        false_use = json.loads(json.dumps(connection_seed))
+        false_use["context_dispositions"][0]["disposition"] = "reviewed_not_used"
+        with self.assertRaisesRegex(core.ProgramError, "valid use disposition"):
+            candidate_rules._validate_seed_item(false_use, "NODE:1", connection_results)
         seed_records["rescue_strategies"][0]["assertion_ids"] = [
             selected_assertion["assertion_id"]
         ]
@@ -2644,6 +2683,25 @@ class WorkflowTest(unittest.TestCase):
             selected_assertion["assertion_id"]
         ]
         candidate_rules._validate_seed_item(seed_records, "NODE:1", results)
+
+        post_search_strategy = json.loads(json.dumps(seed_records))
+        post_search_strategy["rescue_strategies"][0]["source_ids"].append("PMID:2")
+        with self.assertRaisesRegex(core.ProgramError, "source_ids contains unknown IDs"):
+            candidate_rules._validate_seed_item(post_search_strategy, "NODE:1", results)
+        post_search_pathology = json.loads(json.dumps(seed_records))
+        post_search_pathology["candidates"][0]["pathology_source_ids"].append("PMID:2")
+        with self.assertRaisesRegex(core.ProgramError, "pathology_source_ids contains unknown IDs"):
+            candidate_rules._validate_seed_item(post_search_pathology, "NODE:1", results)
+        disease_query = json.loads(json.dumps(seed_records))
+        disease_query["rescue_strategies"][0]["search_basis"]["target_process"] = "Disease treatment trial"
+        with self.assertRaisesRegex(core.ProgramError, "disease- and treatment-blind"):
+            candidate_rules._validate_seed_item(disease_query, "NODE:1", results)
+        bounded_exclusion = json.loads(json.dumps(seed_records))
+        bounded_exclusion["exclusions"] = [{"name": "Unsupported agent", "identifiers": {}, "strategy_keys": ["strategy-1"], "reason_code": "no_established_action", "finding": "No established pharmacological action was found.", "source_ids": ["PMID:2"], "concern": "The proposed action is unsupported."}]
+        candidate_rules._validate_seed_item(bounded_exclusion, "NODE:1", results)
+        bounded_exclusion["exclusions"][0]["reason_code"] = "exact_disease_prior_use_or_testing"
+        with self.assertRaisesRegex(core.ProgramError, "allowed seed-stage reason"):
+            candidate_rules._validate_seed_item(bounded_exclusion, "NODE:1", results)
 
         missing_edge_propagation = json.loads(json.dumps(seed_records))
         missing_edge_propagation["rescue_strategies"][0]["source_edge_ids"] = [edges[0]["edge_id"]]
@@ -2674,7 +2732,9 @@ class WorkflowTest(unittest.TestCase):
             "strategy_key": "strategy-2",
             "primary_node_id": "NODE:1",
             "linked_node_ids": [],
+            "question_ids": [],
             "connection_ids": [],
+            "search_basis": {"target_process": "cellular resilience", "desired_direction": "increase cellular resilience", "pharmacological_action": "enhance cellular resilience"},
             "pathological_state": "reduced cellular resilience",
             "rescuable_state": "cellular resilience sufficient to preserve function",
             "desired_direction": "increase cellular resilience",
@@ -3208,6 +3268,8 @@ class WorkflowTest(unittest.TestCase):
                 "status": "resolved",
                 "preferred_name": "partial result",
                 "identifiers": {"unichem_uci": "1657"},
+                "rejected_identifiers": {},
+                "ambiguous_identifiers": {},
                 "reason": "Identity evidence supports one residual identity",
                 "source_ids": ["https://example.org/identity"],
             }],
@@ -3262,6 +3324,8 @@ class WorkflowTest(unittest.TestCase):
                 "status": "resolved",
                 "preferred_name": "retigabine",
                 "identifiers": {"pubchem_cid": "121892"},
+                "rejected_identifiers": {},
+                "ambiguous_identifiers": {},
                 "reason": "Authoritative synonym identity",
                 "source_ids": ["https://example.org/identity"],
             }],
@@ -3293,7 +3357,7 @@ class WorkflowTest(unittest.TestCase):
         )
         alias = self.seed(
             "INN:RETIGABINE", "SEED-ALIAS", name="retigabine",
-            identifiers={"inn": ["retigabine", "retigabine"]},
+            identifiers={"inn": ["retigabine", "retigabine"], "drugbank": "WRONG-ID"},
             resolution={"status": "not_queryable", "queries": []}, concept_id="NODE:B",
         )
         prior = {
@@ -3313,6 +3377,8 @@ class WorkflowTest(unittest.TestCase):
                 "status": "resolved",
                 "preferred_name": "retigabine",
                 "identifiers": {"inn": ["ezogabine", "retigabine"]},
+                "rejected_identifiers": {"drugbank": "WRONG-ID"},
+                "ambiguous_identifiers": {},
                 "reason": "Authoritative synonym",
                 "source_ids": ["https://example.org/synonym"],
             }],
@@ -3329,6 +3395,15 @@ class WorkflowTest(unittest.TestCase):
             "pubchem_cid": "121892",
             "unichem_uci": "121892",
         })
+        self.assertEqual(candidates[0]["identity"]["rejected_identifiers"], {"drugbank": "WRONG-ID"})
+        unaccounted = json.loads(json.dumps(records))
+        unaccounted["identity_groups"][0]["rejected_identifiers"] = {}
+        with self.assertRaisesRegex(core.ProgramError, "account for every submitted identifier"):
+            identity._validate_candidate_identity(unaccounted, prior)
+        duplicated = json.loads(json.dumps(records))
+        duplicated["identity_groups"][0]["identifiers"]["drugbank"] = "WRONG-ID"
+        with self.assertRaisesRegex(core.ProgramError, "account for every submitted identifier"):
+            identity._validate_candidate_identity(duplicated, prior)
 
     def test_review_batches_assign_each_candidate_once_to_a_linked_origin(self):
         concepts = [

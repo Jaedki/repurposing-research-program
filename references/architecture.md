@@ -40,8 +40,8 @@ It structurally rejects candidate, compound, drug, treatment, and therapeutic fi
 
 The graph becomes candidate input only after its immutable `snapshot_id` is written. Candidate evidence has two explicit parts:
 
-1. `pathology_source_ids`: why this mechanism element belongs to this disease;
-2. `mechanism_source_ids`: why the drug has the required biological action.
+1. frozen strategy and candidate `pathology_source_ids`: why this mechanism element belongs to this disease;
+2. seed-research `mechanism_source_ids`: independent evidence that the drug has the required biological action.
 
 The chain is sufficient without a paper directly joining the drug to the disease.
 
@@ -56,6 +56,8 @@ biological support.
 The three global hypothesis stages run after graph freezing and before candidate seeding. They do
 not mutate the graph or nominate drugs. The synthesis worker tags every question and connection
 with its mechanistically relevant frozen nodes; matching material is routed into each seed packet.
+The seed worker accounts for every routed item once and links each used item to the strategy that
+used it; non-use does not block a valid focal or exploratory route.
 Their literature does not enter the audit corpus
 unless a downstream candidate stage independently retrieves and cites the relevant evidence.
 Profile gaps and uncertainty are indexed separately from biological edges and returned only with
@@ -87,7 +89,8 @@ remaining audit and ranking fields stay in structured artifacts. See
 [packet-contract.md](packet-contract.md) for citation propagation and audit fields, and
 [source-adapters.md](source-adapters.md) for publication identity.
 The compact exclusion list is exported as CSV; detailed source-integrity records remain in the
-accepted audit result.
+accepted audit result. Evidence-backed exclusions made during seed search remain separate in
+`seed_exclusions.jsonl`; their authority does not include exact-disease prior-art decisions.
 
 ## Status
 

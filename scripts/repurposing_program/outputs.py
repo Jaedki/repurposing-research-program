@@ -76,6 +76,8 @@ def _write_output_files(
         key=lambda row: str(row["strategy_id"]),
     )
     _write_jsonl(outputs / "rescue_strategies.jsonl", rescue_strategies)
+    seed_exclusions = sorted(_rows(results["candidate_seed_generation"]["records"], "exclusions"), key=lambda row: (str(row["origin_concept_id"]), str(row["name"])))
+    _write_jsonl(outputs / "seed_exclusions.jsonl", seed_exclusions)
     gap_count = sum(len(results[stage].get("gaps", [])) for stage in STAGES)
     raw_candidate_count = len(
         _rows(results["candidate_seed_generation"]["records"], "candidates")
@@ -139,6 +141,7 @@ def _write_output_files(
         f"{raw_candidate_count}; deduplicated candidates: {len(candidates)}; "
         f"rescue strategies: {len(rescue_strategies)} "
         f"({unseeded_strategy_count} without a supported seed); "
+        f"seed-stage exclusions: {len(seed_exclusions)}; "
         f"reported gaps: {gap_count}.\n\n"
         "## Graph coverage\n\n"
         f"Candidates per graph node: {node_coverage}.\n\n"
@@ -161,6 +164,7 @@ def _write_output_files(
         outputs / "graph.json",
         outputs / "candidate_provenance.jsonl",
         outputs / "rescue_strategies.jsonl",
+        outputs / "seed_exclusions.jsonl",
         outputs / "summary.md",
     ]
 

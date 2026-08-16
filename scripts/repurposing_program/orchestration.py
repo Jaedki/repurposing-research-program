@@ -227,9 +227,10 @@ def _build_seed_result(
     records = {
         "candidates": candidates,
         "rescue_strategies": rescue_strategies,
+        "context_dispositions": [{**row, "origin_concept_id": item_id} for item_id in item_ids for row in _rows(accepted[item_id]["records"], "context_dispositions")],
         "identity_receipts": receipts,
         "exclusions": [
-            {**row, "origin_concept_id": item_id}
+            {**{key: value for key, value in row.items() if key != "strategy_keys"}, "strategy_ids": [strategy_ids_by_item[item_id][str(key)] for key in row["strategy_keys"]], "origin_concept_id": item_id}
             for item_id in item_ids
             for row in _rows(accepted[item_id]["records"], "exclusions")
         ],
@@ -253,7 +254,7 @@ def _build_seed_result(
         "notes": [
             f"Submitted {len(raw_candidates)} raw seeds to UniChem; "
             f"resolved {len(_exact_identity_groups(records))} exact identity group(s) and queued "
-            f"{queued_count} seed(s) for identity review."
+            f"{queued_count} seed(s) for identity review; routed context dispositions: " + ", ".join(f"{value}={sum(row['disposition'] == value for row in records['context_dispositions'])}" for value in ("used", "reviewed_not_used", "not_relevant", "still_unresolved")) + "."
         ],
     }
 

@@ -286,8 +286,12 @@ def _merge_identifiers(*identifier_sets: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _identifier_pairs(identifiers: Mapping[str, Any]) -> set[tuple[str, str]]:
+    _candidate_queries({"identifiers": identifiers}); return {(str(key), str(value).strip()) for key, raw in identifiers.items() for value in (raw if isinstance(raw, list) else [raw])}
+
+
 def _merge_candidate_rows(
-    rows: list[dict[str, Any]], candidate_id: str, identity: Mapping[str, Any]
+    rows: list[dict[str, Any]], candidate_id: str, identity: Mapping[str, Any], *, include_seed_identifiers: bool = True
 ) -> dict[str, Any]:
     rows = sorted(
         {str(row["seed_id"]): row for row in rows}.values(),
@@ -296,7 +300,7 @@ def _merge_candidate_rows(
     identity = {
         **identity,
         "identifiers": _merge_identifiers(
-            *(row["identifiers"] for row in rows), identity["identifiers"]
+            *((row["identifiers"] for row in rows) if include_seed_identifiers else ()), identity["identifiers"]
         ),
     }
     return {
@@ -363,10 +367,8 @@ def _canonical_candidates(
             identity = {
                 "status": "resolved",
                 "preferred_name": group["preferred_name"],
-                "identifiers": _merge_identifiers(
-                    group["identifiers"],
-                    {"unichem_uci": str(target).split(":", 1)[1]},
-                ),
+                "identifiers": _merge_identifiers(*(seeds[seed_id]["identifiers"] for seed_id in exact if seed_id not in group["member_seed_ids"]), group["identifiers"], {"unichem_uci": str(target).split(":", 1)[1]}),
+                "rejected_identifiers": group["rejected_identifiers"], "ambiguous_identifiers": group["ambiguous_identifiers"],
                 "source_ids": sorted(set(map(str, group["source_ids"]))),
             }
             candidate_id = str(target)
@@ -376,9 +378,10 @@ def _canonical_candidates(
                 "status": group["status"],
                 "preferred_name": group["preferred_name"],
                 "identifiers": group["identifiers"],
+                "rejected_identifiers": group["rejected_identifiers"], "ambiguous_identifiers": group["ambiguous_identifiers"],
                 "source_ids": sorted(set(map(str, group["source_ids"]))),
             }
-        candidates[candidate_id] = _merge_candidate_rows(rows, candidate_id, identity)
+        candidates[candidate_id] = _merge_candidate_rows(rows, candidate_id, identity, include_seed_identifiers=False)
     return [candidates[key] for key in sorted(candidates)]
 
 
@@ -400,6 +403,7 @@ def _validate_candidate_identity(
     documents = _validate_documents(records, canonical_ids=True)
     groups = _contract_rows(records, "identity_groups")
     seed_records = results["candidate_seed_generation"]["records"]
+    seeds = {str(row["seed_id"]): row for row in _rows(seed_records, "candidates")}
     queue_ids = {str(row["seed_id"]) for row in _identity_queue(seed_records)}
     covered: list[str] = []
     targets: list[str] = []
@@ -432,8 +436,11 @@ def _validate_candidate_identity(
         if group.get("status") not in {"resolved", "unresolved", "conflicting"}:
             raise ProgramError(f"{label}.status must be resolved, unresolved, or conflicting")
         _required(group, ("preferred_name", "reason"), label)
-        if not isinstance(group.get("identifiers"), dict):
-            raise ProgramError(f"{label}.identifiers must be an object")
+        buckets = {field: _identifier_pairs(group[field]) for field in ("identifiers", "rejected_identifiers", "ambiguous_identifiers")}
+        submitted = set().union(*(_identifier_pairs(seeds[seed_id]["identifiers"]) for seed_id in members))
+        accounted = set().union(*buckets.values())
+        if not submitted <= accounted or sum(map(len, buckets.values())) != len(accounted):
+            raise ProgramError(f"{label} must account for every submitted identifier exactly once")
         target = group.get("canonical_candidate_id")
         if target is not None:
             target = str(target)
@@ -457,7 +464,8 @@ def _validate_candidate_identity(
                 f"{label}.canonical_candidate_id is required when a resolved group contains "
                 "one exact UniChem identity"
             )
-        _references(group, "source_ids", document_ids, label)
+        if not _references(group, "source_ids", document_ids, label):
+            raise ProgramError(f"{label}.source_ids must cite authoritative identity evidence")
     if sorted(covered) != sorted(queue_ids) or len(covered) != len(set(covered)):
         raise ProgramError("identity_groups must partition every queued seed exactly once")
     if len(targets) != len(set(targets)):

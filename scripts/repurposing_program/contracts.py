@@ -149,6 +149,7 @@ PRIOR_ART_STATUSES = frozenset({
     "established_use",
     "unclear",
 })
+SEED_EXCLUSION_REASONS = frozenset({"no_established_action", "wrong_or_opposite_action", "invalid_entity", "duplicate_seed", "direct_derivation_contamination"})
 AUDIT_EXCLUSION_POLICY = {
     "exact_disease_prior_use_or_testing": (
         "The retained corpus establishes that the exact candidate, including the same active moiety "
@@ -417,6 +418,8 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "Then search each retained strategy separately for established drug actions and "
             "generate a focused set of diverse existing-drug seeds. Record no_supported_seed "
             "rather than padding a strategy that yields no supported candidate. "
+            "Record the treatment-blind target or process, desired direction, and pharmacological action in search_basis. "
+            "Disposition every routed question and connection once as used, reviewed_not_used, not_relevant, or still_unresolved; mark it used only when a strategy cites its ID. "
             "List only graph assertion and source-edge IDs actually used and explain the selected graph support "
             "once in graph_rationale without repeating the drug mechanism hypothesis. An empty "
             "assertion_ids and source_edge_ids lists are valid when the focal profile alone supports the hypothesis, "
@@ -438,11 +441,12 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "Search from the supplied target or process to established drug action; do not use "
             "disease-specific drug literature or queries combining the disease with drug, "
             "treatment, therapy, trial, or repurposing terms. Cite pathology and mode-of-action "
-            "evidence separately. A causal experimental perturbation is not a candidate merely "
+            "evidence separately: strategy and candidate pathology support stays frozen, while candidate mechanism support comes from returned seed research. "
+            "Seed-stage exclusion is limited to absent or opposite established action, invalid identity, a duplicate seed, or direct-derivation contamination and must cite the finding. A causal experimental perturbation is not a candidate merely "
             "because it appears upstream; retain it only after independent rescue derivation and "
             "with drug-action evidence absent from the frozen pathology corpus."
         ),
-        "collections": ["documents", "rescue_strategies", "candidates", "exclusions"],
+        "collections": ["documents", "rescue_strategies", "context_dispositions", "candidates", "exclusions"],
     },
     "candidate_identity": {
         "role": "candidate identity adjudicator",
@@ -453,6 +457,7 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "group to one controller-listed canonical candidate option, remain separate, or stay "
             "unresolved/conflicting. "
             "Do not alter mechanism or pathology evidence or split seeds sharing an exact UCI. "
+            "Partition every submitted identifier once as confirmed, rejected, or ambiguous; only confirmed identifiers enter the canonical candidate. "
             "Exact UniChem groups not present in the queue are controller-owned and must not be "
             "reconsidered."
         ),
@@ -781,7 +786,7 @@ ROW_SCHEMAS = {
     },
     "rescue_strategies": {
         "required_fields": [
-            "strategy_key", "primary_node_id", "linked_node_ids", "connection_ids", "pathological_state",
+            "strategy_key", "primary_node_id", "linked_node_ids", "question_ids", "connection_ids", "search_basis", "pathological_state",
             "rescuable_state", "desired_direction", "mechanistic_basis",
             "ownership_rationale", "assertion_ids", "source_edge_ids", "source_ids", "search_outcome",
             "search_summary",
@@ -813,6 +818,7 @@ ROW_SCHEMAS = {
                     "may be empty; include only connections materially used to formulate this route"
                 ),
             },
+            "search_basis": {"type": "object", "value_rule": "exactly target_process, desired_direction, and pharmacological_action; no disease or treatment framing"},
             "assertion_ids": {
                 "type": "list of unique graph assertion IDs",
                 "value_rule": (
@@ -823,9 +829,7 @@ ROW_SCHEMAS = {
             "source_ids": {
                 "type": "non-empty list of unique retained source IDs",
                 "value_rule": (
-                    "includes frozen graph support for the primary node and every linked node; "
-                    "newly retrieved evidence used to validate a global connection is returned "
-                    "again in this packet before citation"
+                    "includes only frozen graph support for the primary node and every linked node"
                 ),
             },
             "search_outcome": {
@@ -840,6 +844,7 @@ ROW_SCHEMAS = {
             },
         },
     },
+    "context_dispositions": {"required_fields": ["context_id", "disposition", "reason"], "additional_fields": False, "field_contracts": {"disposition": {"allowed_values": ["used", "reviewed_not_used", "not_relevant", "still_unresolved"]}}},
     "assertions": {
         "required_fields": [
             "subject_id", "relation", "object_id", "evidence_context",
@@ -884,25 +889,27 @@ ROW_SCHEMAS = {
             },
             "pathology_source_ids": {
                 "type": "non-empty list of unique pathology source IDs",
-                "value_rule": "supports every selected graph node",
+                "value_rule": "contains only frozen pathology sources and supports every selected graph node",
             },
             "mechanism_source_ids": {
                 "type": "non-empty list of unique source IDs",
-                "value_rule": "includes at least one newly retained drug-mode-of-action source",
+                "value_rule": "contains only returned seed-research sources and includes independent drug-mode-of-action evidence",
             },
         },
     },
     "exclusions": {
-        "required_fields": ["name", "reason"],
+        "required_fields": ["name", "identifiers", "strategy_keys", "reason_code", "finding", "source_ids", "concern"],
         "additional_fields": False,
+        "field_types": {"identifiers": "object"},
+        "field_contracts": {"reason_code": {"allowed_values": sorted(SEED_EXCLUSION_REASONS)}, "source_ids": {"type": "non-empty list of direct source IDs"}},
     },
     "identity_groups": {
         "required_fields": [
             "member_seed_ids", "canonical_candidate_id", "status", "preferred_name",
-            "identifiers", "reason", "source_ids",
+            "identifiers", "rejected_identifiers", "ambiguous_identifiers", "reason", "source_ids",
         ],
         "additional_fields": False,
-        "field_types": {"identifiers": "object"},
+        "field_types": {"identifiers": "object", "rejected_identifiers": "object", "ambiguous_identifiers": "object"},
     },
     "reviews": {
         "required_fields": [
@@ -1111,6 +1118,7 @@ FIELD_RULES = {
         "focal node; linked_node_ids contains only materially used non-primary graph nodes and may "
         "be empty; connection_ids contains only materially used retained global connections and may "
         "be empty; assertion_ids and source_edge_ids contain only graph relations actually used by that strategy; source_record edges are exploratory leads rather than primary corroboration",
+        "search_basis states only the biological target or process, desired direction, and pharmacological action searched; it excludes disease, treatment, therapy, trial, and repurposing framing",
         "ownership_rationale explains why the rescued state lives in the primary node after "
         "comparison with every linked node; do not repeat the same state and route under a linked "
         "node in reverse, while genuinely different rescue objectives, directions, or causal "
@@ -1144,9 +1152,9 @@ FIELD_RULES = {
         "prompt a rescue-pathway check but supports a linked biological claim only through a source "
         "edge or researched assertion; after that bounded review cross-node use is optional and must "
         "never be added for coverage",
-        "each graph_node_id has at least one attached source in pathology_source_ids; state the "
+        "strategy source_ids and candidate pathology_source_ids contain only frozen pathology evidence; each graph_node_id has at least one attached source in pathology_source_ids; state the "
         "supported relationship because graph proximity or label similarity is not evidence",
-        "mechanism_source_ids support the drug mode of action and exclude disease-specific drug evidence",
+        "mechanism_source_ids contain only returned seed-research sources, support the drug mode of action, and exclude disease-specific drug evidence",
     ],
     "candidate_identity": [
         "partition every queued seed_id exactly once across identity_groups",
@@ -1157,7 +1165,6 @@ FIELD_RULES = {
         "UCI values elsewhere in identity_queue, including identity_resolution.ucis, are "
         "identity evidence only and are not canonical candidate options",
         "status is resolved, unresolved, or conflicting; uncertainty must remain explicit",
-        "member_seed_ids, identifiers, and source_ids are JSON collections",
         "each identity group cites at least one newly retained authoritative identity source",
         "same name alone is not identity evidence; preserve material salt, stereochemical, "
         "mixture, biologic, product, and combination distinctions",

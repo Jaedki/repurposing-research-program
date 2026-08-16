@@ -478,7 +478,7 @@ def _row_template(name: str) -> dict[str, Any]:
             template[field] = []
     elif name == "rescue_strategies":
         template.update({
-            "linked_node_ids": [], "connection_ids": [], "assertion_ids": [], "source_edge_ids": [],
+            "linked_node_ids": [], "question_ids": [], "connection_ids": [], "search_basis": {"target_process": None, "desired_direction": None, "pharmacological_action": None}, "assertion_ids": [], "source_edge_ids": [],
             "source_ids": [],
         })
     elif name in ("open_questions", "question_node_tags"):
@@ -507,6 +507,8 @@ def _row_template(name: str) -> dict[str, Any]:
             "pathology_source_ids": [],
             "mechanism_source_ids": [],
         })
+    elif name == "exclusions": template.update({"identifiers": {}, "strategy_keys": [], "source_ids": []})
+    elif name == "identity_groups": template.update({"identifiers": {}, "rejected_identifiers": {}, "ambiguous_identifiers": {}})
     elif name == "reviews":
         template.update({"supporting_findings": [], "assumptions": [], "why_not": [],
                          "aliases": [], "limitations": [], "prior_art": {
