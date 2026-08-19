@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -25,7 +23,6 @@ from .evidence import (
     _all_documents,
     _cited_ids,
     _cited_documents,
-    _document_alias_index,
     _find,
     _merge_documents,
     _rows,
@@ -45,7 +42,15 @@ from .pathology import (
     _compact_disease_context,
     _research_concepts,
 )
-from .storage import _packet_path, _result_path, _sha256, _stable_id, _write_json
+from .storage import (
+    _item_result_path,
+    _packet_path,
+    _read_json,
+    _result_path,
+    _sha256,
+    _stable_id,
+    _write_json,
+)
 from .validation import _secret_paths
 
 
@@ -57,6 +62,36 @@ def _source_catalog(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
         {field: row[field] for field in fields if field in row}
         for row in documents
     ]
+
+
+def _completed_hypothesis_packets(
+    run_root: Path, results: Mapping[str, Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    documents = _canonicalize_document_corpus(
+        run_root, _all_documents(results), verify_titles=False
+    )
+    completed = []
+    for review in _rows(results["candidate_review"]["records"], "reviews"):
+        candidate_id = str(review["candidate_id"])
+        issued = _read_json(
+            _packet_path(run_root, "candidate_evidence_review", candidate_id)
+        )["context"]
+        accepted = _read_json(
+            _item_result_path(run_root, "candidate_evidence_review", candidate_id)
+        )
+        review_source_ids = set(map(str, review["source_ids"]))
+        source_ids = _cited_ids(issued["hypothesis"]) | review_source_ids
+        local_documents = _merge_documents(
+            [*issued["source_index"], *_source_index(documents, review_source_ids)],
+            canonical_publications=True,
+        )
+        completed.append({
+            "hypothesis": issued["hypothesis"],
+            "hypothesis_report": review["hypothesis_report"],
+            "review_gaps": accepted.get("gaps", []),
+            "source_index": _source_index(local_documents, source_ids),
+        })
+    return completed
 
 
 def _packet_context(
@@ -353,22 +388,19 @@ def _packet_context(
             "canonical_candidate_options": _identity_candidate_options(seeds),
         }
     if task == "candidate_evidence_review":
-        documents = _all_documents(results)
-        batch = _find(_review_batches(results), "concept_id", str(item_id))
-        candidate_ids = set(map(str, batch["candidate_ids"]))
-        candidates = [
+        batch = _find(_review_batches(results), "candidate_id", str(item_id))
+        candidate = next(
             {**row, "prior_art_terms": _candidate_prior_art_terms(row, seeds)}
             for row in _canonical_candidates(results)
-            if str(row["candidate_id"]) in candidate_ids
+            if str(row["candidate_id"]) == str(item_id)
+        )
+        strategy_ids = set(map(str, candidate["strategy_ids"]))
+        strategies = [
+            row for row in _rows(seeds, "rescue_strategies")
+            if str(row["strategy_id"]) in strategy_ids
         ]
-        strategy_ids = {
-            str(strategy_id)
-            for candidate in candidates
-            for strategy_id in candidate["strategy_ids"]
-        }
         node_ids = {
             str(node_id)
-            for candidate in candidates
             for node_id in candidate["graph_node_ids"]
         }
         concepts = [
@@ -379,94 +411,40 @@ def _packet_context(
         profiles = [
             row for row in _rows(graph, "profiles") if str(row["node_id"]) in node_ids
         ]
-        review_source_ids = {
-            str(source_id)
-            for candidate in candidates
-            for source_id in (
-                *candidate["mechanism_source_ids"],
-                *candidate.get("identity", {}).get("source_ids", []),
-            )
-        }
         source_edges_by_id = {str(row["edge_id"]): row for row in _rows(graph, "source_edges")}
         assertions_by_id = {
             str(row["assertion_id"]): row
             for row in _rows(graph, "assertions")
         }
-        selected_graph_evidence = []
-        for candidate in candidates:
-            selected_graph_evidence.append({
-                "candidate_id": str(candidate["candidate_id"]),
-                "source_edges": [source_edges_by_id[edge_id] for edge_id in candidate.get("source_edge_ids", [])],
-                "assertions": [
-                    assertions_by_id[str(assertion_id)]
-                    for assertion_id in candidate["assertion_ids"]
-                ],
-            })
-        return {
-            "primary_concept_id": str(item_id),
-            "candidates": candidates,
+        question_ids = {str(value) for row in strategies for value in row.get("question_ids", [])}
+        connection_ids = {str(value) for row in strategies for value in row.get("connection_ids", [])}
+        question_records = results.get("pathology_question_research", {}).get("records", {})
+        synthesis_records = results.get("pathology_hypothesis_synthesis", {}).get("records", {})
+        hypothesis = {
+            "candidate": candidate,
+            "primary_concept_id": str(batch["concept_id"]),
             "pathology_concepts": concepts,
             "pathology_profiles": profiles,
-            "rescue_strategies": [
-                row for row in _rows(seeds, "rescue_strategies")
-                if str(row["strategy_id"]) in strategy_ids
-            ],
-            "selected_graph_evidence": selected_graph_evidence,
-            "source_index": _source_index(
-                _canonicalize_document_corpus(run_root, documents, verify_titles=False),
-                review_source_ids,
-            ),
+            "rescue_strategies": strategies,
+            "selected_graph_evidence": {
+                "source_edges": [source_edges_by_id[str(value)] for value in candidate.get("source_edge_ids", [])],
+                "assertions": [assertions_by_id[str(value)] for value in candidate["assertion_ids"]],
+            },
+            "question_answers": [row for row in (_rows(question_records, "question_answers") if question_records else []) if str(row["question_id"]) in question_ids],
+            "connections": [row for row in (_connection_rows(results) if synthesis_records else []) if str(row["connection_id"]) in connection_ids],
         }
-    documents = _canonicalize_document_corpus(
-        run_root, _all_documents(results), verify_titles=False
-    )
-    canonical_ids = {alias: str(row["document_id"]) for alias, row in _document_alias_index(documents).items()}
-    reviews = _rows(results["candidate_review"]["records"], "reviews")
-    candidates = [{**row, "prior_art_terms": _candidate_prior_art_terms(row, seeds)} for row in _canonical_candidates(results)]
-    aliases = {
-        str(review["candidate_id"]): [str(row["name"]) for row in review["aliases"]]
-        for review in reviews
-    }
-    def cited_sources(value: Any) -> set[str]:
-        if isinstance(value, Mapping):
-            direct = value.get("source_ids", [])
-            return set(map(str, direct if isinstance(direct, list) else [])) | set().union(
-                *(cited_sources(item) for item in value.values())
-            )
-        if isinstance(value, list):
-            return set().union(*(cited_sources(item) for item in value))
-        return set()
-
-    review_sources = {
-        str(review["candidate_id"]): cited_sources(review) for review in reviews
-    }
-    evidence_text = lambda document: json.dumps({key: document.get(key) for key in ("title", "abstract", "supporting_text", "snippets", "supports", "structured_content", "evidence_passages")}, sort_keys=True)
-    candidate_evidence_index = []
-    for candidate in candidates:
-        terms = {*map(str, candidate["prior_art_terms"]), *aliases.get(str(candidate["candidate_id"]), [])}
-        graph_rows = [row for collection, id_field, candidate_field in (("source_nodes", "node_id", "graph_node_ids"), ("profiles", "node_id", "graph_node_ids"), ("source_edges", "edge_id", "source_edge_ids"), ("assertions", "assertion_id", "assertion_ids")) for row in _rows(graph, collection) if str(row[id_field]) in set(map(str, candidate[candidate_field]))]
-        structured = {*review_sources.get(str(candidate["candidate_id"]), set()), *candidate.get("identity", {}).get("source_ids", []), *candidate["pathology_source_ids"], *candidate["mechanism_source_ids"], *_cited_ids(graph_rows)}
-        structured_ids = {canonical_ids.get(value, value) for value in structured}
-        terms.update(match.group(1) for document in documents if str(document["document_id"]) in structured_ids for term in tuple(terms) for match in re.finditer(rf"(?i:{re.escape(term)})\s*\(([A-Z][A-Z0-9-]{{1,9}})\)", evidence_text(document)))
-        patterns = [re.compile(rf"(?<!\w){re.escape(term)}(?!\w)", re.I) for term in terms if len(term.strip()) >= 4 or (len(term.strip()) == 3 and term.isupper())]
-        source_ids = [canonical_ids.get(value, value) for value in structured]
-        for document in documents:
-            text = evidence_text(document)
-            if any(pattern.search(text) for pattern in patterns):
-                source_ids.append(str(document["document_id"]))
-        candidate_evidence_index.append({
-            "candidate_id": str(candidate["candidate_id"]),
-            "source_ids": sorted(set(source_ids)),
-        })
-    return {
-        "candidates": candidates,
-        "rescue_strategies": _rows(seeds, "rescue_strategies"),
-        "reviews": [{"candidate_id": row["candidate_id"], "supporting_findings": row["supporting_findings"], "assumptions": row["assumptions"], "aliases": row["aliases"], "why_not": row["why_not"], "limitations": row["limitations"], "prior_art_findings": row["prior_art"]["findings"]} for row in reviews],
-        "evidence_graph": graph,
-        "candidate_identity": results["candidate_identity"]["records"],
-        "source_index": _source_index(documents),
-        "candidate_evidence_index": candidate_evidence_index,
-    }
+        source_documents = _merge_documents([
+            *_all_documents(results),
+            *(_rows(question_records, "documents") if question_records else []),
+            *(_rows(synthesis_records, "documents") if synthesis_records else []),
+        ])
+        return {
+            "hypothesis": hypothesis,
+            "source_index": _source_index(_canonicalize_document_corpus(
+                run_root, source_documents, verify_titles=False
+            ), _cited_ids(hypothesis)),
+        }
+    return {"hypothesis_packets": _completed_hypothesis_packets(run_root, results)}
 
 
 _PACKET_CASE_FIELDS = ("case_id", "disease", "gene", "mondo")
@@ -516,17 +494,15 @@ def _row_template(name: str) -> dict[str, Any]:
     elif name == "exclusions": template.update({"identifiers": {}, "strategy_keys": [], "source_ids": []})
     elif name == "identity_groups": template.update({"identifiers": {}, "rejected_identifiers": {}, "ambiguous_identifiers": {}, "related_names": []})
     elif name == "reviews":
-        template.update({"supporting_findings": [], "assumptions": [], "why_not": [],
-                         "aliases": [], "limitations": [], "prior_art": {
-                             "status": None, "summary": "", "searched_terms": [], "findings": []},
-                         "mechanistic_bridge": {"text": "", "source_ids": [], "evidence_locators": {}, "evidence_system": None, "epistemic_status": "inference", "entity_form": ""}})
+        template["source_ids"] = []
     elif name == "assessments":
-        template.update({"source_integrity": {"checks": []}, "component_scores": {
+        template["component_scores"] = {
             component: {"value": None, "reason": "", "source_ids": []}
-            for component in SCORE_RUBRIC["components"]},
-            "net_assessment": {"text": "", "source_ids": []}, "aliases": [], "why_not": []})
+            for component in SCORE_RUBRIC["components"]
+        }
+        template["invalidating_finding"] = None
     elif name == "excluded_candidates":
-        template["source_integrity"] = {"checks": []}
+        template["source_ids"] = []
     return template
 
 
@@ -683,12 +659,10 @@ def _build_packet(
         ]
     elif task == "candidate_evidence_review":
         packet_rules = [
-            "Complete the prior-art assessment through ordinary literature discovery to evidence "
-            "saturation. Select sources and query forms for the evidence question. Controller "
-            "validation owns canonical publication "
-            "identity and title verification.",
-            "For each candidate, match candidate.strategy_ids to rescue_strategies.strategy_id "
-            "exactly and do not apply another candidate's strategy.",
+            "This folder is the complete hypothesis packet for one candidate.",
+            "Research the scientific viability of context.hypothesis and write its final natural "
+            "scientific prose without scoring or eligibility decisions.",
+            "Controller validation owns canonical publication identity and title verification.",
         ]
     elif task == "candidate_audit":
         packet_rules = []

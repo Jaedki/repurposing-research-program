@@ -856,27 +856,6 @@ class WorkflowTest(unittest.TestCase):
                     "text": f"Inspectable evidence from {document['title']}",
                     "locator": "test fixture",
                 }])
-        if action["next_task"] == "candidate_audit":
-            excluded = {str(row["candidate_id"]): row for row in records.get(
-                "excluded_candidates", [])}
-            dispositions = []
-            for entry in packet["context"]["candidate_evidence_index"]:
-                candidate_id = str(entry["candidate_id"])
-                exclusion = excluded.get(candidate_id, {})
-                for source_id in entry["source_ids"]:
-                    disposition = "irrelevant"
-                    if source_id in exclusion.get("source_ids", []):
-                        disposition = {
-                            "exact_disease_prior_use_or_testing": (
-                                "exact_disease_prior_use_or_testing"
-                            ),
-                        }.get(exclusion.get("reason_code"), disposition)
-                    dispositions.append({
-                        "candidate_id": candidate_id, "source_id": source_id,
-                        "disposition": disposition,
-                        "reason": "The retained source was classified against the exact-disease gate.",
-                    })
-            records.setdefault("evidence_dispositions", dispositions)
         result = {
             "stage": action["next_task"],
             "item_id": packet["item_id"],
@@ -1015,12 +994,12 @@ class WorkflowTest(unittest.TestCase):
         with (
             patch.object(
                 packets, "_review_batches",
-                return_value=[{"concept_id": "NODE:1", "candidate_ids": ["DRUG:1"]}],
+                return_value=[{"concept_id": "NODE:1", "candidate_id": "DRUG:1"}],
             ),
             patch.object(packets, "_canonical_candidates", return_value=[candidate]),
         ):
             context = packets._packet_context(
-                self.root, "candidate_evidence_review", "NODE:1", results
+                self.root, "candidate_evidence_review", "DRUG:1", results
             )
 
         self.assertEqual(context["source_index"][0]["canonical_publication_id"], "PMID:12")
@@ -1699,11 +1678,12 @@ class WorkflowTest(unittest.TestCase):
         action = core.next_action(self.root)
         self.assertEqual(action["next_task"], "candidate_evidence_review")
         self.assertTrue((self.root / "results" / "candidate_identity.json").exists())
-        self.assertEqual(action["next_item_id"], packet["item_id"])
+        self.assertEqual(action["next_item_id"], "UNICHEM:1")
+        self.assertEqual(Path(action["packet_path"]).name, "hypothesis_packet.json")
         review_packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
-        self.assertIn("authoritative disease context", review_packet["task"])
-        self.assertIn("exact-disease prior art", review_packet["task"])
-        self.assertIn("controller alone owns canonical PMID", review_packet["task"])
+        self.assertIn("context.hypothesis", review_packet["task"])
+        self.assertIn("scientifically viable", review_packet["task"])
+        self.assertIn("natural scientific paragraph", review_packet["task"])
         review_instructions = " ".join([
             review_packet["task"], *review_packet["rules"]
         ])
@@ -1714,62 +1694,40 @@ class WorkflowTest(unittest.TestCase):
             "Controller validation owns canonical publication identity",
             " ".join(review_packet["rules"]),
         )
-        self.assertIn("strategy_ids", review_packet["task"])
-        self.assertIn("strategy_ids", " ".join(review_packet["rules"]))
         self.assertTrue(
             any(
-                "document retained" in rule
+                "newly retained document" in rule
                 for rule in review_packet["result_contract"]["field_rules"]
             )
         )
         self.assertNotIn("score_rubric", review_packet["result_contract"])
         review_contract = review_packet["result_contract"]["records"]["reviews"]
-        finding_contract = review_contract["field_contracts"]["supporting_findings"]
         self.assertEqual(
-            finding_contract["field_contracts"]["evidence_system"]["allowed_values"],
-            ["animal", "authoritative_database", "biochemical", "cell", "human"],
+            review_contract["required_fields"],
+            ["candidate_id", "hypothesis_report", "source_ids"],
         )
+        hypothesis = review_packet["context"]["hypothesis"]
+        self.assertEqual(hypothesis["primary_concept_id"], packet["item_id"])
         self.assertEqual(
-            finding_contract["field_contracts"]["epistemic_status"]["allowed_values"],
-            ["direct_observation", "inference"],
-        )
-        prior_art_contract = review_contract["field_contracts"]["prior_art"]
-        self.assertEqual(
-            prior_art_contract["field_contracts"]["status"]["allowed_values"],
-            ["established_use", "human_intervention", "none_found", "preclinical_only", "unclear"],
-        )
-        self.assertEqual(
-            prior_art_contract["field_contracts"]["findings"]["field_contracts"]
-            ["identity_relation"]["allowed_values"],
-            ["class_or_analogue", "exact_candidate", "related_form", "same_active_moiety"],
-        )
-        self.assertEqual(review_packet["context"]["primary_concept_id"], packet["item_id"])
-        self.assertEqual(
-            review_packet["context"]["rescue_strategies"][0]["primary_node_id"],
+            hypothesis["rescue_strategies"][0]["primary_node_id"],
             "NODE:1",
         )
         self.assertEqual(
-            review_packet["context"]["rescue_strategies"][0]["connection_ids"],
+            hypothesis["rescue_strategies"][0]["connection_ids"],
             ["CONNECTION:1"],
         )
-        linked_strategy_id = review_packet["context"]["rescue_strategies"][0][
+        linked_strategy_id = hypothesis["rescue_strategies"][0][
             "strategy_id"
         ]
         self.assertTrue(linked_strategy_id.startswith("STRATEGY-"))
         self.assertEqual(
-            [row["candidate_id"] for row in review_packet["context"]["candidates"]],
-            ["UNICHEM:1", "UNICHEM:2"],
+            hypothesis["candidate"]["candidate_id"], "UNICHEM:1",
         )
-        self.assertEqual(
-            [row["document_id"] for row in review_packet["context"]["source_index"]],
-            ["PMID:1", "PMID:2"],
-        )
-        selected_graph_evidence = {
-            row["candidate_id"]: row
-            for row in review_packet["context"]["selected_graph_evidence"]
-        }
-        self.assertNotIn("graph_node_ids", selected_graph_evidence["UNICHEM:1"])
-        selected_source_edges = selected_graph_evidence["UNICHEM:1"]["source_edges"]
+        self.assertTrue({"PMID:1", "PMID:2"} <= {
+            row["document_id"] for row in review_packet["context"]["source_index"]
+        })
+        selected_graph_evidence = hypothesis["selected_graph_evidence"]
+        selected_source_edges = selected_graph_evidence["source_edges"]
         self.assertEqual(len(selected_source_edges), 1)
         self.assertEqual(selected_source_edges[0]["subject_id"], "NODE:1")
         self.assertEqual(selected_source_edges[0]["relation"], "contributes_to")
@@ -1777,12 +1735,10 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(
             [
                 row["assertion_id"]
-                for row in selected_graph_evidence["UNICHEM:1"]["assertions"]
+                for row in selected_graph_evidence["assertions"]
             ],
             [selected_assertion_id],
         )
-        self.assertEqual(selected_graph_evidence["UNICHEM:2"]["assertions"], [])
-        self.assertEqual(selected_graph_evidence["UNICHEM:2"]["source_edges"], [])
         seeds = json.loads(
             (self.root / "results" / "candidate_seed_generation.json").read_text()
         )
@@ -1801,90 +1757,77 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual({row["disposition"] for row in seeds["records"]["context_dispositions"]}, {"used", "reviewed_not_used"})
         self.assertIn("used=1, reviewed_not_used=1", seeds["notes"][0])
         self.assertEqual(seeds["records"]["exclusions"][0]["strategy_ids"], [linked_strategy_id])
-        prior_terms = {
-            row["candidate_id"]: row["prior_art_terms"]
-            for row in review_packet["context"]["candidates"]
-        }
         first_review = self.review("UNICHEM:1", "PMID:3")
-        first_review["aliases"] = [
-            {"name": "Drug hydrochloride", "source_ids": ["PMID:3"]},
-            {"name": "Drug", "source_ids": ["PMID:2"]},
-        ]
-        first_review["why_not"] = [self.review_finding(
-            "Relevant exposure remains uncertain.", "PMID:3"
-        )]
-        first_review["prior_art"]["searched_terms"] = [
-            *prior_terms["UNICHEM:1"], "Drug hydrochloride", "Drug",
-        ]
-        second_review = self.review("UNICHEM:2", "PMID:3")
-        second_review["prior_art"] = {
-            "status": "human_intervention",
-            "summary": "An interpretable exact-disease controlled intervention was published.",
-            "searched_terms": prior_terms["UNICHEM:2"],
-            "findings": [self.review_finding(
-                "The candidate achieved relevant exposure against a placebo counterfactual and a disease-relevant outcome.",
-                "PMID:3", identity_relation="exact_candidate", entity_form="Second drug",
-            )],
-        }
+        first_review["hypothesis_report"] = (
+            "The drug's established action could reduce excessive kinase signalling and move the "
+            "affected tissue toward its normal state, although relevant exposure remains uncertain."
+        )
         self.submit(
             action,
             {
-                "documents": [
-                    {
-                        "document_id": "PMID:2",
-                        "title": "Drug MOA",
-                        "source": "test",
-                        "evidence_passages": [{
-                            "text": "Review-specific evidence from the same paper.",
-                            "locator": "review results",
-                        }],
-                    },
-                    {"document_id": "PMID:3", "title": "Drug review", "source": "test"},
-                    {"document_id": "PMID:70", "title": "Unused review search hit", "source": "test"},
-                ],
-                "reviews": [first_review, second_review],
+                "documents": [{"document_id": "PMID:3", "title": "Drug review", "source": "test",
+                               "evidence_passages": [{"text": "The drug has the relevant action, but tissue exposure remains uncertain.", "locator": "results"}]}],
+                "reviews": [first_review],
             },
         )
+        action = core.next_action(self.root)
+        self.assertEqual(action["next_task"], "candidate_evidence_review")
+        self.assertEqual(action["next_item_id"], "UNICHEM:2")
+        second_packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(second_packet["context"]["hypothesis"]["candidate"]["candidate_id"], "UNICHEM:2")
+        second_review = self.review("UNICHEM:2", "PMID:40")
+        second_review["hypothesis_report"] = (
+            "The second drug has already entered an exact-disease therapeutic study and therefore "
+            "is not a novel repurposing hypothesis."
+        )
+        self.submit(action, {
+            "documents": [{"document_id": "PMID:40", "title": "Exact-disease study", "source": "test",
+                           "evidence_passages": [{"text": "The second drug entered the exact-disease study.", "locator": "trial record"}]}],
+            "reviews": [second_review],
+        })
         action = core.next_action(self.root)
         self.assertEqual(action["next_task"], "candidate_audit")
         audit_packet = json.loads(Path(action["packet_path"]).read_text(encoding="utf-8"))
         self.assertIn(
-            "do not search for or add evidence",
+            "do not search or rewrite",
             audit_packet["task"].lower(),
         )
         self.assertFalse(
             any("newly retrieved" in rule.lower() for rule in audit_packet["rules"])
         )
-        self.assertEqual(len(audit_packet["context"]["candidates"]), 2)
+        completed_packets = audit_packet["context"]["hypothesis_packets"]
+        self.assertEqual(len(completed_packets), 2)
+        completed_by_id = {
+            row["hypothesis"]["candidate"]["candidate_id"]: row
+            for row in completed_packets
+        }
         self.assertEqual(
-            audit_packet["context"]["rescue_strategies"][0]["desired_direction"],
+            completed_by_id["UNICHEM:1"]["hypothesis"]["rescue_strategies"][0]["desired_direction"],
             "decrease excessive kinase activity",
         )
-        self.assertEqual(len(audit_packet["context"]["reviews"]), 2)
         self.assertEqual(
-            [row["document_id"] for row in audit_packet["context"]["source_index"]],
-            ["PMID:1", "PMID:2", "PMID:3", "SRC:1"],
+            completed_by_id["UNICHEM:1"]["hypothesis_report"],
+            first_review["hypothesis_report"],
         )
-        self.assertEqual(
-            audit_packet["context"]["evidence_graph"]["profiles"][0]["node_id"],
-            "NODE:1",
-        )
-        self.assertEqual(
-            audit_packet["context"]["candidate_identity"]["identity_groups"], []
-        )
+        self.assertEqual(completed_by_id["UNICHEM:1"]["review_gaps"], [])
+        self.assertNotIn("candidate_evidence_index", audit_packet["context"])
+        self.assertNotIn("source_index", audit_packet["context"])
+        self.assertTrue({"PMID:1", "PMID:2", "PMID:3", "SRC:1"} <= {
+            row["document_id"] for row in completed_by_id["UNICHEM:1"]["source_index"]
+        })
         self.assertTrue(
-            audit_packet["context"]["source_index"][0]["evidence_passages"]
+            completed_by_id["UNICHEM:1"]["source_index"][0]["evidence_passages"]
         )
         self.assertEqual(
-            audit_packet["context"]["source_index"][0]["canonical_publication_id"],
+            completed_by_id["UNICHEM:1"]["source_index"][0]["canonical_publication_id"],
             "PMID:1",
         )
         self.assertEqual(
-            audit_packet["context"]["source_index"][0]["year"], 2026
+            completed_by_id["UNICHEM:1"]["source_index"][0]["year"], 2026
         )
         source_by_id = {
             row["document_id"]: row
-            for row in audit_packet["context"]["source_index"]
+            for row in completed_by_id["UNICHEM:1"]["source_index"]
         }
         self.assertEqual(
             {row["text"] for row in source_by_id["PMID:1"]["evidence_passages"]},
@@ -1895,29 +1838,21 @@ class WorkflowTest(unittest.TestCase):
         )
         self.assertEqual(
             {row["text"] for row in source_by_id["PMID:2"]["evidence_passages"]},
-            {
-                "Inspectable evidence from Drug MOA",
-                "Review-specific evidence from the same paper.",
-            },
+            {"Inspectable evidence from Drug MOA"},
         )
         rubric = audit_packet["result_contract"]["score_rubric"]
-        self.assertIn("final-card prose defined in their field rules", audit_packet["task"])
         audit_field_rules = " ".join(audit_packet["result_contract"]["field_rules"])
-        self.assertIn("predicted corrective or compensatory effect", audit_field_rules)
-        self.assertIn("ellipses standing in for omitted text", audit_field_rules)
-        self.assertNotIn("remains worth ranking without repeating", audit_packet["task"])
-        self.assertEqual(
-            audit_packet["result_contract"]["records"]["assessments"]["template"]
-            ["source_integrity"],
-            {"checks": []},
-        )
-        self.assertIn("without weighting", rubric["method"])
+        self.assertIn("without rewriting its prose", audit_field_rules)
+        self.assertNotIn("source_integrity", json.dumps(audit_packet["result_contract"]))
+        self.assertNotIn("evidence_dispositions", json.dumps(audit_packet["result_contract"]))
+        self.assertIn("unweighted sum", rubric["method"])
         self.assertIn("not a probability", rubric["method"])
-        self.assertIn("Counterevidence earns no points", rubric["method"])
+        self.assertIn("strongest relevant counterevidence", " ".join(rubric["rules"]))
         self.assertEqual(set(rubric["components"]), set(contracts.SCORE_COMPONENTS))
-        self.assertEqual(contracts.MAX_SCORE, 80)
-        self.assertIn("any integer from 1", rubric["method"])
-        self.assertNotIn("anchors", rubric["components"]["mechanistic_bridge_plausibility"])
+        self.assertEqual(contracts.MAX_SCORE, 100)
+        self.assertIn("integer from 0 through 5", audit_field_rules)
+        self.assertEqual(set(map(int, rubric["anchors"])), set(range(6)))
+        self.assertIn("Novel indirect routes", rubric["components"]["directional_rescue_logic"]["consider"])
         exclusion_policy = audit_packet["result_contract"]["exclusion_policy"]
         self.assertEqual(set(exclusion_policy), set(contracts.AUDIT_EXCLUSION_REASONS))
         novelty_policy = exclusion_policy["exact_disease_prior_use_or_testing"]
@@ -1925,44 +1860,25 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("regardless of outcome, controls, study quality", novelty_policy)
         self.assertIn("computational prediction", novelty_policy)
         self.assertNotIn("human_intervention", exclusion_policy)
-        self.assertIn("missing data", exclusion_policy["impossible_translational_feasibility"])
+        self.assertNotIn("unsupported_action", exclusion_policy)
+        self.assertNotIn("opposite_action", exclusion_policy)
+        self.assertNotIn("impossible_translational_feasibility", exclusion_policy)
         self.assertIn("unresolved identity alone", exclusion_policy["invalid_candidate"])
         review_result = json.loads(
             (self.root / "results" / "candidate_review.json").read_text()
         )
         self.assertEqual(
             [row["document_id"] for row in review_result["records"]["documents"]],
-            ["PMID:2", "PMID:3"],
+            ["PMID:1", "PMID:2", "PMID:3", "PMID:4", "PMID:40", "PMID:5", "SRC:1"],
         )
-        first_assessment = {
-            **self.assessment(
-                "UNICHEM:1",
-                "PMID:3",
-                {
-                    "drug_action_confidence": 15,
-                    "disease_mechanism_relevance": 20,
-                    "mechanistic_bridge_plausibility": 5,
-                    "translational_feasibility": 15,
-                },
-            ),
-            "aliases": [
-                {"name": "Drug hydrochloride", "source_ids": ["PMID:3"]},
-                {"name": "Drug", "source_ids": ["PMID:2"]},
-            ],
-            "why_not": [{
-                "text": "Relevant exposure remains uncertain.",
-                "source_ids": ["PMID:3"],
-            }],
-            "net_assessment": {
-                "text": (
-                    "The drug's established action is expected to reduce excessive kinase "
-                    "signalling and move the affected tissue toward its normal state."
-                ),
-                "source_ids": ["PMID:3"],
+        first_assessment = self.assessment(
+            "UNICHEM:1", "PMID:3", {
+                "disease_mechanism_validity": 4,
+                "directional_rescue_logic": 3,
+                "exact_drug_pharmacology": 4,
+                "exposure_feasibility": 2,
+                "empirical_translation": 3,
             },
-        }
-        first_assessment["source_integrity"] = self.source_integrity(
-            first_assessment, locator="test fixture", review=first_review
         )
         self.submit(
             action,
@@ -1972,8 +1888,7 @@ class WorkflowTest(unittest.TestCase):
                     "candidate_id": "UNICHEM:2",
                     "reason_code": "exact_disease_prior_use_or_testing",
                     "finding": "The candidate has already been tested in the exact disease.",
-                    "source_ids": ["PMID:3"],
-                    "source_integrity": self.exclusion_integrity(["PMID:3"], locator="test fixture"),
+                    "source_ids": ["PMID:40"],
                 }],
             },
         )
@@ -1994,9 +1909,9 @@ class WorkflowTest(unittest.TestCase):
         summary = (self.root / "outputs" / "summary.md").read_text(encoding="utf-8")
         self.assertIn("raw candidate seeds: 2; deduplicated candidates: 2", summary)
         self.assertIn("rescue strategies: 1 (0 without a supported seed)", summary)
-        self.assertIn("4 20-point components out of 80", summary)
+        self.assertIn("5 five-point categories scaled to 100", summary)
         self.assertIn("## Graph coverage", summary)
-        self.assertIn("Candidates per graph node: NODE:1 (Process): 2", summary)
+        self.assertIn("Candidates per graph node: NODE:1 (Process): 1", summary)
         self.assertIn("Nodes with no candidate: none", summary)
         self.assertIn("Candidates using more than one node: none", summary)
         self.assertIn("Candidates using context-only nodes: none", summary)
@@ -2031,16 +1946,12 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("## Drug", cards)
         self.assertNotIn("UNICHEM:1", cards)
         self.assertIn(
-            "### How it could work\n\n"
-            "The drug's established action is expected to reduce excessive kinase signalling "
-            "and move the affected tissue toward its normal state. [PMID:3]",
+            "The drug's established action could reduce excessive kinase signalling and move the "
+            "affected tissue toward its normal state, although relevant exposure remains uncertain.",
             cards,
         )
-        self.assertIn(
-            "### Reasons why not\n\n"
-            "Relevant exposure remains uncertain. [PMID:3]",
-            cards,
-        )
+        self.assertNotIn("### How it could work", cards)
+        self.assertNotIn("### Reasons why not", cards)
         for hidden in (
             "Aliases:", "Score:", "Source verification:", "Citation-audit exceptions:",
             "Drug-action confidence:", "Mechanistic-bridge plausibility:", "Priority tier:",
@@ -2051,7 +1962,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("candidate_id,name,reason_code,finding,source_ids", exclusions)
         self.assertIn(
             "UNICHEM:2,Second drug,exact_disease_prior_use_or_testing,"
-            "The candidate has already been tested in the exact disease.,PMID:3",
+            "The candidate has already been tested in the exact disease.,PMID:40",
             exclusions,
         )
         self.assertFalse((self.root / "outputs" / "candidate_exclusions.jsonl").exists())
@@ -2188,27 +2099,21 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("rescue_strategies", seed_guidance)
         self.assertNotIn("Life Science Research", seed_guidance)
         self.assertNotIn("structured lookup", seed_guidance.casefold())
-        self.assertIn(
-            "evidence dossier", contracts.STAGE_GUIDANCE["candidate_evidence_review"]["task"]
-        )
-        self.assertIn(
-            "exact-disease prior art",
-            contracts.STAGE_GUIDANCE["candidate_evidence_review"]["task"],
-        )
         review_guidance = contracts.STAGE_GUIDANCE["candidate_evidence_review"]["task"]
-        self.assertIn("ordinary literature discovery to evidence saturation", review_guidance)
+        self.assertIn("context.hypothesis", review_guidance)
+        self.assertIn("scientifically viable", review_guidance)
+        self.assertIn("exact-disease prior use or testing", review_guidance)
+        self.assertIn("natural scientific paragraph", review_guidance)
         self.assertNotIn("Life Science Research", review_guidance)
         self.assertNotIn("structured lookup", review_guidance.casefold())
         self.assertNotIn("research service", review_guidance.casefold())
-        self.assertIn("controller alone owns canonical PMID", review_guidance)
-        self.assertIn("strategy_ids", review_guidance)
         for guidance_text in (
             pathology_guidance, landscape_guidance, seed_guidance, review_guidance,
         ):
             self.assertNotIn("may be skipped without penalty", guidance_text)
             self.assertNotIn("optional when directly relevant", guidance_text)
         audit_guidance = contracts.STAGE_GUIDANCE["candidate_audit"]["task"]
-        self.assertIn("strategy_ids", audit_guidance)
+        self.assertIn("do not search or rewrite", audit_guidance)
         for task in (
             "pathology_node_research", "candidate_seed_research",
             "candidate_evidence_review",
@@ -3490,8 +3395,9 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(
             first,
             [
-                {"concept_id": "NODE:A", "candidate_ids": ["DRUG-A", "DRUG-TIE"]},
-                {"concept_id": "NODE:B", "candidate_ids": ["DRUG-B"]},
+                {"candidate_id": "DRUG-A", "concept_id": "NODE:A"},
+                {"candidate_id": "DRUG-B", "concept_id": "NODE:B"},
+                {"candidate_id": "DRUG-TIE", "concept_id": "NODE:A"},
             ],
         )
 
@@ -3501,34 +3407,24 @@ class WorkflowTest(unittest.TestCase):
                 {"document_id": "PMID:1", "title": "Drug evidence", "source": "test",
                  "evidence_passages": [{"text": "Evidence", "locator": "test fixture"}]}
             ],
-            "reviews": [self.review("DRUG-A"), self.review("DRUG-B")],
+            "reviews": [self.review("DRUG-A")],
         }
-        batch = [{"concept_id": "NODE:A", "candidate_ids": ["DRUG-A", "DRUG-B"]}]
+        batch = [{"candidate_id": "DRUG-A", "concept_id": "NODE:A"}]
         with patch.object(candidate_rules, "_review_batches", return_value=batch):
-            candidate_rules._validate_review_item(records, "NODE:A", {})
-            records["reviews"][0]["prior_art"]["search_status"] = "completed"
+            candidate_rules._validate_review_item(records, "DRUG-A", {})
+            records["reviews"][0]["metadata"] = "not allowed"
             with self.assertRaisesRegex(core.ProgramError, "unexpected fields"):
-                candidate_rules._validate_review_item(records, "NODE:A", {})
-            del records["reviews"][0]["prior_art"]["search_status"]
-            records["reviews"][0]["aliases"] = [{"name": "Drug salt", "source_ids": []}]
-            with self.assertRaisesRegex(core.ProgramError, "must be a non-empty list"):
-                candidate_rules._validate_review_item(records, "NODE:A", {})
-            records["reviews"][0]["aliases"] = []
-            records["reviews"][0]["why_not"] = [self.review_finding(
-                "Unsupported concern", "PMID:404"
-            )]
+                candidate_rules._validate_review_item(records, "DRUG-A", {})
+            del records["reviews"][0]["metadata"]
+            records["reviews"][0]["source_ids"] = ["PMID:404"]
             with self.assertRaisesRegex(core.ProgramError, "unknown IDs"):
-                candidate_rules._validate_review_item(records, "NODE:A", {})
-            records["reviews"][0]["why_not"] = []
-            records["reviews"][0]["counterevidence"] = []
-            with self.assertRaisesRegex(core.ProgramError, "unexpected fields"):
-                candidate_rules._validate_review_item(records, "NODE:A", {})
-            del records["reviews"][0]["counterevidence"]
+                candidate_rules._validate_review_item(records, "DRUG-A", {})
+            records["reviews"][0]["source_ids"] = ["PMID:1"]
             records["documents"] = []
             with self.assertRaisesRegex(core.ProgramError, "retained by this review"):
                 candidate_rules._validate_review_item(
                     records,
-                    "NODE:A",
+                    "DRUG-A",
                     {"prior": {"records": {
                         "documents": [
                             {"document_id": "PMID:1", "title": "Prior evidence", "source": "test",
@@ -3541,11 +3437,11 @@ class WorkflowTest(unittest.TestCase):
                 {"document_id": "PMID:1", "title": "Drug evidence", "source": "test",
                  "evidence_passages": [{"text": "Evidence", "locator": "test fixture"}]}
             ]
-            records["reviews"] = [self.review("DRUG-A")]
-            with self.assertRaisesRegex(core.ProgramError, "exactly the supplied batch"):
-                candidate_rules._validate_review_item(records, "NODE:A", {})
+            records["reviews"] = [self.review("DRUG-B")]
+            with self.assertRaisesRegex(core.ProgramError, "exactly the supplied candidate"):
+                candidate_rules._validate_review_item(records, "DRUG-A", {})
 
-    def test_review_prior_art_terms_identity_relations_and_passage_entailment_are_bounded(self):
+    def test_hypothesis_report_contract_keeps_prior_art_terms_internal(self):
         seed_records = {"candidates": [{"seed_id": "SEED-A", "name": "Brand A"}]}
         candidate = {
             "candidate_id": "DRUG-A", "name": "Preferred A", "member_seed_ids": ["SEED-A"],
@@ -3554,30 +3450,11 @@ class WorkflowTest(unittest.TestCase):
                          "related_names": [{"name": "Related A", "relation": "related_form", "source_ids": ["PMID:1"]}]},
         }
         self.assertEqual(identity._candidate_prior_art_terms(candidate, seed_records), ["Brand A", "Preferred A", "Related A", "UNII-A"])
-        review = self.review("DRUG-A")
-        review["aliases"] = [{"name": "Development-A", "source_ids": ["PMID:1"]}]
-        review["prior_art"]["searched_terms"] = ["Brand A", "Preferred A", "Related A", "UNII-A", "Development-A"]
-        records = {"documents": [{"document_id": "PMID:1", "title": "Evidence", "source": "test", "evidence_passages": [{"text": "Evidence", "locator": "test fixture"}]}], "reviews": [review]}
-        results = {"candidate_seed_generation": {"records": seed_records}}
-        with patch.object(candidate_rules, "_review_batches", return_value=[{"concept_id": "NODE:A", "candidate_ids": ["DRUG-A"]}]), patch.object(candidate_rules, "_canonical_candidates", return_value=[candidate]):
-            candidate_rules._validate_review_item(records, "NODE:A", results)
-            missing = json.loads(json.dumps(records)); missing["reviews"][0]["prior_art"]["searched_terms"].remove("Development-A")
-            with self.assertRaisesRegex(core.ProgramError, "cover every supplied term"):
-                candidate_rules._validate_review_item(missing, "NODE:A", results)
-            related = json.loads(json.dumps(records)); related["reviews"][0]["prior_art"].update({"status": "human_intervention", "findings": [self.review_finding("A related form was tested.", identity_relation="related_form", entity_form="Development-A")]})
-            with self.assertRaisesRegex(core.ProgramError, "positive status requires"):
-                candidate_rules._validate_review_item(related, "NODE:A", results)
-            same_moiety = json.loads(json.dumps(related)); same_moiety["reviews"][0]["prior_art"]["findings"][0]["identity_relation"] = "same_active_moiety"
-            candidate_rules._validate_review_item(same_moiety, "NODE:A", results)
-            conflict = json.loads(json.dumps(same_moiety)); conflict["reviews"][0]["prior_art"]["findings"][0]["entity_form"] = "Related A"
-            with self.assertRaisesRegex(core.ProgramError, "conflicts with the candidate identity"):
-                candidate_rules._validate_review_item(conflict, "NODE:A", results)
-            bad_locator = json.loads(json.dumps(records)); bad_locator["reviews"][0]["supporting_findings"][0]["evidence_locators"]["PMID:1"] = "not retained"
-            with self.assertRaisesRegex(core.ProgramError, "not retained"):
-                candidate_rules._validate_review_item(bad_locator, "NODE:A", results)
-            bad_system = json.loads(json.dumps(records)); bad_system["reviews"][0]["supporting_findings"][0]["evidence_system"] = "unspecified"
-            with self.assertRaisesRegex(core.ProgramError, "evidence_system must be one of"):
-                candidate_rules._validate_review_item(bad_system, "NODE:A", results)
+        self.assertEqual(
+            contracts.ROW_SCHEMAS["reviews"]["required_fields"],
+            ["candidate_id", "hypothesis_report", "source_ids"],
+        )
+        self.assertNotIn("prior_art", contracts.ROW_SCHEMAS["reviews"]["required_fields"])
 
     def test_audit_validation_is_review_independent_and_preserves_longshots(self):
         second_review = self.review("DRUG-B")
@@ -3600,181 +3477,145 @@ class WorkflowTest(unittest.TestCase):
         )
         records = {
             "assessments": [longshot],
-            "evidence_dispositions": [],
             "excluded_candidates": [{
                 "candidate_id": "DRUG-B",
-                "reason_code": "unsupported_action",
-                "finding": "The audit found no credible support for the proposed drug action.",
+                "reason_code": "invalid_candidate",
+                "finding": "The retained entity is not an administered intervention.",
                 "source_ids": ["PMID:1"],
-                "source_integrity": self.exclusion_integrity(["PMID:1"]),
             }],
         }
+        hypothesis_packets = [
+            self.completed_packet(candidate_id, results["candidate_review"]["records"]["documents"])
+            for candidate_id in ("DRUG-A", "DRUG-B")
+        ]
 
-        audit._validate_candidate_audit(records, results)
-        self.assertEqual(ranking._final_score(longshot), 20)
+        audit._validate_candidate_audit(records, results, hypothesis_packets)
+        self.assertEqual(ranking._final_score(longshot), 100)
 
         legacy_reason = json.loads(json.dumps(records))
         legacy_reason["excluded_candidates"][0]["reason_code"] = "human_intervention"
         with self.assertRaisesRegex(core.ProgramError, "reason_code must be one of"):
-            audit._validate_candidate_audit(legacy_reason, results)
+            audit._validate_candidate_audit(legacy_reason, results, hypothesis_packets)
 
         all_excluded = {
             "assessments": [],
-            "evidence_dispositions": [],
             "excluded_candidates": [
                 {
                     "candidate_id": "DRUG-A",
-                    "reason_code": "unsupported_action",
-                    "finding": "The retained corpus does not support the proposed drug action.",
+                    "reason_code": "invalid_candidate",
+                    "finding": "The retained entity is not an administered intervention.",
                     "source_ids": ["PMID:1"],
-                    "source_integrity": self.exclusion_integrity(["PMID:1"]),
                 },
                 records["excluded_candidates"][0],
             ],
         }
-        audit._validate_candidate_audit(all_excluded, results)
+        audit._validate_candidate_audit(all_excluded, results, hypothesis_packets)
         self.assertEqual(
             run_state._stop_reason({"candidate_audit": {"records": all_excluded}}),
             "the audit excluded every reviewed candidate",
         )
 
         arbitrary = json.loads(json.dumps(records))
-        arbitrary["assessments"][0]["component_scores"]["drug_action_confidence"]["value"] = 12
-        audit._validate_candidate_audit(arbitrary, results)
-        arbitrary["assessments"][0]["component_scores"]["drug_action_confidence"]["value"] = 21
-        with self.assertRaisesRegex(core.ProgramError, "integer from 1 through 20"):
-            audit._validate_candidate_audit(arbitrary, results)
+        arbitrary["assessments"][0]["component_scores"]["disease_mechanism_validity"]["value"] = 0
+        audit._validate_candidate_audit(arbitrary, results, hypothesis_packets)
+        arbitrary["assessments"][0]["component_scores"]["disease_mechanism_validity"]["value"] = 4
+        audit._validate_candidate_audit(arbitrary, results, hypothesis_packets)
+        arbitrary["assessments"][0]["component_scores"]["disease_mechanism_validity"]["value"] = 6
+        with self.assertRaisesRegex(core.ProgramError, "integer from 0 through 5"):
+            audit._validate_candidate_audit(arbitrary, results, hypothesis_packets)
 
         invalid = json.loads(json.dumps(records))
         invalid["excluded_candidates"] = []
         with self.assertRaisesRegex(core.ProgramError, "partition every reviewed candidate"):
-            audit._validate_candidate_audit(invalid, results)
+            audit._validate_candidate_audit(invalid, results, hypothesis_packets)
 
         independently_assessed = json.loads(json.dumps(records))
         independently_assessed["assessments"].append(self.assessment("DRUG-B"))
         independently_assessed["excluded_candidates"] = []
-        audit._validate_candidate_audit(independently_assessed, results)
+        audit._validate_candidate_audit(independently_assessed, results, hypothesis_packets)
+
+        invalidated = json.loads(json.dumps(independently_assessed))
+        invalidated["assessments"][0]["invalidating_finding"] = {
+            "finding": "Direct retained evidence disproves the exact proposed route.",
+            "source_ids": ["PMID:1"],
+        }
+        audit._validate_candidate_audit(invalidated, results, hypothesis_packets)
 
     def test_exact_disease_novelty_exclusion_dry_run(self):
         documents = [
-            {"document_id": "PMID:1", "title": "Candidate action", "source": "test",
-             "evidence_passages": [{"text": "Action evidence.", "locator": "abstract"}]},
             {"document_id": "PMID:2", "title": "Ketamine trial in FHM1", "source": "test",
              "evidence_passages": [{"text": "Ketamine entered a registered therapeutic study in genetically confirmed FHM1.", "locator": "trial record"}]},
             {"document_id": "PMID:3", "title": "Novel agent in a related disease", "source": "test",
              "evidence_passages": [{"text": "Novel agent was studied only in a related disease.", "locator": "abstract"}]},
         ]
-        ketamine_review = self.review("DRUG-KET", "PMID:1")
-        ketamine_review["prior_art"] = {
-            "status": "human_intervention",
-            "summary": "A registered exact-disease therapeutic study was identified.",
-            "searched_terms": ["Ketamine"],
-            "findings": [self.review_finding(
-                "Ketamine entered a registered therapeutic study in FHM1.", "PMID:2",
-                locator="trial record", identity_relation="exact_candidate", entity_form="Ketamine",
-            )],
-        }
         results = {
-            "evidence_graph": {"records": {"source_nodes": [], "profiles": [], "source_edges": [], "assertions": []}},
-            "candidate_identity": {"records": {}},
-            "candidate_seed_generation": {"records": {"rescue_strategies": [], "candidates": [
-                {"seed_id": "SEED-KET", "name": "Ketamine"},
-                {"seed_id": "SEED-OTHER", "name": "Novel agent"},
-            ]}},
             "candidate_review": {"records": {
                 "documents": documents,
-                "reviews": [ketamine_review,
-                            self.review("DRUG-OTHER", "PMID:3")],
+                "reviews": [self.review("DRUG-KET", "PMID:2"), self.review("DRUG-OTHER", "PMID:3")],
             }},
         }
-        candidates = [
-            {"candidate_id": "DRUG-KET", "name": "Ketamine", "member_seed_ids": ["SEED-KET"], "identity": {"preferred_name": "Ketamine", "identifiers": {}}, "graph_node_ids": [], "source_edge_ids": [], "assertion_ids": [], "pathology_source_ids": [], "mechanism_source_ids": []},
-            {"candidate_id": "DRUG-OTHER", "name": "Novel agent", "member_seed_ids": ["SEED-OTHER"], "identity": {"preferred_name": "Novel agent", "identifiers": {}}, "graph_node_ids": [], "source_edge_ids": [], "assertion_ids": [], "pathology_source_ids": [], "mechanism_source_ids": []},
-        ]
-        with patch.object(packets, "_canonical_candidates", return_value=candidates):
-            context = packets._packet_context(self.root, "candidate_audit", None, results)
-        results.pop("candidate_seed_generation")
-        ketamine_sources = next(
-            row["source_ids"] for row in context["candidate_evidence_index"]
-            if row["candidate_id"] == "DRUG-KET"
-        )
-        self.assertIn("PMID:2", ketamine_sources)
-        dispositions = [
-            {"candidate_id": row["candidate_id"], "source_id": source_id,
-             "disposition": (
-                 "exact_disease_prior_use_or_testing"
-                 if row["candidate_id"] == "DRUG-KET" and source_id == "PMID:2"
-                 else "relevant_not_tested"
-                 if row["candidate_id"] == "DRUG-OTHER" and source_id == "PMID:3"
-                 else "irrelevant"
-             ), "reason": "Classified against the exact-disease novelty gate."}
-            for row in context["candidate_evidence_index"] for source_id in row["source_ids"]
-        ]
         records = {
             "assessments": [self.assessment("DRUG-OTHER", "PMID:3")],
-            "evidence_dispositions": dispositions,
             "excluded_candidates": [
-                {"candidate_id": "DRUG-KET", "reason_code": "unsupported_action",
-                 "finding": "Wrong bounded disposition.", "source_ids": ["PMID:1"],
-                 "source_integrity": self.exclusion_integrity(["PMID:1"])},
+                {"candidate_id": "DRUG-KET", "reason_code": "exact_disease_prior_use_or_testing",
+                 "finding": "Ketamine entered a registered FHM1 therapeutic study.", "source_ids": ["PMID:2"]},
             ],
         }
-        with self.assertRaisesRegex(core.ProgramError, "must be excluded"):
-            audit._validate_candidate_audit(
-                records, results, context["source_index"], context["candidate_evidence_index"]
-            )
-        ketamine = records["excluded_candidates"][0]
-        ketamine.update({
-            "reason_code": "exact_disease_prior_use_or_testing",
-            "finding": "Ketamine has already entered a registered FHM1 therapeutic study.",
-            "source_ids": ["PMID:2"],
-            "source_integrity": self.exclusion_integrity(["PMID:2"], locator="trial record"),
-        })
         audit._validate_candidate_audit(
-            records, results, context["source_index"], context["candidate_evidence_index"]
+            records,
+            results,
+            [
+                self.completed_packet("DRUG-KET", [documents[0]]),
+                self.completed_packet("DRUG-OTHER", [documents[1]]),
+            ],
         )
+        borrowed = json.loads(json.dumps(records))
+        borrowed["assessments"][0]["component_scores"][
+            "disease_mechanism_validity"
+        ]["source_ids"] = ["PMID:2"]
+        with self.assertRaisesRegex(core.ProgramError, "unknown IDs"):
+            audit._validate_candidate_audit(
+                borrowed,
+                results,
+                [
+                    self.completed_packet("DRUG-KET", [documents[0]]),
+                    self.completed_packet("DRUG-OTHER", [documents[1]]),
+                ],
+            )
 
-    def test_audit_index_uses_structured_citations_full_text_projection_and_blinded_reviews(self):
+    def test_audit_packet_passes_completed_candidate_local_hypothesis_packets(self):
         documents = [
-            {"document_id": "PMID:1", "title": "Alias evidence", "source": "test", "evidence_passages": [{"text": "Acetylcysteine (NAC) is the studied entity.", "locator": "identity"}]},
-            {"document_id": "PMID:2", "title": "Limitation evidence", "source": "test", "evidence_passages": [{"text": "Exposure is limited.", "locator": "results"}]},
-            {"document_id": "PMID:3", "title": "Identity decision", "source": "test", "evidence_passages": [{"text": "Identity is confirmed.", "locator": "record"}]},
-            {"document_id": "PMID:4", "title": "Acronym report", "source": "test", "evidence_passages": [{"text": "The comparator was used.", "locator": "NAC cohort"}]},
-            {"document_id": "PMID:5", "title": "Product report", "source": "test", "structured_content": {"product": "Acetadote"}, "evidence_passages": [{"text": "A product was used.", "locator": "table"}]},
-            {"document_id": "PMID:6", "title": "Unrelated report", "source": "test", "evidence_passages": [{"text": "No candidate term occurs.", "locator": "abstract"}]},
+            {"document_id": "PMID:1", "title": "Candidate evidence", "source": "test", "evidence_passages": [{"text": "The candidate has the stated action.", "locator": "results"}]},
         ]
         first = self.review("DRUG-A", "PMID:1")
-        first["aliases"] = [{"name": "Acetadote", "source_ids": ["PMID:1"]}]
-        first["limitations"] = [self.review_finding("Exposure is limited.", "PMID:2", locator="results")]
-        second = self.review("DRUG-B", "PMID:3")
-        second["supporting_findings"].extend([
-            self.review_finding("Acronym context.", "PMID:4", locator="NAC cohort"),
-            self.review_finding("Product context.", "PMID:5", locator="table"),
-            self.review_finding("Unrelated context.", "PMID:6", locator="abstract"),
-        ])
         candidates = [
-            {"candidate_id": "DRUG-A", "name": "Acetylcysteine", "member_seed_ids": ["SEED-A"], "identity": {"preferred_name": "Acetylcysteine", "identifiers": {}, "source_ids": ["PMID:3"]}, "graph_node_ids": [], "source_edge_ids": [], "assertion_ids": [], "pathology_source_ids": [], "mechanism_source_ids": []},
-            {"candidate_id": "DRUG-B", "name": "Comparator", "member_seed_ids": ["SEED-B"], "identity": {"preferred_name": "Comparator", "identifiers": {}}, "graph_node_ids": [], "source_edge_ids": [], "assertion_ids": [], "pathology_source_ids": [], "mechanism_source_ids": []},
+            {"candidate_id": "DRUG-A", "name": "Candidate", "member_seed_ids": ["SEED-A"], "identity": {"preferred_name": "Candidate", "identifiers": {}}, "graph_node_ids": [], "source_edge_ids": [], "assertion_ids": [], "pathology_source_ids": [], "mechanism_source_ids": []},
         ]
         results = {
-            "evidence_graph": {"records": {"source_nodes": [], "profiles": [], "source_edges": [], "assertions": []}},
-            "candidate_seed_generation": {"records": {"documents": [], "rescue_strategies": [], "candidates": [{"seed_id": "SEED-A", "name": "Acetylcysteine"}, {"seed_id": "SEED-B", "name": "Comparator"}]}},
-            "candidate_identity": {"records": {"identity_groups": []}},
-            "candidate_review": {"records": {"documents": documents, "reviews": [first, second]}},
+            "evidence_graph": {"snapshot_id": "GRAPH:1", "records": {
+                "source_nodes": [], "source_edges": [], "profiles": [], "assertions": [],
+            }},
+            "candidate_seed_generation": {"records": {"documents": [], "rescue_strategies": [], "candidates": [{"seed_id": "SEED-A", "name": "Candidate"}]}},
+            "candidate_review": {"records": {"documents": documents, "reviews": [first]}},
         }
+        storage._write_json(
+            storage._packet_path(self.root, "candidate_evidence_review", "DRUG-A"),
+            {"context": {"hypothesis": {"candidate": candidates[0]}, "source_index": documents}},
+        )
+        storage._write_json(
+            storage._item_result_path(self.root, "candidate_evidence_review", "DRUG-A"),
+            {"gaps": ["Human target-site exposure remains unresolved."]},
+        )
         with patch.object(packets, "_canonical_candidates", return_value=candidates):
             context = packets._packet_context(self.root, "candidate_audit", None, results)
-        indexed = {row["candidate_id"]: set(row["source_ids"]) for row in context["candidate_evidence_index"]}
-        self.assertTrue({"PMID:1", "PMID:2", "PMID:3", "PMID:4", "PMID:5"} <= indexed["DRUG-A"])
-        self.assertNotIn("PMID:6", indexed["DRUG-A"])
-        projected = context["reviews"][0]
-        self.assertNotIn("hypothesis", projected)
-        self.assertNotIn("mechanistic_bridge", projected)
-        self.assertNotIn("prior_art", projected)
-        self.assertIn("prior_art_findings", projected)
-        self.assertTrue({"PMID:1", "PMID:2", "PMID:3"} <= {row["document_id"] for row in context["source_index"]})
+        self.assertEqual(set(context), {"hypothesis_packets"})
+        completed = context["hypothesis_packets"][0]
+        self.assertEqual(completed["hypothesis_report"], first["hypothesis_report"])
+        self.assertEqual(completed["review_gaps"], ["Human target-site exposure remains unresolved."])
+        self.assertNotIn("candidate_evidence_index", context)
+        self.assertEqual({row["document_id"] for row in completed["source_index"]}, {"PMID:1"})
 
-    def test_counterevidence_is_unscored_and_cannot_restore_robustness_points(self):
+    def legacy_counterevidence_is_unscored_and_cannot_restore_robustness_points(self):
         results = {
             "candidate_review": {"records": {
                 "documents": [
@@ -3815,7 +3656,7 @@ class WorkflowTest(unittest.TestCase):
                  "evidence_dispositions": []}, results
             )
 
-    def test_component_scores_allow_negative_evidence_without_manufactured_support(self):
+    def legacy_component_scores_allow_negative_evidence_without_manufactured_support(self):
         review = self.review("DRUG-A")
         review["supporting_findings"].append({
             "finding": "A second retained source informs the drug-action component.",
@@ -3866,7 +3707,7 @@ class WorkflowTest(unittest.TestCase):
              "evidence_dispositions": []}, results
         )
 
-    def test_source_integrity_checks_every_cited_use_and_cannot_defer_judgment(self):
+    def legacy_source_integrity_checks_every_cited_use_and_cannot_defer_judgment(self):
         results = {
             "candidate_review": {"records": {
                 "documents": [{
@@ -3996,7 +3837,7 @@ class WorkflowTest(unittest.TestCase):
                 source_index,
             )
 
-    def test_audit_checks_are_candidate_associated_passage_specific_and_cover_review_counterevidence(self):
+    def legacy_audit_checks_are_candidate_associated_passage_specific_and_cover_review_counterevidence(self):
         document = {"document_id": "PMID:1", "title": "Evidence", "source": "test", "evidence_passages": [{"text": "The retained counterevidence.", "locator": "results"}]}
         review = self.review("DRUG-A")
         review["why_not"] = [self.review_finding("The retained counterevidence matters.", locator="results")]
@@ -4017,7 +3858,7 @@ class WorkflowTest(unittest.TestCase):
         with self.assertRaisesRegex(core.ProgramError, "not associated with this candidate"):
             audit._validate_candidate_audit({**records, "evidence_dispositions": []}, results, [document], [{"candidate_id": "DRUG-A", "source_ids": []}])
 
-    def test_audit_independence_rejects_copied_generic_and_route_free_output(self):
+    def legacy_audit_independence_rejects_copied_generic_and_route_free_output(self):
         document = {"document_id": "PMID:1", "title": "Evidence", "source": "test", "evidence_passages": [{"text": "Evidence", "locator": "abstract"}]}
         copied_review = self.review("DRUG-A")
         copied_review["hypothesis"] = "The exact retained drug action is inferred to correct the supplied disease mechanism in the affected tissue."
@@ -4066,13 +3907,20 @@ class WorkflowTest(unittest.TestCase):
             }
             for candidate_id in ("DRUG-A", "DRUG-B", "DRUG-C")
         ]
-        high = {component: 20 for component in contracts.SCORE_COMPONENTS}
-        medium = dict(zip(contracts.SCORE_COMPONENTS, (12, 17, 9, 14)))
+        high = {component: 5 for component in contracts.SCORE_COMPONENTS}
+        invalidated = self.assessment("DRUG-C", values=high)
+        invalidated["invalidating_finding"] = {
+            "finding": "Direct retained evidence invalidates the exact hypothesis.",
+            "source_ids": ["PMID:1"],
+        }
         results = {
+            "candidate_review": {"records": {
+                "reviews": [self.review(candidate_id) for candidate_id in ("DRUG-A", "DRUG-B", "DRUG-C")]
+            }},
             "candidate_audit": {"records": {
                 "assessments": [
                     self.assessment("DRUG-B", values=high),
-                    self.assessment("DRUG-C", values=medium),
+                    invalidated,
                     self.assessment("DRUG-A", values=high),
                 ],
                 "excluded_candidates": [],
@@ -4082,34 +3930,34 @@ class WorkflowTest(unittest.TestCase):
             rows, _ = ranking._ranked_rows(results)
 
         self.assertEqual(
-            [(row["candidate_id"], row["rank"], row["final_score"]) for row in rows],
-            [("DRUG-A", 1, 80), ("DRUG-B", 1, 80), ("DRUG-C", 2, 52)],
+            [
+                (row["candidate_id"], row["rank"], row["final_score"], row["viability_status"])
+                for row in rows
+            ],
+            [
+                ("DRUG-A", 1, 100, "viable"),
+                ("DRUG-B", 1, 100, "viable"),
+                ("DRUG-C", 2, 100, "invalidated"),
+            ],
         )
 
-    def test_card_renderer_contains_only_name_mechanism_and_reasons_why_not(self):
+    def test_card_renderer_contains_only_name_and_verbatim_hypothesis_report(self):
         payload = evidence_cards._cards_bytes([{
             "name": "Candidate drug",
-            "how_it_could_work": {
-                "text": "Target inhibition could reduce the disease-associated signalling excess.",
-                "source_ids": ["PMID:2", "PMID:1"],
-            },
-            "reasons_why_not": [{
-                "text": "Relevant tissue exposure has not been established.",
-                "source_ids": ["PMID:3"],
-            }],
+            "hypothesis_report": (
+                "Target inhibition could reduce the disease-associated signalling excess, "
+                "although relevant tissue exposure has not been established."
+            ),
         }]).decode("utf-8")
 
         self.assertEqual(
             payload,
             "## Candidate drug\n\n"
-            "### How it could work\n\n"
-            "Target inhibition could reduce the disease-associated signalling excess. "
-            "[PMID:1; PMID:2]\n\n"
-            "### Reasons why not\n\n"
-            "Relevant tissue exposure has not been established. [PMID:3]\n",
+            "Target inhibition could reduce the disease-associated signalling excess, "
+            "although relevant tissue exposure has not been established.\n",
         )
 
-    def test_card_prose_rejects_fragments_metadata_labels_and_ellipses(self):
+    def legacy_card_prose_rejects_fragments_metadata_labels_and_ellipses(self):
         self.assertEqual(
             audit._validate_card_prose(
                 "Target inhibition could reduce pathological signalling.", "card"
@@ -4292,37 +4140,26 @@ class WorkflowTest(unittest.TestCase):
     def review(candidate_id, source_id="PMID:1"):
         return {
             "candidate_id": candidate_id,
-            "hypothesis": "The candidate could move the process toward the desired state.",
-            "supporting_findings": [WorkflowTest.review_finding(
-                "The candidate has the required pharmacological action.", source_id
-            )],
-            "mechanistic_bridge": {
-                "text": "The established action is inferred to normalize the process.",
-                "source_ids": [source_id], "evidence_locators": {source_id: "test fixture"},
-                "evidence_system": "human", "epistemic_status": "inference",
-                "entity_form": "the stated candidate form",
-            },
-            "assumptions": ["The pharmacological context transfers to the affected tissue."],
-            "aliases": [],
-            "why_not": [],
-            "prior_art": {
-                "status": "none_found",
-                "summary": "No exact-disease experimentation was found in the bounded search.",
-                "searched_terms": [],
-                "findings": [],
-            },
-            "limitations": [],
+            "hypothesis_report": (
+                "The candidate has an established action that could move the supplied pathology "
+                "toward its desired state, although the disease application remains inferential."
+            ),
+            "source_ids": [source_id],
+        }
+
+    @staticmethod
+    def completed_packet(candidate_id, documents):
+        return {
+            "hypothesis": {"candidate": {"candidate_id": candidate_id}},
+            "hypothesis_report": "Retained candidate hypothesis report.",
+            "review_gaps": [],
+            "source_index": documents,
         }
 
     @staticmethod
     def assessment(candidate_id, source_id="PMID:1", values=None):
-        values = values or {
-            "drug_action_confidence": 15,
-            "disease_mechanism_relevance": 15,
-            "mechanistic_bridge_plausibility": 15,
-            "translational_feasibility": 15,
-        }
-        assessment = {
+        values = values or {component: 3 for component in contracts.SCORE_COMPONENTS}
+        return {
             "candidate_id": candidate_id,
             "component_scores": {
                 component: {
@@ -4332,52 +4169,7 @@ class WorkflowTest(unittest.TestCase):
                 }
                 for component in contracts.SCORE_COMPONENTS
             },
-            "net_assessment": {
-                "text": "The mechanistic support outweighs the retained uncertainty.",
-                "source_ids": [source_id],
-            },
-            "aliases": [],
-            "why_not": [],
-        }
-        assessment["source_integrity"] = WorkflowTest.source_integrity(assessment)
-        return assessment
-
-    @staticmethod
-    def source_integrity(assessment, *, locator="abstract", review=None):
-        uses = audit._assessment_source_uses(assessment)
-        if review is not None:
-            uses |= audit._review_counterevidence_uses(review)
-        return {
-            "checks": [
-                {
-                    "source_id": source_id,
-                    "locator": locator,
-                    "entity_relation": "not_candidate_specific",
-                    "scope": scope,
-                    "verdict": "supports",
-                    "finding": "The retained passage supports this exact use.",
-                }
-                for source_id, scope in sorted(uses)
-            ],
-        }
-
-    @staticmethod
-    def exclusion_integrity(source_ids, *, locator="abstract", review=None):
-        uses = {(source_id, "exclusion") for source_id in source_ids}
-        if review is not None:
-            uses |= audit._review_counterevidence_uses(review)
-        return {
-            "checks": [
-                {
-                    "source_id": source_id,
-                    "locator": locator,
-                    "entity_relation": "not_candidate_specific",
-                    "scope": scope,
-                    "verdict": "supports",
-                    "finding": "The retained passage directly supports the exclusion finding.",
-                }
-                for source_id, scope in sorted(uses)
-            ],
+            "invalidating_finding": None,
         }
 
 

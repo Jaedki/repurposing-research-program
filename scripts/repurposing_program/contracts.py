@@ -106,60 +106,95 @@ DISTINCT_MECHANISM_FIELDS = (
     "limitations", "source_ids",
 )
 _CITATION_FIELDS = frozenset({"source_ids", "pathology_source_ids", "mechanism_source_ids"})
-_SOURCE_CHECK_VERDICTS = frozenset({
-    "supports", "partly_supports", "does_not_support", "contradicts",
-})
-EVIDENCE_SYSTEMS = frozenset({"human", "animal", "cell", "biochemical", "authoritative_database"})
-EPISTEMIC_STATUSES = frozenset({"direct_observation", "inference"})
-ENTITY_RELATIONSHIPS = frozenset({"exact_candidate", "same_active_moiety", "related_form", "class_or_analogue", "not_candidate_specific", "unresolved"})
-SCORE_MIN = 1
-SCORE_MAX = 20
+SCORE_MIN = 0
+SCORE_MAX = 5
+SCORE_SCALE = 4
+SCORE_ANCHORS = {
+    0: "Reliable evidence directly contradicts or invalidates the premise.",
+    1: "The premise is largely unsupported or rests on a central speculative assumption.",
+    2: "The premise is scientifically plausible but supported mainly indirectly.",
+    3: "The premise is credibly supported with material unresolved assumptions.",
+    4: "The premise has strong, relevant, reasonably triangulated support.",
+    5: "The premise has exceptional direct and independently supported evidence.",
+}
 SCORE_COMPONENT_RUBRIC = {
-    "drug_action_confidence": {
-        "label": "Drug-action confidence",
-        "question": "How securely is the proposed action established for this exact drug?",
+    "disease_mechanism_validity": {
+        "label": "Disease-mechanism validity and actionability",
+        "question": "Independent of the drug, is the pathological state a material and potentially modifiable part of the disease?",
+        "consider": "Causality, human pathology, natural history, perturbational support, timing, actionability, and contradictions; human genetics is useful but not mandatory.",
+        "anchors": {
+            1: "Generic association, expression change, biomarker, or broad pathway label.",
+            3: "Credible disease-specific evidence supports a plausible actionable role.",
+            5: "Compelling human causal or equivalent disease-specific evidence establishes an actionable process.",
+        },
     },
-    "disease_mechanism_relevance": {
-        "label": "Disease-mechanism relevance",
-        "question": "Independent of the drug, how securely does the focal mechanism belong to disease pathology?",
+    "directional_rescue_logic": {
+        "label": "Directional rescue logic and biological context",
+        "question": "Would the proposed intervention move disease biology beneficially in the relevant context?",
+        "consider": "Direction, causal distance, tissue, cell state, stage, timing, compensation, and cited graph context. Novel indirect routes may score highly when every material link is supported and falsifiable.",
+        "anchors": {
+            1: "Generic benefit language or a long unsupported causal chain.",
+            3: "A coherent cited directional bridge with explicit material assumptions.",
+            5: "The relevant perturbation is directly shown to rescue the pathological process in context.",
+        },
     },
-    "mechanistic_bridge_plausibility": {
-        "label": "Mechanistic-bridge plausibility",
-        "question": "How well does the drug action connect directionally to the desired disease state?",
+    "exact_drug_pharmacology": {
+        "label": "Exact-drug pharmacological support",
+        "question": "Does this exact candidate reliably produce the action required by the hypothesis?",
+        "consider": "Active entity, functional potency, direction, selectivity or polypharmacology, engagement, mediation, metabolites, and reproducible target-independent phenotypes where appropriate.",
+        "anchors": {
+            1: "Database annotation, class inference, docking, or prediction without exact-drug confirmation.",
+            3: "Established exact-drug functional action with relevant potency but incomplete engagement or mediation.",
+            5: "Direct engagement and causal mediation are established in the relevant biological system.",
+        },
     },
-    "translational_feasibility": {
-        "label": "Translational feasibility",
-        "question": "Can relevant action plausibly be achieved in the needed tissue, dose, route, and timing?",
+    "exposure_feasibility": {
+        "label": "Exposure and translational feasibility",
+        "question": "Can the required action plausibly occur at the relevant biological site in humans?",
+        "consider": "Attained unbound exposure, functional potency, tissue access, route, duration, metabolites, accumulation, local delivery, occupancy, and proximal pharmacodynamics. Missing PK lowers rather than blocks the score.",
+        "anchors": {
+            1: "Available evidence makes relevant exposure doubtful but not conclusively impossible.",
+            2: "Relevant exposure is materially unknown without demonstrated impossibility.",
+            3: "Attained human exposure and pharmacology make biological reach plausible with quantitative uncertainty.",
+            5: "Human target-site exposure, engagement, or proximal pharmacodynamics directly supports the required action.",
+        },
+    },
+    "empirical_translation": {
+        "label": "Integrated empirical and translational support",
+        "question": "Is there drug-specific evidence that the complete hypothesis produces a relevant beneficial phenotype?",
+        "consider": "Human-derived systems, disease models, adjacent or direct human evidence, independent convergence, nulls, failed replication, artefacts, and rival explanations. Prior disease-drug evidence is not required.",
+        "anchors": {
+            1: "Only computational prediction, a mismatched model, or a weak uncontrolled observation supports the phenotype.",
+            3: "A relevant drug-specific phenotype or strong adjacent human precedent exists with material limitations.",
+            5: "Direct or independently replicated human or exceptionally persuasive human-relevant evidence supports benefit at plausible exposure.",
+        },
     },
 }
 SCORE_COMPONENTS = tuple(SCORE_COMPONENT_RUBRIC)
-MAX_SCORE = SCORE_MAX * len(SCORE_COMPONENTS)
+MAX_SCORE = SCORE_SCALE * SCORE_MAX * len(SCORE_COMPONENTS)
 SCORE_RUBRIC = {
     "method": (
-        f"Score each of the {len(SCORE_COMPONENTS)} distinct components with any integer from "
-        f"{SCORE_MIN} (weakest) through {SCORE_MAX} (strongest), then "
-        f"sum the values without weighting. The total is a prioritisation score out of "
-        f"{MAX_SCORE}, not a probability of efficacy. Counterevidence earns no points: lower "
-        "any component whose premise it directly challenges, and otherwise retain it as an "
-        "unscored reservation."
+        f"Score each of the {len(SCORE_COMPONENTS)} categories with one integer from "
+        f"{SCORE_MIN} through {SCORE_MAX}. Python multiplies their unweighted sum by "
+        f"{SCORE_SCALE} to produce a comparative priority score out of {MAX_SCORE}, not a "
+        "probability of efficacy."
     ),
+    "anchors": SCORE_ANCHORS,
     "components": SCORE_COMPONENT_RUBRIC,
+    "rules": [
+        "Score the net evidence in each category, including the strongest relevant counterevidence.",
+        "Missing evidence is not contradiction, and absent prior disease-drug testing is not a penalty by itself.",
+        "Apply one finding to the category whose premise it directly tests; do not award or deduct the same substantive finding twice.",
+        "Computational or graph evidence may strengthen convergence but graph proximity, labels, docking, or prediction alone cannot establish a high score.",
+        "Use invalidating_finding only when retained evidence directly disproves the exact hypothesis; weak, missing, indirect, or uncertain evidence never qualifies.",
+    ],
+    "invalidating_finding": (
+        "Set to null unless retained evidence directly establishes that the exact drug does not "
+        "perform the required action, acts in the harmful direction without a supported alternative "
+        "route, cannot reach the required biological exposure, failed a decisive mechanism-informative "
+        "test, or produces only an established artefact. Preserve the score when such a finding exists."
+    ),
 }
-PRIOR_ART_STATUSES = frozenset({
-    "none_found",
-    "preclinical_only",
-    "human_intervention",
-    "established_use",
-    "unclear",
-})
-def _review_finding_contract(text_field: str, *, prior_art: bool = False) -> dict[str, Any]:
-    required = [text_field, "source_ids", "evidence_locators", "evidence_system", "epistemic_status", "entity_form"]
-    fields = {text_field: {"type": "non-empty string"}, "source_ids": {"type": "non-empty list of non-empty strings"}, "evidence_locators": {"type": "object"}, "evidence_system": {"allowed_values": sorted(EVIDENCE_SYSTEMS)}, "epistemic_status": {"allowed_values": sorted(EPISTEMIC_STATUSES)}, "entity_form": {"type": "non-empty string"}}
-    if prior_art: required.append("identity_relation"); fields["identity_relation"] = {"allowed_values": sorted(ENTITY_RELATIONSHIPS - {"not_candidate_specific", "unresolved"})}
-    return {"required_fields": required, "additional_fields": False, "field_contracts": fields}
-REVIEW_FINDING_CONTRACT, REVIEW_BRIDGE_CONTRACT, PRIOR_ART_FINDING_CONTRACT = _review_finding_contract("finding"), _review_finding_contract("text"), _review_finding_contract("finding", prior_art=True)
-REVIEW_CONTRACT = {"hypothesis": {"type": "non-empty string"}, "supporting_findings": {"type": "non-empty list of objects", **REVIEW_FINDING_CONTRACT}, "mechanistic_bridge": {"type": "object", **REVIEW_BRIDGE_CONTRACT}, "assumptions": {"type": "list of non-empty strings"}, "why_not": {"type": "list of objects", **REVIEW_FINDING_CONTRACT}, "prior_art": {"type": "object", "required_fields": ["status", "summary", "searched_terms", "findings"], "additional_fields": False, "field_contracts": {"status": {"allowed_values": sorted(PRIOR_ART_STATUSES)}, "summary": {"type": "non-empty string"}, "searched_terms": {"type": "list of non-empty strings"}, "findings": {"type": "list of objects", **PRIOR_ART_FINDING_CONTRACT}}}, "aliases": {"type": "list of objects", "required_fields": ["name", "source_ids"], "additional_fields": False, "field_contracts": {"name": {"type": "non-empty string"}, "source_ids": {"type": "non-empty list of non-empty strings"}}}, "limitations": {"type": "list of objects", **REVIEW_FINDING_CONTRACT}}
-SOURCE_INTEGRITY_CONTRACT = {"type": "object", "required_fields": ["checks"], "additional_fields": False, "field_contracts": {"checks": {"type": "list of objects", "required_fields": ["source_id", "locator", "entity_relation", "scope", "verdict", "finding"], "additional_fields": False, "field_contracts": {field: {"type": "non-empty string"} for field in ("source_id", "locator", "entity_relation", "scope", "finding")} | {"verdict": {"allowed_values": sorted(_SOURCE_CHECK_VERDICTS)}}}}}
 SEED_EXCLUSION_REASONS = frozenset({"no_established_action", "wrong_or_opposite_action", "invalid_entity", "duplicate_seed", "direct_derivation_contamination"})
 AUDIT_EXCLUSION_POLICY = {
     "exact_disease_prior_use_or_testing": (
@@ -172,18 +207,6 @@ AUDIT_EXCLUSION_POLICY = {
         "patent, computational prediction, related-disease study, class-level analogue, incidental "
         "exposure, or unresolved identity does not establish exact-disease testing."
     ),
-    "unsupported_action": (
-        "The retained corpus contains no credible direct support that the exact candidate has the "
-        "proposed drug action; missing downstream disease evidence alone does not qualify."
-    ),
-    "opposite_action": (
-        "The established drug action is directionally opposite to the seed-stage rescue strategy and "
-        "the retained corpus supplies no coherent compensatory rationale."
-    ),
-    "impossible_translational_feasibility": (
-        "The retained corpus demonstrates that relevant action or exposure cannot be achieved; "
-        "difficulty, missing data, or uncertainty does not qualify."
-    ),
     "invalid_candidate": (
         "The retained corpus establishes that the entity is not an existing drug or administered "
         "intervention suitable for repurposing, such as a placebo, vehicle, or sham; unresolved "
@@ -191,10 +214,6 @@ AUDIT_EXCLUSION_POLICY = {
     ),
 }
 AUDIT_EXCLUSION_REASONS = frozenset(AUDIT_EXCLUSION_POLICY)
-EVIDENCE_DISPOSITIONS = frozenset({
-    "exact_disease_prior_use_or_testing", "relevant_not_tested",
-    "name_collision", "irrelevant",
-})
 LANDSCAPE_PROPOSAL_TYPES = frozenset({
     "driver", "mechanism", "phenotype", "biomarker", "context",
 })
@@ -475,66 +494,29 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
         "collections": ["documents", "identity_groups"],
     },
     "candidate_evidence_review": {
-        "role": "pathology-concept candidate evidence reviewer",
+        "role": "candidate hypothesis auditor and scientific report writer",
         "task": (
-            "Treat the supplied frozen pathology profiles, candidate-linked rescue strategies, and "
-            "candidate-specific selected_graph_evidence "
-            "as authoritative disease context. Its assertions are exactly those selected by assertion_id; "
-            "its source edges are exactly those selected by source_edge_id. For each candidate, use its strategy_ids to select only matching rows "
-            "from context.rescue_strategies; do not combine it with another candidate's strategy. Do "
-            "not infer graph support from evidence outside that projection. For "
-            "every candidate, first retrieve primary or authoritative sources that verify identity, "
-            "target and action, pharmacology, relevant exposure, and measurable readouts, then map "
-            "those facts to the supplied pathology. Build an evidence dossier rather than a score "
-            "or eligibility decision: state the hypothesis, passage-specific supporting findings, a cited "
-            "mechanistic bridge, its explicit assumptions, passage-specific why-not findings, and cited limitations. "
-            "A long or unconventional bridge remains a valid hypothesis when its assumptions are "
-            "clear. Only after constructing the mechanism, assess exact-disease prior art through "
-            "ordinary literature discovery to evidence saturation across every supplied prior_art_term, "
-            "every newly supported alias, and the disease and gene names. Separate exact-candidate, "
-            "same-active-moiety, related-form, and class-or-analogue findings. "
-            "The controller alone owns canonical PMID, PMCID, and DOI identity and title verification "
-            "during validation and submission. Classify "
-            "it as none found, preclinical only, human intervention, established use, or unclear. "
-            "For any prior art, retain enough detail to establish exact candidate identity, exact "
-            "disease or subtype, and whether the candidate was deliberately tested with a "
-            "disease-relevant endpoint or entered a registered therapeutic study. Study quality, "
-            "controls, and outcome do not restore repurposing novelty. "
-            "Preserve decision-changing negative evidence. Report safety only when it opposes the "
-            "desired phenotype, prevents relevant exposure, confounds the readout, or changes "
-            "prioritisation. Record only drug names or salt forms explicitly used in cited evidence."
+            "Use the complete single-candidate hypothesis in context.hypothesis. Research whether "
+            "it is scientifically viable, checking the exact drug action, disease mechanism, proposed "
+            "directional bridge, relevant exposure, empirical translation, material positive and "
+            "negative findings, artefacts, rival explanations, and exact-disease prior use or testing. "
+            "Write one balanced, natural scientific paragraph that explains the "
+            "hypothesis, evidential basis, inferential step, and material limitations without field "
+            "labels, scoring, or templated why-not prose. Cite the retained sources in the paragraph "
+            "and list their IDs separately for internal validation; that metadata is not public output."
         ),
         "collections": ["documents", "reviews"],
     },
     "candidate_audit": {
-        "role": "independent candidate auditor",
+        "role": "candidate scorer and bounded exclusion reviewer",
         "task": (
-            "Use only the supplied retained corpus; do not search for or add evidence. Independently "
-            "inspect the supplied evidence passages, abstracts, structured source content, raw-source "
-            "references, and frozen graph rather than restating each dossier. Partition every candidate exactly "
-            "once into a scored assessment or a cited exclusion. Match each candidate's strategy_ids "
-            "to context.rescue_strategies and assess only those strategies for that candidate. Exclude "
-            "only established exact-"
-            "disease use, any confirmed exact-disease testing or registered therapeutic study, "
-            "unsupported proposed drug action, action "
-            "clearly opposite to the seed-stage rescue strategy without compensation, demonstrated impossibility "
-            "of relevant action or exposure, or an invalid candidate class. Unresolved identity, "
-            "weak evidence, long causal distance, uncertain exposure, related-disease evidence, and "
-            "material assumptions remain scored with explicit why-not findings. For every assessment and "
-            "exclusion, decide whether each cited source supports, partly supports, does not support, or "
-            "contradicts the exact place it is used, naming the retained locator and entity relationship. "
-            "Reconstruct the argument independently; copied dossier conclusions or repeated generic findings are invalid. "
-            "Counterevidence earns no points: lower any component whose premise "
-            "it directly challenges; if it does not challenge a scored premise, retain it only as an "
-            "unscored why-not finding. Assign one cited integer score from 1 through 20 "
-            "for each of drug-action confidence, disease-mechanism relevance, mechanistic-bridge "
-            "plausibility, and translational feasibility. Populate net_assessment and why_not as the "
-            "final-card prose defined in their field rules. "
-            "Python computes the raw total "
-            "and ranking. Return audited aliases for provenance and concise, cited why-not findings for "
-            "the final card."
+            "Compare the supplied completed candidate hypothesis packets; do not search or rewrite "
+            "their scientific prose. Partition every candidate once into an assessment or a programme-"
+            "eligibility exclusion. Apply the supplied five-category rubric using only that candidate's "
+            "packet and sources. Weak evidence, uncertain exposure, long causal distance, and material "
+            "assumptions reduce scores rather than force exclusion. Python computes the ranking."
         ),
-        "collections": ["assessments", "excluded_candidates", "evidence_dispositions"],
+        "collections": ["assessments", "excluded_candidates"],
     },
 }
 
@@ -925,34 +907,21 @@ ROW_SCHEMAS = {
         "field_types": {"identifiers": "object", "rejected_identifiers": "object", "ambiguous_identifiers": "object", "related_names": "list"},
     },
     "reviews": {
-        "required_fields": [
-            "candidate_id", "hypothesis", "supporting_findings", "mechanistic_bridge",
-            "assumptions", "why_not", "prior_art", "aliases", "limitations",
-        ],
-        "additional_fields": False,
-        "field_contracts": REVIEW_CONTRACT,
-    },
-    "assessments": {
-        "required_fields": [
-            "candidate_id", "source_integrity", "component_scores", "net_assessment",
-            "aliases", "why_not",
-        ],
-        "additional_fields": False,
-        "field_contracts": {"source_integrity": SOURCE_INTEGRITY_CONTRACT, "aliases": {"type": "list of objects", "required_fields": ["name", "source_ids"], "additional_fields": False}, "why_not": {"type": "list of objects", "required_fields": ["text", "source_ids"], "additional_fields": False}},
-    },
-    "excluded_candidates": {
-        "required_fields": [
-            "candidate_id", "reason_code", "finding", "source_ids", "source_integrity",
-        ],
-        "additional_fields": False,
-        "field_contracts": {"source_integrity": SOURCE_INTEGRITY_CONTRACT, "reason_code": {"allowed_values": sorted(AUDIT_EXCLUSION_REASONS)}},
-    },
-    "evidence_dispositions": {
-        "required_fields": ["candidate_id", "source_id", "disposition", "reason"],
+        "required_fields": ["candidate_id", "hypothesis_report", "source_ids"],
         "additional_fields": False,
         "field_contracts": {
-            "disposition": {"allowed_values": sorted(EVIDENCE_DISPOSITIONS)}
+            "hypothesis_report": {"type": "non-empty string"},
+            "source_ids": {"type": "non-empty list of non-empty strings"},
         },
+    },
+    "assessments": {
+        "required_fields": ["candidate_id", "component_scores", "invalidating_finding"],
+        "additional_fields": False,
+    },
+    "excluded_candidates": {
+        "required_fields": ["candidate_id", "reason_code", "finding", "source_ids"],
+        "additional_fields": False,
+        "field_contracts": {"reason_code": {"allowed_values": sorted(AUDIT_EXCLUSION_REASONS)}},
     },
 }
 
@@ -1189,75 +1158,25 @@ FIELD_RULES = {
         "until authoritative evidence resolves them",
     ],
     "candidate_evidence_review": [
-        "return exactly one review for every candidate in the supplied batch and no others",
-        "for each candidate, match candidate.strategy_ids exactly to context.rescue_strategies."
-        "strategy_id and do not use strategies linked only to another candidate",
-        "use only the candidate-specific selected_graph_evidence supplied for graph support: assertions "
-        "match selected assertion_ids exactly and source edges match selected source_edge_ids exactly",
-        "each review cites at least one document retained in this result through supporting_findings, "
-        "why_not, prior_art findings, or aliases",
-        "hypothesis is concise non-empty text; mechanistic_bridge is a passage-specific cited inference and never an exclusion gate",
-        "supporting_findings is a non-empty list of passage-specific material findings",
-        "each supporting, bridge, why-not, prior-art, and limitation finding records source_ids, one locator per source, evidence system, direct-observation or inference status, and the entity form studied",
-        "a locator copies evidence_passages.locator exactly or names retained abstract, supporting_text, structured_content, raw_path, snippets[n], or supports[n] content",
-        "assumptions is a list of non-empty strings; limitations is a list of cited material findings",
-        "aliases is a list of name and source_ids objects for drug names or salt forms explicitly "
-        "used in cited evidence; use an empty list when none are supported",
-        "why_not is a list of finding and source_ids objects containing only counterevidence "
-        "encountered during the existing review; use an empty list when absent and do not search "
-        "merely to populate it",
-        "prior_art has exactly status, summary, searched_terms, and findings; searched_terms covers every supplied prior-art term and supported alias; status is none_found, preclinical_only, "
-        "human_intervention, established_use, or unclear; positive statuses cite at least one finding",
-        "each prior-art finding classifies its identity relationship as exact_candidate, same_active_moiety, related_form, or class_or_analogue; only the first two can establish a positive prior-art status and no finding may contradict a known candidate identity relationship",
-        "none_found is a bounded search outcome, never proof that prior testing does not exist",
-        "preclinical_only includes deliberate exact-disease testing in an animal, cell, organoid, or "
-        "other disease-specific model; human_intervention includes actual human testing and a "
-        "registered exact-disease therapeutic study",
-        "the reviewer does not score, rank, or exclude candidates",
+        "the packet contains exactly one candidate under context.hypothesis",
+        "use only that candidate's linked strategies and supplied graph, question, and connection context",
+        "hypothesis_report is one natural scientific paragraph, not a field-labelled template",
+        "cover the proposed action, disease relevance, directional inference, material positive and "
+        "negative evidence, nulls, artefacts, rival explanations, exposure limitations, critical "
+        "unknowns, and exact-disease prior use when scientifically material",
+        "cite at least one newly retained document and list every cited source in source_ids",
+        "do not score, rank, or decide eligibility",
     ],
     "candidate_audit": [
         "assessments and excluded_candidates form a complete non-overlapping partition of every "
         "reviewed candidate",
-        "match each candidate.strategy_ids exactly to context.rescue_strategies.strategy_id before "
-        "judging whether the drug action supports or opposes its rescue route",
-        "evidence_dispositions covers every candidate-source pair in context.candidate_evidence_index "
-        "exactly once; exact_disease_prior_use_or_testing requires its matching exclusion",
-        "source_integrity has exactly checks; do not return a summary status or generic declaration",
-        "each source-integrity check has source_id, locator, a non-empty precise entity_relation description, scope, verdict, and finding and covers exactly "
-        "one source use in a component score, net assessment, `alias[n]`, indexed why-not "
-        "finding, supplied review counterevidence (`review_why_not[n]`), or exclusion; use the bare component name for component scope "
-        "and do not prefix it with component_scores.",
-        "verdict is supports, partly_supports, does_not_support, or contradicts; inspect the supplied "
-        "passage, abstract, structured source content, or raw source record at the named locator and make the decision now; "
-        "never defer the decision as needing re-verification",
-        "PMID, PMCID, and DOI aliases with the same canonical_publication_id are one source and "
-        "must not be cited as independent support within the same scope",
-        "component_scores has exactly drug_action_confidence, disease_mechanism_relevance, "
-        "mechanistic_bridge_plausibility, and translational_feasibility",
-        "each component has exactly value, reason, and source_ids; value is any integer from "
-        "1 through 20 and Python sums the four values without weighting",
-        "a component may be supported, unsupported, or contradicted by the retained corpus; a 20-point component has no does_not_support or contradicts checks",
-        "counterevidence never earns positive scoring credit; lower every component whose premise "
-        "it directly challenges and otherwise retain it only in why_not",
-        "net_assessment has exactly text and source_ids; its text uses complete sentences and "
-        "concise mechanistic prose that "
-        "connects established drug action to the relevant disease mechanism and predicted corrective "
-        "or compensatory effect, marks the repurposing step as an inference, and contains no score, "
-        "rank, audit metadata, source-verification commentary, field labels, clause fragments, "
-        "keyword lists, or ellipses standing in for omitted text",
-        "why_not contains text and source_ids for concise, cited, complete-sentence reasons against prioritisation, not "
-        "field labels, clause fragments, keyword lists, or ellipses; aliases remain provenance only "
-        "and do not enter final cards",
-        "excluded_candidates use a source-backed reason_code from the bounded exclusion policy and "
-        "verify every cited source under the exclusion scope",
-        "classify exact_disease_prior_use_or_testing whenever the exact candidate is an established "
-        "exact-disease use, was deliberately tested in the "
-        "exact disease or a disease-specific human, animal, cell, or organoid model with a "
-        "disease-relevant endpoint, or entered a registered exact-disease therapeutic study; outcome, "
-        "controls, quality, and interpretability do not restore novelty",
-        "proposals, reviews, patents, computational predictions, related-disease studies, class-level "
-        "analogues, incidental exposures, and unresolved identity are not "
-        "exact_disease_prior_use_or_testing",
+        "component_scores has exactly the five categories in score_rubric.components",
+        "each component has exactly value, reason, and source_ids; value is an integer from 0 "
+        "through 5 and Python scales the unweighted sum to 100",
+        "invalidating_finding is null or exactly finding and source_ids; use it only for direct "
+        "disproof under score_rubric.invalidating_finding and retain the candidate's scores",
+        "use the supplied hypothesis report without rewriting its prose",
+        "excluded_candidates use one cited programme-eligibility reason from the bounded exclusion policy",
         "do not exclude a candidate merely for unresolved identity, weak evidence, long causal "
         "distance, uncertain exposure, related-disease evidence, or material assumptions",
     ],

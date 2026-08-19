@@ -7,10 +7,10 @@ from typing import Any, Mapping
 
 from .contracts import SEED_EXCLUSION_REASONS, _COMPARATORS
 from .errors import ProgramError
-from .evidence import _all_documents, _cited_ids, _document_alias_index, _find, _rows
+from .evidence import _all_documents, _document_alias_index, _find, _rows
 from .graph import _graph_support_ids
 from .hypotheses import _connection_rows
-from .identity import _candidate_prior_art_terms, _candidate_queries, _canonical_candidates
+from .identity import _candidate_queries, _canonical_candidates
 from .pathology import _research_concepts
 from .validation import (
     _contract_rows,
@@ -83,9 +83,9 @@ def _review_batches(
     results: Mapping[str, Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     concept_ids = {str(row["concept_id"]) for row in _research_concepts(results)}
-    grouped: dict[str, list[str]] = {concept_id: [] for concept_id in concept_ids}
     candidates = _canonical_candidates(results)
     candidate_ids = _ids(candidates, "candidate_id", "candidates")
+    batches = []
     for candidate in candidates:
         candidate_id = str(candidate["candidate_id"])
         origin_ids = sorted(set(map(str, candidate.get("origin_concept_ids", []))))
@@ -98,17 +98,10 @@ def _review_batches(
         primary = min(origin_ids, key=lambda value: (value not in node_ids, value))
         if primary not in node_ids:
             raise ProgramError(f"Candidate {candidate_id} has no node in an origin concept")
-        grouped[primary].append(candidate_id)
-
-    batches = [
-        {"concept_id": concept_id, "candidate_ids": sorted(ids)}
-        for concept_id, ids in sorted(grouped.items())
-        if ids
-    ]
-    assigned = [candidate_id for batch in batches for candidate_id in batch["candidate_ids"]]
-    if len(assigned) != len(set(assigned)) or set(assigned) != candidate_ids:
+        batches.append({"candidate_id": candidate_id, "concept_id": primary})
+    if {row["candidate_id"] for row in batches} != candidate_ids:
         raise ProgramError("Review batches must partition every candidate exactly once")
-    return batches
+    return sorted(batches, key=lambda row: row["candidate_id"])
 
 
 def _validate_seed_item(
@@ -395,61 +388,20 @@ def _validate_seed_item(
             )
 
 
-def _validate_review_finding(value: Any, label: str, text_field: str, documents: Mapping[str, Mapping[str, Any]], extra_fields: set[str] | None = None) -> None:
-    row = value
-    refs = _references(row, "source_ids", set(documents), label)
-    locators = row["evidence_locators"]
-    if not isinstance(locators, Mapping) or set(map(str, locators)) != refs: raise ProgramError(f"{label}.evidence_locators must map every source_id exactly once")
-    bad_locator = next((source_id for source_id in refs if str(locators[source_id]) not in ({str(p.get("locator")) for p in documents[source_id].get("evidence_passages", []) if isinstance(p, Mapping)} | {field for field in ("abstract", "raw_path", "supporting_text", "structured_content") if documents[source_id].get(field)} | {f"{field}[{index}]" for field in ("snippets", "supports") for index, item in enumerate(documents[source_id].get(field, [])) if str(item).strip()})), None)
-    if bad_locator: raise ProgramError(f"{label}.evidence_locators[{bad_locator}] is not retained by that source")
-
-
 def _validate_review_item(
     records: Mapping[str, Any], item_id: str, results: Mapping[str, Mapping[str, Any]]
 ) -> None:
     documents = _validate_documents(records, canonical_ids=True)
     reviews = _contract_rows(records, "reviews", "candidate_id")
-    batch = _find(_review_batches(results), "concept_id", item_id)
-    expected_ids = set(map(str, batch["candidate_ids"]))
-    review_ids = {str(row["candidate_id"]) for row in reviews}
-    if review_ids != expected_ids:
-        raise ProgramError("candidate review must cover exactly the supplied batch candidates")
+    batch = _find(_review_batches(results), "candidate_id", item_id)
+    if {str(row["candidate_id"]) for row in reviews} != {str(batch["candidate_id"])}:
+        raise ProgramError("candidate review must cover exactly the supplied candidate")
     retained_ids = {str(row["document_id"]) for row in documents}
-    all_documents = [*_all_documents(results), *documents]
-    documents_by_id = _document_alias_index(all_documents)
-    source_ids = set(documents_by_id)
+    source_ids = set(_document_alias_index([*_all_documents(results), *documents]))
     for index, row in enumerate(reviews):
         label = f"reviews[{index}]"
-        _validate_review_finding(row["mechanistic_bridge"], f"{label}.mechanistic_bridge", "text", documents_by_id)
-        for collection in ("supporting_findings", "why_not", "limitations"):
-            for finding_index, finding in enumerate(row[collection]):
-                _validate_review_finding(finding, f"{label}.{collection}[{finding_index}]", "finding", documents_by_id)
-        if len({str(alias["name"]).casefold() for alias in row["aliases"]}) != len(row["aliases"]): raise ProgramError(f"{label}.aliases.name values must be unique")
-        for alias_index, alias in enumerate(row["aliases"]): _references(alias, "source_ids", source_ids, f"{label}.aliases[{alias_index}]")
-        prior_art = row["prior_art"]
-        if prior_art["status"] == "none_found" and not re.search(r"\b(?:search(?:es|ed|ing)?|locat(?:e|ed)|found|identified)\b", str(prior_art["summary"]), re.I):
-            raise ProgramError(f"{label}.prior_art.summary must describe the bounded search outcome")
-        for finding_index, finding in enumerate(prior_art["findings"]):
-            _validate_review_finding(finding, f"{label}.prior_art.findings[{finding_index}]", "finding", documents_by_id, {"identity_relation"})
-        candidate = next((value for value in _canonical_candidates(results) if str(value["candidate_id"]) == str(row["candidate_id"])), None) if "candidate_seed_generation" in results else None
-        expected_terms = [*(_candidate_prior_art_terms(candidate, results["candidate_seed_generation"]["records"]) if candidate else []), *(alias["name"] for alias in row["aliases"])]
-        if {value.casefold() for value in prior_art["searched_terms"]} != {str(value).casefold() for value in expected_terms}: raise ProgramError(f"{label}.prior_art.searched_terms must cover every supplied term and supported alias")
-        relation_terms = {str(term).casefold(): "exact_candidate" for term in (_candidate_prior_art_terms(candidate, results["candidate_seed_generation"]["records"]) if candidate else [])}
-        relation_terms.update({str(item["name"]).casefold(): str(item["relation"]) for item in (candidate or {}).get("identity", {}).get("related_names", [])})
-        for finding in prior_art["findings"]:
-            permitted = {relation for term, relation in relation_terms.items() if len(term) >= 3 and re.search(rf"(?<!\w){re.escape(term)}(?!\w)", str(finding["entity_form"]), re.I)}
-            if permitted and finding["identity_relation"] not in permitted: raise ProgramError(f"{label}.prior_art finding conflicts with the candidate identity relationship")
-        if prior_art["status"] in {
-            "preclinical_only", "human_intervention", "established_use"
-        } and not prior_art["findings"]:
-            raise ProgramError(
-                f"{label}.prior_art.findings must not be empty for status {prior_art['status']}"
-            )
-        if prior_art["status"] in {"preclinical_only", "human_intervention", "established_use"} and not any(finding["identity_relation"] in {"exact_candidate", "same_active_moiety"} for finding in prior_art["findings"]):
-            raise ProgramError(f"{label}.prior_art positive status requires exact-candidate or same-active-moiety evidence")
-        cited_ids = _cited_ids(row)
-        unknown = cited_ids - source_ids
-        if unknown:
-            raise ProgramError(f"{label} contains unknown source IDs: {sorted(unknown)}")
+        if not str(row["hypothesis_report"]).strip():
+            raise ProgramError(f"{label}.hypothesis_report must be non-empty")
+        cited_ids = _references(row, "source_ids", source_ids, label)
         if not cited_ids & retained_ids:
             raise ProgramError(f"{label} needs a cited document retained by this review")

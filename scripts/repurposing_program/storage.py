@@ -88,6 +88,8 @@ def _item_result_path(root: Path, task: str, item_id: str) -> Path:
 def _packet_path(root: Path, task: str, item_id: str | None = None) -> Path:
     if item_id is None:
         return root / "packets" / f"{task}.json"
+    if task == "candidate_evidence_review":
+        return root / "packets" / "items" / task / _item_token(item_id) / "hypothesis_packet.json"
     return root / "packets" / "items" / task / f"{_item_token(item_id)}.json"
 
 

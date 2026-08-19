@@ -41,7 +41,7 @@ def _write_output_files(
         for row in rows
     ]
     _write_once(outputs / "candidates.csv", _csv_bytes(csv_rows, list(csv_rows[0])))
-    card_rows = _evidence_card_rows(rows, results)
+    card_rows = _evidence_card_rows(rows)
     _write_once(outputs / "candidate_cards.md", _cards_bytes(card_rows))
     excluded_rows = _excluded_candidate_rows(results, candidates)
     exclusion_fields = ["candidate_id", "name", "reason_code", "finding", "source_ids"]
@@ -89,6 +89,7 @@ def _write_output_files(
     candidate_node_ids = {
         str(candidate_id): set(map(str, candidate["graph_node_ids"]))
         for candidate_id, candidate in candidates.items()
+        if candidate_id in {str(row["candidate_id"]) for row in rows}
     }
     candidate_ids_by_node = {
         str(node["node_id"]): sorted(
@@ -150,9 +151,9 @@ def _write_output_files(
         f"Candidates using context-only nodes: {context_only_candidates}.\n\n"
         "Candidate nomination did not require a prior disease-drug literature association. "
         f"Audited candidates were ranked by an unweighted sum of "
-        f"{len(SCORE_COMPONENTS)} 20-point components out of {MAX_SCORE}; "
-        "exact-disease established use or prior testing and other bounded decisive failures were "
-        "exclusionary.\n\n"
+        f"{len(SCORE_COMPONENTS)} five-point categories scaled to {MAX_SCORE}; "
+        "directly invalidated hypotheses rank after viable hypotheses, while exact-disease prior "
+        "testing and invalid entities remain programme-eligibility exclusions.\n\n"
         f"{EXPERIMENTAL_USE_POLICY}\n"
     )
     _write_once(outputs / "summary.md", summary.encode("utf-8"))

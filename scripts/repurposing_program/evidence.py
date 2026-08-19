@@ -304,10 +304,9 @@ def _cited_documents(records: Mapping[str, Any]) -> list[dict[str, Any]]:
 def _all_documents(results: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Return the retained downstream corpus, not every accepted discovery document.
 
-    Asta and Undermind discovery papers are projected selectively into the frozen graph after
-    curation. Global question and connection research is a discovery aid for seed workers, not a
-    downstream evidence shortcut. Directly unioning those results here would retain sources that
-    no candidate or strategy independently used.
+    Asta and Undermind papers are projected selectively into the frozen graph after curation.
+    Global question and connection research is not unioned directly; candidate review aggregation
+    carries forward only sources cited by a completed candidate hypothesis packet.
     """
     return _merge_documents(
         (

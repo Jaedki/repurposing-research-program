@@ -16,8 +16,8 @@
 | `pathology_hypothesis_synthesis` | One global agent | Defensible claim-anchored connections, or an explicit empty set |
 | `candidate_seed_generation` | Python after item work | One accepted seed result per research concept and deterministic aggregation |
 | `candidate_identity` | Python plus one bounded agent when needed | Complete resolution or explicit retention of every identity residue |
-| `candidate_review` | Python after item work | One accepted dossier per assigned canonical candidate |
-| `candidate_audit` | One independent agent, then Python | Exact candidate partition, at least one assessment, and deterministic ordering |
+| `candidate_review` | Python after item work | One accepted scientific hypothesis report per canonical candidate |
+| `candidate_audit` | One scoring agent, then Python | Exact candidate partition, at least one assessment, and deterministic ordering |
 
 Within the three item barriers, `next` selects the first missing item from a stable sorted manifest.
 `graph-context` returns a deterministic read-only node projection without changing controller state;
@@ -58,8 +58,8 @@ not mutate the graph or nominate drugs. The synthesis worker tags every question
 with its mechanistically relevant frozen nodes; matching material is routed into each seed packet.
 The seed worker accounts for every routed item once and links each used item to the strategy that
 used it; non-use does not block a valid focal or exploratory route.
-Their literature does not enter the audit corpus
-unless a downstream candidate stage independently retrieves and cites the relevant evidence.
+Their literature does not enter the audit corpus unless a downstream candidate hypothesis
+materially uses and cites the relevant evidence.
 Profile gaps and uncertainty are indexed separately from biological edges and returned only with
 the bound node context. They constrain interpretation without automatically suppressing an
 exploratory candidate route.
@@ -70,7 +70,8 @@ Python owns workflow state: order, receipts, hashing, item cursors, immutable ac
 construction, validation, deterministic source processing, graph freezing, identity aggregation,
 scoring, ranking, and exports. Agents own only the scientific judgment assigned by their current
 packet. In particular, curation owns pathology identity and research eligibility; review owns
-evidence dossiers without scoring; audit owns closed-corpus assessment and bounded exclusions.
+candidate-specific viability research and final hypothesis prose without scoring; audit owns
+closed-corpus scoring and bounded exclusions without rewriting that prose.
 Sources own evidence. No worker selects the next task or declares the programme complete. The exact
 division for every worker collection is documented in [packet-contract.md](packet-contract.md), and
 source-service transport is documented in [source-adapters.md](source-adapters.md).
@@ -83,26 +84,20 @@ Accepted worker results remain unchanged. At each aggregation boundary, Python p
 documents owned by that stage; unused returned documents remain in the accepted result but do not
 enter downstream context. Publication aliases are canonicalized without rewriting the submitted
 document ID. `_all_documents()` constructs the deduplicated closed corpus only for audit and output
-generation. The audit cannot add evidence. Final cards project only the preferred drug name, the
-audit-owned cited mechanistic account, and audit-owned cited reasons against prioritisation; the
-remaining audit and ranking fields stay in structured artifacts. See
+generation. The audit cannot add evidence. Final cards project only the preferred drug name and the
+review-owned hypothesis report verbatim; scoring and audit metadata stay out of that prose. See
 [packet-contract.md](packet-contract.md) for citation propagation and audit fields, and
 [source-adapters.md](source-adapters.md) for publication identity.
-The compact exclusion list is exported as CSV; detailed source-integrity records remain in the
-accepted audit result. Evidence-backed exclusions made during seed search remain separate in
+The compact exclusion list is exported as CSV. Evidence-backed exclusions made during seed search remain separate in
 `seed_exclusions.jsonl`; their authority does not include exact-disease prior-art decisions.
 
-Candidate review receives a deterministic prior-art term set from confirmed identity, cited
-identity relationships, and seed names, then adds any newly supported aliases. Review findings retain exact passage locators,
-evidence systems, epistemic status, and studied entity form. The closed-audit packet projects those
-structured findings but withholds dossier hypotheses, bridge conclusions, and prior-art summaries.
-Its candidate evidence index starts from structured review, identity, candidate-provenance, and
-explicitly linked graph citations, then supplements them by matching meaningful identity terms and
-defined acronyms across retained passages, locators, abstracts, support text, and structured content.
-Relationship names expand searches and indexing but never merge candidates; known relationship
-metadata also rejects a contradictory prior-art identity classification.
-Audit checks are candidate-associated and locator-specific; simple substantial-copy,
-repeated-generic-finding, and missing-route anomalies reject the audit submission for correction.
+Candidate review receives one self-contained hypothesis packet folder per candidate. Its packet
+contains the candidate, linked rescue strategies, pathology profiles, selected graph evidence,
+material question and connection context, and every cited retained source needed to investigate
+viability. The fresh worker returns one natural cited scientific paragraph and any unresolved gaps.
+The closed scoring packet receives each original packet completed with that report, its gaps, and
+candidate-local cited sources. It assigns five scores or a programme-eligibility exclusion without
+searching, rewriting the report, or borrowing evidence from another candidate.
 
 ## Status
 
@@ -137,10 +132,8 @@ point while extracted responsibilities have one owner:
   compact connection indexing, and bounded connection projection;
 - `repurposing_program.identity` owns UniChem transport/caching, exact-identity grouping, identity
   review options, canonical candidate assembly, and identity-result validation;
-- `repurposing_program.candidates` owns review-batch partitioning and candidate seed/dossier
-  validation, including pathology-versus-mechanism citation separation;
-- `repurposing_program.audit` owns closed-corpus audit partition, component-score, exact source-use,
-  publication-alias, and bounded-exclusion validation;
+- `repurposing_program.candidates` owns one-candidate report partitioning and report citation validation;
+- `repurposing_program.audit` owns closed-corpus score partition and bounded-exclusion validation;
 - `repurposing_program.ranking` owns raw-score calculation, deterministic assessment ordering,
   dense ranks, and ranked-row projection;
 - `repurposing_program.evidence_cards` owns final evidence-card projection and deterministic

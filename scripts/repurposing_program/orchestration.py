@@ -262,6 +262,10 @@ def _build_seed_result(
 def _build_review_result(
     root: Path, results: Mapping[str, Mapping[str, Any]]
 ) -> dict[str, Any]:
+    issued_contexts = [
+        _read_json(_packet_path(root, "candidate_evidence_review", candidate_id))["context"]
+        for candidate_id in _item_ids("candidate_review", results)
+    ]
     reviews = _merge_unique(
         _item_collection(
             root,
@@ -278,16 +282,13 @@ def _build_review_result(
         "status": "complete",
         "records": {
             "documents": _select_cited_documents(
-                (
-                    row
-                    for row in _item_cited_documents(
-                        root,
-                        results,
-                        "candidate_review",
-                        "candidate_evidence_review",
-                    )
-                ),
-                reviews,
+                _merge_documents([
+                    *_item_cited_documents(
+                        root, results, "candidate_review", "candidate_evidence_review"
+                    ),
+                    *(row for context in issued_contexts for row in context["source_index"]),
+                ]),
+                [reviews, [context["hypothesis"] for context in issued_contexts]],
             ),
             "reviews": reviews,
         },
@@ -441,8 +442,7 @@ def _validate_result(
             result["records"], str(item_id), prior
         ),
         "candidate_audit": lambda: _validate_candidate_audit(
-            result["records"], prior, packet["context"]["source_index"],
-            packet["context"]["candidate_evidence_index"],
+            result["records"], prior, packet["context"]["hypothesis_packets"],
         ),
     }
     validators[task]()

@@ -109,14 +109,11 @@ def _load_results(root: Path) -> dict[str, dict[str, Any]]:
 
 
 def _item_ids(stage: str, results: Mapping[str, Mapping[str, Any]]) -> list[str]:
-    field = "concept_id"
     if stage in {"evidence_graph", "candidate_seed_generation"}:
-        rows = _research_concepts(results)
+        return sorted(str(row["concept_id"]) for row in _research_concepts(results))
     elif stage == "candidate_review":
-        rows = _review_batches(results)
-    else:
-        return []
-    return sorted(str(row[field]) for row in rows)
+        return sorted(str(row["candidate_id"]) for row in _review_batches(results))
+    return []
 
 
 def _item_results(

@@ -175,12 +175,8 @@ FUNCTION_OWNERS = {
         "_validate_seed_item",
     ),
     audit: (
-        "_accepted_ids",
-        "_assessment_source_uses",
         "_component_score",
-        "_validate_card_prose",
         "_validate_candidate_audit",
-        "_validate_source_integrity",
     ),
     run_state: (
         "_case",
@@ -219,8 +215,6 @@ FUNCTION_OWNERS = {
     evidence_cards: (
         "_cards_bytes",
         "_evidence_card_rows",
-        "_prose",
-        "_with_citations",
     ),
     candidate_exports: ("_excluded_candidate_rows", "_provenance_rows"),
     manifests: ("_artifact", "_build_manifest"),

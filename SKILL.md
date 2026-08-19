@@ -94,8 +94,8 @@ The controller advances linearly through:
 11. one global packet that synthesizes and challenges unexpected biological connections;
 12. one candidate-seed packet per researched concept;
 13. deterministic UniChem lookup and one identity-review packet when needed;
-14. one evidence-dossier packet per nonempty candidate-review batch;
-15. one closed-corpus independent candidate audit;
+14. one standardized hypothesis-packet folder and fresh scientific report worker per candidate;
+15. one closed-corpus scoring and bounded-exclusion pass;
 16. deterministic scoring, ranking, and output construction.
 
 Asta and Undermind are required only in their named stages. Their presence in the sequence is not a
@@ -111,8 +111,8 @@ in the current packet.
 - Keep pathology evidence and drug-action evidence separate; a paper directly linking the drug to
   the disease is not required.
 - Let curation alone decide pathology identity, splitting, merging, and research eligibility.
-- Let candidate review assemble evidence without scoring or excluding.
-- Let the final auditor use only the retained closed corpus; it may not search or add evidence.
+- Let candidate review research viability and write the final scientific hypothesis prose without scoring or excluding.
+- Let the final scoring pass use only the completed candidate-local hypothesis packets; it may not search, add evidence, or rewrite the hypothesis prose.
 - Let Python own ordering, receipts, hashes, packet lineage, validation, persistence, aggregation,
   ranking, and outputs. Workers create research judgments only.
 
