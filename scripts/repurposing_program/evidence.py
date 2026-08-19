@@ -198,6 +198,20 @@ def _source_index(
     ]
 
 
+def _document_alias_index(
+    documents: Iterable[Mapping[str, Any]],
+) -> dict[str, Mapping[str, Any]]:
+    index: dict[str, Mapping[str, Any]] = {}
+    for row in documents:
+        document_id = str(row["document_id"])
+        aliases = {document_id, *map(str, row.get("identifier_aliases", []))}
+        for alias in aliases:
+            prior = index.setdefault(alias, row)
+            if str(prior["document_id"]) != document_id:
+                raise ProgramError(f"Publication alias {alias} maps to multiple retained documents")
+    return index
+
+
 def _merge_unique(
     rows: Iterable[dict[str, Any]], id_field: str, label: str
 ) -> list[dict[str, Any]]:
@@ -214,7 +228,7 @@ def _merge_unique(
 
 def _merge_documents(rows: Iterable[dict[str, Any]], *, canonical_publications: bool = False) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
-    identity_fields = {"title", "year", "canonical_publication_id"}
+    identity_fields = {"title", "canonical_publication_id"}
     for row in rows:
         document_id = str(row.get("document_id", "")).strip()
         if not document_id:
@@ -231,8 +245,6 @@ def _merge_documents(rows: Iterable[dict[str, Any]], *, canonical_publications: 
                 conflict = not canonical_publications and not _equivalent_document_titles(
                     document_id, current[field], value
                 )
-            if field == "year" and conflict:
-                conflict = _year(current[field]) != _year(value)
             if conflict:
                 raise ProgramError(
                     f"Conflicting document metadata for {document_id}: {field}"

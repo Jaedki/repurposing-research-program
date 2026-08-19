@@ -303,7 +303,7 @@ class LandscapeWorkflowTest(unittest.TestCase):
                         "ranked_result_count": 1,
                         "ranked_result_ids": ["PMID:999"],
                         "pdf_count": 0,
-                        "paper_dispositions": {},
+                        "paper_dispositions": [],
                     }],
                 },
                 "gaps": [],
@@ -340,12 +340,13 @@ class LandscapeWorkflowTest(unittest.TestCase):
             "outcome": "completed",
             "ranked_result_count": max(1, len(records.get("documents", []))),
             "ranked_result_ids": [
-                row["document_id"] for row in records.get("documents", [])
-            ] or ["PMID:999"],
+                f"PAPER-{index}" for index, _row in enumerate(records.get("documents", []))
+            ] or ["PAPER-0"],
             "pdf_count": len(records.get("documents", [])),
-            "paper_dispositions": {
-                row["document_id"]: "retained" for row in records.get("documents", [])
-            },
+            "paper_dispositions": [
+                {"cite_key": f"PAPER-{index}", "document_id": row["document_id"], "disposition": "retained", "rationale": "Supports a retained proposal."}
+                for index, row in enumerate(records.get("documents", []))
+            ],
         }])
         result = {
             "stage": "pathology_coverage_expansion",
@@ -459,6 +460,8 @@ class LandscapeWorkflowTest(unittest.TestCase):
         ]["template"]
         self.assertEqual(receipt_template["search_name"], packet["context"]["undermind_search_name"])
         self.assertEqual(receipt_template["outcome"], "completed")
+        self.assertEqual(set(receipt_template["paper_dispositions"][0]), {"cite_key", "document_id", "disposition", "rationale"})
+        self.assertEqual(packet["result_contract"]["records"]["undermind_search_receipts"]["field_contracts"]["paper_dispositions"]["field_contracts"]["disposition"]["allowed_values"], ["retained", "not_retained"])
         rules = " ".join(packet["rules"])
         self.assertIn("get_orientation", rules)
         self.assertIn("create_workspace", rules)
@@ -505,11 +508,27 @@ class LandscapeWorkflowTest(unittest.TestCase):
                 "search_path": "/workspaces/workspace-1/deep-searches/test",
                 "outcome": "completed", "ranked_result_count": 1, "pdf_count": 1,
                 "ranked_result_ids": ["PMID:201"],
-                "paper_dispositions": {},
+                "paper_dispositions": [],
             }],
         }
-        with self.assertRaisesRegex(core.ProgramError, "retained paper disposition"):
+        with self.assertRaisesRegex(core.ProgramError, "account once"):
             self.submit_coverage(action, records)
+        records["undermind_search_receipts"][0].update({
+            "ranked_result_ids": ["PAPER-1"],
+            "paper_dispositions": [{"cite_key": "PAPER-1", "document_id": "PMID:999", "disposition": "retained", "rationale": "Claimed retained."}],
+        })
+        with self.assertRaisesRegex(core.ProgramError, "match returned documents"):
+            self.submit_coverage(action, records)
+
+    def test_nonretained_read_paper_remains_accounted_without_a_document(self):
+        action = self.coverage_action()
+        packet = json.loads(Path(action["packet_path"]).read_text())
+        status = self.submit_coverage(action, {"documents": [], "coverage_proposals": [], "undermind_search_receipts": [{
+            "workspace_id": "workspace-1", "search_name": packet["context"]["undermind_search_name"], "search_path": "/deep-search/test", "outcome": "completed",
+            "ranked_result_count": 1, "ranked_result_ids": ["Ber19"], "pdf_count": 1,
+            "paper_dispositions": [{"cite_key": "Ber19", "document_id": None, "disposition": "not_retained", "rationale": "No distinct pathology addition."}],
+        }]})
+        self.assertEqual(status["next_task"], "pathology_curation")
 
     def test_excluded_undermind_document_does_not_enter_frozen_graph(self):
         action = self.coverage_action()
@@ -607,7 +626,7 @@ class LandscapeWorkflowTest(unittest.TestCase):
                 "ranked_result_count": 0,
                 "ranked_result_ids": [],
                 "pdf_count": 0,
-                "paper_dispositions": {},
+                "paper_dispositions": [],
             }],
         }
         with self.assertRaisesRegex(core.ProgramError, "at least one ranked result"):
@@ -632,7 +651,7 @@ class LandscapeWorkflowTest(unittest.TestCase):
                 "ranked_result_count": 1,
                 "ranked_result_ids": ["PMID:999"],
                 "pdf_count": 0,
-                "paper_dispositions": {},
+                "paper_dispositions": [],
             }],
         }
         with self.assertRaisesRegex(core.ProgramError, "completed supplied logical search"):
@@ -941,7 +960,7 @@ class LandscapeWorkflowTest(unittest.TestCase):
             "workspace_id": "workspace-1", "search_name": packet["context"]["undermind_search_name"],
             "search_path": "/workspaces/workspace-1/deep-searches/test", "outcome": "completed",
             "ranked_result_count": 2, "ranked_result_ids": ["PMID:999"], "pdf_count": 0,
-            "paper_dispositions": {},
+            "paper_dispositions": [],
         }]}
         with self.assertRaisesRegex(core.ProgramError, "ranked-result identifiers"):
             self.submit_coverage(action, records)
@@ -1688,7 +1707,7 @@ class SparseSourceWorkflowTest(unittest.TestCase):
                         "ranked_result_count": 1,
                         "ranked_result_ids": ["PMID:999"],
                         "pdf_count": 0,
-                        "paper_dispositions": {},
+                        "paper_dispositions": [],
                     }],
                 },
                 "gaps": [],

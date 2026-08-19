@@ -152,6 +152,14 @@ PRIOR_ART_STATUSES = frozenset({
     "established_use",
     "unclear",
 })
+def _review_finding_contract(text_field: str, *, prior_art: bool = False) -> dict[str, Any]:
+    required = [text_field, "source_ids", "evidence_locators", "evidence_system", "epistemic_status", "entity_form"]
+    fields = {text_field: {"type": "non-empty string"}, "source_ids": {"type": "non-empty list of non-empty strings"}, "evidence_locators": {"type": "object"}, "evidence_system": {"allowed_values": sorted(EVIDENCE_SYSTEMS)}, "epistemic_status": {"allowed_values": sorted(EPISTEMIC_STATUSES)}, "entity_form": {"type": "non-empty string"}}
+    if prior_art: required.append("identity_relation"); fields["identity_relation"] = {"allowed_values": sorted(ENTITY_RELATIONSHIPS - {"not_candidate_specific", "unresolved"})}
+    return {"required_fields": required, "additional_fields": False, "field_contracts": fields}
+REVIEW_FINDING_CONTRACT, REVIEW_BRIDGE_CONTRACT, PRIOR_ART_FINDING_CONTRACT = _review_finding_contract("finding"), _review_finding_contract("text"), _review_finding_contract("finding", prior_art=True)
+REVIEW_CONTRACT = {"hypothesis": {"type": "non-empty string"}, "supporting_findings": {"type": "non-empty list of objects", **REVIEW_FINDING_CONTRACT}, "mechanistic_bridge": {"type": "object", **REVIEW_BRIDGE_CONTRACT}, "assumptions": {"type": "list of non-empty strings"}, "why_not": {"type": "list of objects", **REVIEW_FINDING_CONTRACT}, "prior_art": {"type": "object", "required_fields": ["status", "summary", "searched_terms", "findings"], "additional_fields": False, "field_contracts": {"status": {"allowed_values": sorted(PRIOR_ART_STATUSES)}, "summary": {"type": "non-empty string"}, "searched_terms": {"type": "list of non-empty strings"}, "findings": {"type": "list of objects", **PRIOR_ART_FINDING_CONTRACT}}}, "aliases": {"type": "list of objects", "required_fields": ["name", "source_ids"], "additional_fields": False, "field_contracts": {"name": {"type": "non-empty string"}, "source_ids": {"type": "non-empty list of non-empty strings"}}}, "limitations": {"type": "list of objects", **REVIEW_FINDING_CONTRACT}}
+SOURCE_INTEGRITY_CONTRACT = {"type": "object", "required_fields": ["checks"], "additional_fields": False, "field_contracts": {"checks": {"type": "list of objects", "required_fields": ["source_id", "locator", "entity_relation", "scope", "verdict", "finding"], "additional_fields": False, "field_contracts": {field: {"type": "non-empty string"} for field in ("source_id", "locator", "entity_relation", "scope", "finding")} | {"verdict": {"allowed_values": sorted(_SOURCE_CHECK_VERDICTS)}}}}}
 SEED_EXCLUSION_REASONS = frozenset({"no_established_action", "wrong_or_opposite_action", "invalid_entity", "duplicate_seed", "direct_derivation_contamination"})
 AUDIT_EXCLUSION_POLICY = {
     "exact_disease_prior_use_or_testing": (
@@ -624,7 +632,7 @@ ROW_SCHEMAS = {
             "ranked_result_count", "ranked_result_ids", "pdf_count", "paper_dispositions",
         ],
         "additional_fields": False,
-        "field_contracts": {"outcome": {"allowed_values": ["completed"]}},
+        "field_contracts": {"outcome": {"allowed_values": ["completed"]}, "paper_dispositions": {"type": "list of objects", "required_fields": ["cite_key", "document_id", "disposition", "rationale"], "additional_fields": False, "field_contracts": {"disposition": {"allowed_values": ["retained", "not_retained"]}}, "value_rule": "one row per read ranked paper; cite_key is its ranked_result_id; retained crosswalks to a returned canonical document_id, not_retained uses null, and rationale is non-empty"}},
     },
     "source_nodes": {
         "required_fields": ["node_id", "label", "node_type", "source_ids"],
@@ -922,6 +930,7 @@ ROW_SCHEMAS = {
             "assumptions", "why_not", "prior_art", "aliases", "limitations",
         ],
         "additional_fields": False,
+        "field_contracts": REVIEW_CONTRACT,
     },
     "assessments": {
         "required_fields": [
@@ -929,12 +938,14 @@ ROW_SCHEMAS = {
             "aliases", "why_not",
         ],
         "additional_fields": False,
+        "field_contracts": {"source_integrity": SOURCE_INTEGRITY_CONTRACT, "aliases": {"type": "list of objects", "required_fields": ["name", "source_ids"], "additional_fields": False}, "why_not": {"type": "list of objects", "required_fields": ["text", "source_ids"], "additional_fields": False}},
     },
     "excluded_candidates": {
         "required_fields": [
             "candidate_id", "reason_code", "finding", "source_ids", "source_integrity",
         ],
         "additional_fields": False,
+        "field_contracts": {"source_integrity": SOURCE_INTEGRITY_CONTRACT, "reason_code": {"allowed_values": sorted(AUDIT_EXCLUSION_REASONS)}},
     },
     "evidence_dispositions": {
         "required_fields": ["candidate_id", "source_id", "disposition", "reason"],
@@ -995,7 +1006,7 @@ FIELD_RULES = {
         "each proposal contains one pathological state or process at one causal level and cites a "
         "returned canonical document whose full text was inspected through read_pdfs",
         "ranked_result_ids exactly reconcile ranked_result_count; every returned document is cited "
-        "by a proposal and has a retained paper_disposition; every read paper is dispositioned",
+        "by a proposal and has one retained paper_disposition crosswalking its cite_key to document_id; every read paper has one retained or not_retained disposition and a rationale",
         "retain only directly supported pathology and no therapeutic interpretation; Undermind "
         "proposals are decomposition candidates and cannot create IDs or curate concepts",
     ],
@@ -1212,8 +1223,8 @@ FIELD_RULES = {
         "evidence_dispositions covers every candidate-source pair in context.candidate_evidence_index "
         "exactly once; exact_disease_prior_use_or_testing requires its matching exclusion",
         "source_integrity has exactly checks; do not return a summary status or generic declaration",
-        "each source-integrity check has source_id, locator, entity_relation, scope, verdict, and finding and covers exactly "
-        "one source use in a component score, net assessment, indexed alias, indexed why-not "
+        "each source-integrity check has source_id, locator, a non-empty precise entity_relation description, scope, verdict, and finding and covers exactly "
+        "one source use in a component score, net assessment, `alias[n]`, indexed why-not "
         "finding, supplied review counterevidence (`review_why_not[n]`), or exclusion; use the bare component name for component scope "
         "and do not prefix it with component_scores.",
         "verdict is supports, partly_supports, does_not_support, or contradicts; inspect the supplied "
@@ -1234,7 +1245,7 @@ FIELD_RULES = {
         "or compensatory effect, marks the repurposing step as an inference, and contains no score, "
         "rank, audit metadata, source-verification commentary, field labels, clause fragments, "
         "keyword lists, or ellipses standing in for omitted text",
-        "why_not contains concise, cited, complete-sentence reasons against prioritisation, not "
+        "why_not contains text and source_ids for concise, cited, complete-sentence reasons against prioritisation, not "
         "field labels, clause fragments, keyword lists, or ellipses; aliases remain provenance only "
         "and do not enter final cards",
         "excluded_candidates use a source-backed reason_code from the bounded exclusion policy and "

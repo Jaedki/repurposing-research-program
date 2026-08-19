@@ -13,22 +13,29 @@ from .contracts import (
 )
 from .errors import ProgramError
 from .evidence import _rows
-
-
+def _validate_contract_object(value: Any, schema: Mapping[str, Any], label: str) -> None:
+    if not isinstance(value, Mapping): raise ProgramError(f"{label} must be an object")
+    if missing := sorted(set(schema.get("required_fields", [])) - set(value)): raise ProgramError(f"{label} is missing fields: {', '.join(missing)}")
+    if schema.get("additional_fields") is False and (unexpected := sorted(set(value) - set(schema.get("required_fields", [])))): raise ProgramError(f"{label} has unexpected fields: {unexpected}")
+    for field, contract in schema.get("field_contracts", {}).items():
+        if field not in value: continue
+        item, item_label = value[field], f"{label}.{field}"
+        if (allowed := contract.get("allowed_values")) is not None and item not in allowed: raise ProgramError(f"{item_label} must be one of {allowed}")
+        if (value_type := contract.get("type")) == "object": _validate_contract_object(item, contract, item_label)
+        elif value_type in {"list of objects", "non-empty list of objects"}:
+            if not isinstance(item, list) or (value_type.startswith("non-empty") and not item): raise ProgramError(f"{item_label} must be a {value_type}")
+            for index, nested in enumerate(item): _validate_contract_object(nested, contract, f"{item_label}[{index}]")
+        elif value_type == "non-empty string" and (not isinstance(item, str) or not item.strip()): raise ProgramError(f"{item_label} must be a non-empty string")
+        elif value_type in {"list of non-empty strings", "non-empty list of non-empty strings", "list of unique non-empty strings", "non-empty list of unique non-empty strings"}:
+            if not isinstance(item, list) or (value_type.startswith("non-empty") and not item) or any(not isinstance(nested, str) or not nested.strip() for nested in item): raise ProgramError(f"{item_label} must be a {value_type}")
+            if "unique" in value_type and len(item) != len(set(item)): raise ProgramError(f"{item_label} values must be unique")
 def _contract_rows(
     records: Mapping[str, Any], name: str, id_field: str | None = None
 ) -> list[dict[str, Any]]:
     rows = _rows(records, name)
     schema = ROW_SCHEMAS[name]
-    required_fields = schema["required_fields"]
     for index, row in enumerate(rows):
-        missing = [field for field in required_fields if field not in row]
-        if missing:
-            raise ProgramError(f"{name}[{index}] is missing fields: {', '.join(missing)}")
-        if not schema["additional_fields"]:
-            unexpected = sorted(set(row) - set(required_fields))
-            if unexpected:
-                raise ProgramError(f"{name}[{index}] has unexpected fields: {unexpected}")
+        _validate_contract_object(row, schema, f"{name}[{index}]")
         for field, field_type in schema.get("field_types", {}).items():
             if field_type == "object" and not isinstance(row[field], dict):
                 raise ProgramError(f"{name}[{index}].{field} must be an object")

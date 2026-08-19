@@ -720,7 +720,7 @@ class SourceAdjudicationWorkflowTest(unittest.TestCase):
                         "ranked_result_count": 1,
                         "ranked_result_ids": ["PMID:999"],
                         "pdf_count": 0,
-                        "paper_dispositions": {},
+                        "paper_dispositions": [],
                     }],
                 },
                 "gaps": [],
@@ -809,12 +809,13 @@ class WorkflowTest(unittest.TestCase):
                 "outcome": "completed",
                 "ranked_result_count": max(1, len(records.get("documents", []))),
                 "ranked_result_ids": [
-                    row["document_id"] for row in records.get("documents", [])
-                ] or ["PMID:999"],
+                    f"PAPER-{index}" for index, _row in enumerate(records.get("documents", []))
+                ] or ["PAPER-0"],
                 "pdf_count": len(records.get("documents", [])),
-                "paper_dispositions": {
-                    row["document_id"]: "retained" for row in records.get("documents", [])
-                },
+                "paper_dispositions": [
+                    {"cite_key": f"PAPER-{index}", "document_id": row["document_id"], "disposition": "retained", "rationale": "Supports a retained proposal."}
+                    for index, row in enumerate(records.get("documents", []))
+                ],
             }])
         if action["next_task"] == "candidate_seed_research":
             strategy_outcome = "seeded" if records.get("candidates") else "no_supported_seed"
@@ -1722,6 +1723,26 @@ class WorkflowTest(unittest.TestCase):
             )
         )
         self.assertNotIn("score_rubric", review_packet["result_contract"])
+        review_contract = review_packet["result_contract"]["records"]["reviews"]
+        finding_contract = review_contract["field_contracts"]["supporting_findings"]
+        self.assertEqual(
+            finding_contract["field_contracts"]["evidence_system"]["allowed_values"],
+            ["animal", "authoritative_database", "biochemical", "cell", "human"],
+        )
+        self.assertEqual(
+            finding_contract["field_contracts"]["epistemic_status"]["allowed_values"],
+            ["direct_observation", "inference"],
+        )
+        prior_art_contract = review_contract["field_contracts"]["prior_art"]
+        self.assertEqual(
+            prior_art_contract["field_contracts"]["status"]["allowed_values"],
+            ["established_use", "human_intervention", "none_found", "preclinical_only", "unclear"],
+        )
+        self.assertEqual(
+            prior_art_contract["field_contracts"]["findings"]["field_contracts"]
+            ["identity_relation"]["allowed_values"],
+            ["class_or_analogue", "exact_candidate", "related_form", "same_active_moiety"],
+        )
         self.assertEqual(review_packet["context"]["primary_concept_id"], packet["item_id"])
         self.assertEqual(
             review_packet["context"]["rescue_strategies"][0]["primary_node_id"],
@@ -1929,7 +1950,7 @@ class WorkflowTest(unittest.TestCase):
                 {"name": "Drug", "source_ids": ["PMID:2"]},
             ],
             "why_not": [{
-                "finding": "Relevant exposure remains uncertain.",
+                "text": "Relevant exposure remains uncertain.",
                 "source_ids": ["PMID:3"],
             }],
             "net_assessment": {
@@ -2707,7 +2728,7 @@ class WorkflowTest(unittest.TestCase):
         bounded_exclusion["exclusions"] = [{"name": "Unsupported agent", "identifiers": {}, "strategy_keys": ["strategy-1"], "reason_code": "no_established_action", "finding": "No established pharmacological action was found.", "source_ids": ["PMID:2"], "concern": "The proposed action is unsupported."}]
         candidate_rules._validate_seed_item(bounded_exclusion, "NODE:1", results)
         bounded_exclusion["exclusions"][0]["reason_code"] = "exact_disease_prior_use_or_testing"
-        with self.assertRaisesRegex(core.ProgramError, "allowed seed-stage reason"):
+        with self.assertRaisesRegex(core.ProgramError, "reason_code must be one of"):
             candidate_rules._validate_seed_item(bounded_exclusion, "NODE:1", results)
 
         missing_edge_propagation = json.loads(json.dumps(seed_records))
@@ -3555,7 +3576,7 @@ class WorkflowTest(unittest.TestCase):
             with self.assertRaisesRegex(core.ProgramError, "not retained"):
                 candidate_rules._validate_review_item(bad_locator, "NODE:A", results)
             bad_system = json.loads(json.dumps(records)); bad_system["reviews"][0]["supporting_findings"][0]["evidence_system"] = "unspecified"
-            with self.assertRaisesRegex(core.ProgramError, "invalid evidence_system"):
+            with self.assertRaisesRegex(core.ProgramError, "evidence_system must be one of"):
                 candidate_rules._validate_review_item(bad_system, "NODE:A", results)
 
     def test_audit_validation_is_review_independent_and_preserves_longshots(self):
@@ -3772,7 +3793,7 @@ class WorkflowTest(unittest.TestCase):
         )
         baseline_score = ranking._final_score(assessment)
         assessment["why_not"] = [{
-            "finding": "Independent disease models found no efficacy.",
+            "text": "Independent disease models found no efficacy.",
             "source_ids": ["PMID:1"],
         }]
         assessment["source_integrity"] = self.source_integrity(assessment, locator="abstract")
@@ -3870,8 +3891,8 @@ class WorkflowTest(unittest.TestCase):
         scopes = {
             check["scope"] for check in assessment["source_integrity"]["checks"]
         }
-        self.assertIn("aliases[0]", scopes)
-        self.assertIn("aliases[1]", scopes)
+        self.assertIn("alias[0]", scopes)
+        self.assertIn("alias[1]", scopes)
 
         not_object = json.loads(json.dumps(assessment))
         not_object["source_integrity"] = []
@@ -3990,8 +4011,8 @@ class WorkflowTest(unittest.TestCase):
         wrong_locator = json.loads(json.dumps(records)); wrong_locator["assessments"][0]["source_integrity"]["checks"][0]["locator"] = "missing"
         with self.assertRaisesRegex(core.ProgramError, "locator is not retained"):
             audit._validate_candidate_audit(wrong_locator, results, [document], [{"candidate_id": "DRUG-A", "source_ids": ["PMID:1"]}])
-        wrong_relation = json.loads(json.dumps(records)); wrong_relation["assessments"][0]["source_integrity"]["checks"][0]["entity_relation"] = "assumed_same"
-        with self.assertRaisesRegex(core.ProgramError, "entity_relation is invalid"):
+        wrong_relation = json.loads(json.dumps(records)); wrong_relation["assessments"][0]["source_integrity"]["checks"][0]["entity_relation"] = ""
+        with self.assertRaisesRegex(core.ProgramError, "entity_relation must be a non-empty string"):
             audit._validate_candidate_audit(wrong_relation, results, [document], [{"candidate_id": "DRUG-A", "source_ids": ["PMID:1"]}])
         with self.assertRaisesRegex(core.ProgramError, "not associated with this candidate"):
             audit._validate_candidate_audit({**records, "evidence_dispositions": []}, results, [document], [{"candidate_id": "DRUG-A", "source_ids": []}])

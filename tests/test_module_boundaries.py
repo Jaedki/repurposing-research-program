@@ -89,6 +89,7 @@ FUNCTION_OWNERS = {
         "_cited_documents",
         "_cited_ids",
         "_document_has_inspectable_content",
+        "_document_alias_index",
         "_find",
         "_merge_documents",
         "_merge_text",
@@ -106,6 +107,7 @@ FUNCTION_OWNERS = {
         "_references",
         "_required",
         "_secret_paths",
+        "_validate_contract_object",
         "_validate_cited_entries",
         "_validate_documents",
         "_validate_exact_object",
@@ -171,7 +173,6 @@ FUNCTION_OWNERS = {
         "_review_batches",
         "_validate_review_item",
         "_validate_seed_item",
-        "_validate_string_list",
     ),
     audit: (
         "_accepted_ids",

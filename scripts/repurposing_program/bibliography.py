@@ -264,6 +264,7 @@ def _canonicalize_documents(
                     f"{row.get('title')!r}; canonical title {canonical['title']!r}"
                 )
             row["submitted_title"] = row.get("title")
+        canonical = {**canonical, "identifier_aliases": sorted({document_id, str(canonical.get("canonical_publication_id") or document_id), *map(str, row.get("identifier_aliases", [])), *map(str, canonical.get("identifier_aliases", []))})}
         row.update({key: value for key, value in canonical.items() if value not in (None, "", [])})
         if preserve_titles: row["title"] = submitted_title
         output.append(row)

@@ -75,7 +75,8 @@ passages; search and account data remain transient.
 
 `coverage_proposals` use the same scientific shape as Asta proposals. One non-secret completion
 receipt records workspace, search name and path, ranked-result IDs and count, PDF count, and a compact
-disposition for every paper actually read. Python validates their
+disposition for every paper actually read. Each disposition preserves the ranked cite key and
+rationale; retained papers additionally crosswalk to their returned canonical document ID. Python validates their
 evidence and assigns `UNDERMIND-NODE-<hash>` IDs; the final curator treats them on the same terms as
 all other source nodes and alone decides concept identity. The packet remains active until its
 search receipt records a completed outcome.
@@ -133,7 +134,7 @@ normalized as focal nodes, context, or evidence.
 
 ## Publication identity
 
-PMID, PMCID, and DOI references from source adapters and research workers use the same small controller-owned validation path. Responses from the NCBI identifier converter, PubMed or PubMed Central summary service, and DOI resolver are cached immutably under `<run>/sources/raw/bibliography/`. The controller uses them only to validate and project bibliographic identity; it does not infer scientific support from metadata. A submitted publication title that materially disagrees with the identifier stops acceptance; formatting and minor wording variants share one generic near-match check. Known aliases are retained under one canonical publication identity in downstream source projections, while the originally cited document ID remains stable for provenance. Treatment-blind pathology projections retain their already screened submitted title when canonical metadata is added; canonical titles are restored only after the pathology barriers.
+PMID, PMCID, and DOI references from source adapters and research workers use the same small controller-owned validation path. Responses from the NCBI identifier converter, PubMed or PubMed Central summary service, and DOI resolver are cached immutably under `<run>/sources/raw/bibliography/`. The controller uses them only to validate and project bibliographic identity; it does not infer scientific support from metadata. A submitted publication title that materially disagrees with the identifier stops acceptance; formatting and minor wording variants share one generic near-match check. Known aliases are unioned monotonically under one canonical publication identity in downstream source projections, while the originally cited document ID remains stable for provenance; repeated canonicalization is idempotent. Treatment-blind pathology projections retain their already screened submitted title when canonical metadata is added; canonical titles are restored only after the pathology barriers.
 
 ## UniChem candidate identity
 

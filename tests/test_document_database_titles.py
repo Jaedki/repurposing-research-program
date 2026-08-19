@@ -208,6 +208,25 @@ class DatabaseDocumentTitleTests(unittest.TestCase):
         self.assertEqual([row["document_id"] for row in documents], ["DOI:10.1000/example"])
         self.assertEqual(len(documents[0]["evidence_passages"]), 2)
 
+    def test_canonical_publication_year_variants_do_not_conflict(self):
+        documents = evidence._merge_documents([
+            {"document_id": "DOI:10.1000/example", "canonical_publication_id": "DOI:10.1000/example", "year": 2013},
+            {"document_id": "PMCID:PMC123", "canonical_publication_id": "DOI:10.1000/example", "year": 2014},
+        ], canonical_publications=True)
+
+        self.assertEqual(len(documents), 1)
+        self.assertEqual(documents[0]["year"], 2013)
+
+    def test_recanonicalization_unions_and_preserves_publication_aliases(self):
+        document = {"document_id": "DOI:10.1000/example", "title": "Paper", "identifier_aliases": ["DOI:10.1000/example", "PMID:123"]}
+        metadata = {"DOI:10.1000/example": {"title": "Paper", "canonical_publication_id": "DOI:10.1000/example", "identifier_aliases": ["DOI:10.1000/example"]}}
+        with tempfile.TemporaryDirectory() as directory, patch.object(bibliography, "_resolve_bibliographic_metadata", return_value=metadata):
+            first = bibliography._canonicalize_document_corpus(Path(directory), [document], verify_titles=False)
+            second = bibliography._canonicalize_document_corpus(Path(directory), first, verify_titles=False)
+
+        self.assertEqual(first, second)
+        self.assertEqual(first[0]["identifier_aliases"], ["DOI:10.1000/example", "PMID:123"])
+
 
 if __name__ == "__main__":
     unittest.main()

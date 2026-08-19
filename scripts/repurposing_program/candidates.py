@@ -5,9 +5,9 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping
 
-from .contracts import EPISTEMIC_STATUSES, EVIDENCE_SYSTEMS, ENTITY_RELATIONSHIPS, PRIOR_ART_STATUSES, SEED_EXCLUSION_REASONS, _COMPARATORS
+from .contracts import SEED_EXCLUSION_REASONS, _COMPARATORS
 from .errors import ProgramError
-from .evidence import _all_documents, _cited_ids, _find, _rows
+from .evidence import _all_documents, _cited_ids, _document_alias_index, _find, _rows
 from .graph import _graph_support_ids
 from .hypotheses import _connection_rows
 from .identity import _candidate_prior_art_terms, _candidate_queries, _canonical_candidates
@@ -17,7 +17,6 @@ from .validation import (
     _ids,
     _references,
     _required,
-    _validate_cited_entries,
     _validate_documents,
     _validate_exact_object,
 )
@@ -160,7 +159,7 @@ def _validate_seed_item(
     routed_connection_ids = {key for key, row in connections_by_id.items() if item_id in set(map(str, row["node_ids"]))}
     routed_context_ids = routed_question_ids | routed_connection_ids
     pathology_source_ids = _ids(_rows(graph, "documents"), "document_id", "documents")
-    pathology_source_aliases = {value for row in _rows(graph, "documents") for value in {str(row["document_id"]), *map(str, row.get("identifier_aliases", []))}}
+    pathology_source_aliases = set(_document_alias_index(_rows(graph, "documents")))
     returned_seed_source_ids = {str(row["document_id"]) for row in documents}
     if not strategies:
         raise ProgramError("candidate seed research requires at least one rescue_strategy")
@@ -396,21 +395,13 @@ def _validate_seed_item(
             )
 
 
-def _validate_string_list(value: Any, label: str) -> None:
-    if not isinstance(value, list) or any(not str(item).strip() for item in value):
-        raise ProgramError(f"{label} must be a list of non-empty strings")
-
-
 def _validate_review_finding(value: Any, label: str, text_field: str, documents: Mapping[str, Mapping[str, Any]], extra_fields: set[str] | None = None) -> None:
-    fields = {text_field, "source_ids", "evidence_locators", "evidence_system", "epistemic_status", "entity_form"} | (extra_fields or set())
-    row = _validate_exact_object(value, fields, label)
-    if not str(row[text_field]).strip() or not str(row["entity_form"]).strip(): raise ProgramError(f"{label}.{text_field} and entity_form must be non-empty")
+    row = value
     refs = _references(row, "source_ids", set(documents), label)
     locators = row["evidence_locators"]
     if not isinstance(locators, Mapping) or set(map(str, locators)) != refs: raise ProgramError(f"{label}.evidence_locators must map every source_id exactly once")
     bad_locator = next((source_id for source_id in refs if str(locators[source_id]) not in ({str(p.get("locator")) for p in documents[source_id].get("evidence_passages", []) if isinstance(p, Mapping)} | {field for field in ("abstract", "raw_path", "supporting_text", "structured_content") if documents[source_id].get(field)} | {f"{field}[{index}]" for field in ("snippets", "supports") for index, item in enumerate(documents[source_id].get(field, [])) if str(item).strip()})), None)
     if bad_locator: raise ProgramError(f"{label}.evidence_locators[{bad_locator}] is not retained by that source")
-    if row["evidence_system"] not in EVIDENCE_SYSTEMS or row["epistemic_status"] not in EPISTEMIC_STATUSES: raise ProgramError(f"{label} has an invalid evidence_system or epistemic_status")
 
 
 def _validate_review_item(
@@ -425,41 +416,21 @@ def _validate_review_item(
         raise ProgramError("candidate review must cover exactly the supplied batch candidates")
     retained_ids = {str(row["document_id"]) for row in documents}
     all_documents = [*_all_documents(results), *documents]
-    documents_by_id = {value: row for row in all_documents for value in {str(row["document_id"]), *map(str, row.get("identifier_aliases", []))}}
+    documents_by_id = _document_alias_index(all_documents)
     source_ids = set(documents_by_id)
     for index, row in enumerate(reviews):
         label = f"reviews[{index}]"
-        _required(row, ("candidate_id", "hypothesis", "mechanistic_bridge"), label)
         _validate_review_finding(row["mechanistic_bridge"], f"{label}.mechanistic_bridge", "text", documents_by_id)
         for collection in ("supporting_findings", "why_not", "limitations"):
-            if not isinstance(row[collection], list): raise ProgramError(f"{label}.{collection} must be a list")
             for finding_index, finding in enumerate(row[collection]):
                 _validate_review_finding(finding, f"{label}.{collection}[{finding_index}]", "finding", documents_by_id)
-        if not row["supporting_findings"]:
-            raise ProgramError(f"{label}.supporting_findings must not be empty")
-        _validate_string_list(row["assumptions"], f"{label}.assumptions")
-        _validate_cited_entries(
-            row["aliases"],
-            label=f"{label}.aliases",
-            text_field="name",
-            source_ids=source_ids,
-        )
-        prior_art = _validate_exact_object(
-            row["prior_art"], {"status", "summary", "searched_terms", "findings"},
-            f"{label}.prior_art"
-        )
-        if prior_art["status"] not in PRIOR_ART_STATUSES:
-            raise ProgramError(
-                f"{label}.prior_art.status must be one of {sorted(PRIOR_ART_STATUSES)}"
-            )
-        if not str(prior_art["summary"]).strip():
-            raise ProgramError(f"{label}.prior_art.summary must be non-empty")
+        if len({str(alias["name"]).casefold() for alias in row["aliases"]}) != len(row["aliases"]): raise ProgramError(f"{label}.aliases.name values must be unique")
+        for alias_index, alias in enumerate(row["aliases"]): _references(alias, "source_ids", source_ids, f"{label}.aliases[{alias_index}]")
+        prior_art = row["prior_art"]
         if prior_art["status"] == "none_found" and not re.search(r"\b(?:search(?:es|ed|ing)?|locat(?:e|ed)|found|identified)\b", str(prior_art["summary"]), re.I):
             raise ProgramError(f"{label}.prior_art.summary must describe the bounded search outcome")
-        _validate_string_list(prior_art["searched_terms"], f"{label}.prior_art.searched_terms")
         for finding_index, finding in enumerate(prior_art["findings"]):
             _validate_review_finding(finding, f"{label}.prior_art.findings[{finding_index}]", "finding", documents_by_id, {"identity_relation"})
-            if finding["identity_relation"] not in ENTITY_RELATIONSHIPS - {"not_candidate_specific", "unresolved"}: raise ProgramError(f"{label}.prior_art.findings[{finding_index}].identity_relation is invalid")
         candidate = next((value for value in _canonical_candidates(results) if str(value["candidate_id"]) == str(row["candidate_id"])), None) if "candidate_seed_generation" in results else None
         expected_terms = [*(_candidate_prior_art_terms(candidate, results["candidate_seed_generation"]["records"]) if candidate else []), *(alias["name"] for alias in row["aliases"])]
         if {value.casefold() for value in prior_art["searched_terms"]} != {str(value).casefold() for value in expected_terms}: raise ProgramError(f"{label}.prior_art.searched_terms must cover every supplied term and supported alias")

@@ -9,14 +9,12 @@ from typing import Any, Iterable, Mapping
 from .contracts import (
     AUDIT_EXCLUSION_REASONS,
     EVIDENCE_DISPOSITIONS,
-    ENTITY_RELATIONSHIPS,
     SCORE_MAX,
     SCORE_MIN,
     SCORE_COMPONENTS,
-    _SOURCE_CHECK_VERDICTS,
 )
 from .errors import ProgramError
-from .evidence import _all_documents, _document_has_inspectable_content, _rows
+from .evidence import _all_documents, _document_alias_index, _document_has_inspectable_content, _rows
 from .identity import _canonical_candidates
 from .validation import (
     _contract_rows,
@@ -71,7 +69,7 @@ def _assessment_source_uses(row: Mapping[str, Any]) -> set[tuple[str, str]]:
     )
     for collection in ("aliases", "why_not"):
         uses.update(
-            (str(source_id), f"{collection}[{index}]")
+            (str(source_id), f"{'alias' if collection == 'aliases' else collection}[{index}]")
             for index, entry in enumerate(row[collection])
             for source_id in entry["source_ids"]
         )
@@ -90,29 +88,17 @@ def _validate_source_integrity(
     candidate_source_ids: set[str],
     label: str,
 ) -> None:
-    integrity = _validate_exact_object(value, {"checks"}, label)
+    canonical = lambda source_id: str(documents[source_id]["document_id"])
+    integrity = value
     checks = integrity["checks"]
-    if not isinstance(checks, list):
-        raise ProgramError(f"{label}.checks must be a list")
     actual_uses: list[tuple[str, str]] = []
     for index, check in enumerate(checks):
         check_label = f"{label}.checks[{index}]"
-        check = _validate_exact_object(
-            check, {"source_id", "locator", "entity_relation", "scope", "verdict", "finding"}, check_label
-        )
         source_id = str(check["source_id"])
         scope = str(check["scope"])
         verdict = str(check["verdict"])
         finding = str(check["finding"]).strip()
         locator = str(check["locator"]).strip()
-        if verdict not in _SOURCE_CHECK_VERDICTS:
-            raise ProgramError(
-                f"{check_label}.verdict must be one of {sorted(_SOURCE_CHECK_VERDICTS)}"
-            )
-        if not finding:
-            raise ProgramError(f"{check_label}.finding must be non-empty")
-        if check["entity_relation"] not in ENTITY_RELATIONSHIPS:
-            raise ProgramError(f"{check_label}.entity_relation is invalid")
         if re.search(
             r"\b(?:re-?verify|unverif(?:ied|iable)|needs? (?:independent )?verification|"
             r"verify later|requires? verification|(?:cannot|could not|unable to) verify|"
@@ -126,7 +112,7 @@ def _validate_source_integrity(
         document = documents.get(source_id)
         if document is None:
             raise ProgramError(f"{check_label}.source_id is not in the retained corpus")
-        if source_id not in candidate_source_ids:
+        if canonical(source_id) not in candidate_source_ids:
             raise ProgramError(f"{check_label}.source_id is not associated with this candidate")
         if not _document_has_inspectable_content(document):
             raise ProgramError(
@@ -135,10 +121,11 @@ def _validate_source_integrity(
         locators = {str(p.get("locator")) for p in document.get("evidence_passages", []) if isinstance(p, Mapping)} | {field for field in ("abstract", "raw_path", "supporting_text", "structured_content") if document.get(field)} | {f"{field}[{index}]" for field in ("snippets", "supports") for index, item in enumerate(document.get(field, [])) if str(item).strip()}
         if not locator or locator not in locators:
             raise ProgramError(f"{check_label}.locator is not retained by that source")
-        actual_uses.append((source_id, scope))
+        actual_uses.append((canonical(source_id), scope))
     if len(actual_uses) != len(set(actual_uses)):
         raise ProgramError(f"{label}.checks contains duplicate source-use checks")
     actual = set(actual_uses)
+    expected_uses = {(canonical(source_id), scope) for source_id, scope in expected_uses}
     if actual != expected_uses:
         raise ProgramError(
             f"{label}.checks must cover every cited source use exactly once; "
@@ -168,7 +155,7 @@ def _validate_audit_independence(records: Mapping[str, Any], results: Mapping[st
         review = reviews[candidate_id]; bridge = review.get("mechanistic_bridge", {})
         hidden = [review.get("hypothesis", ""), bridge.get("text", "") if isinstance(bridge, Mapping) else bridge, review.get("prior_art", {}).get("summary", "")]
         if any(len(phrase := words(value)) >= 12 and any(" ".join(phrase[index:index + 12]) in audit_text for index in range(len(phrase) - 11)) for value in hidden): raise ProgramError(f"Candidate {candidate_id} audit substantially copies a hidden dossier conclusion")
-        findings = [check["finding"] for check in row["source_integrity"]["checks"]] + [value["finding"] for value in row.get("why_not", [])] + [value["reason"] for value in row.get("component_scores", {}).values()] + [row.get("net_assessment", {}).get("text", ""), row.get("finding", "")]
+        findings = [check["finding"] for check in row["source_integrity"]["checks"]] + [value["text"] for value in row.get("why_not", [])] + [value["reason"] for value in row.get("component_scores", {}).values()] + [row.get("net_assessment", {}).get("text", ""), row.get("finding", "")]
         for finding in findings:
             if len(parts := words(finding)) >= 8: repeated.setdefault(" ".join(parts), set()).add(candidate_id)
     if any(len(candidate_ids) >= 3 for candidate_ids in repeated.values()): raise ProgramError("candidate audit repeats a generic source-integrity finding across candidates")
@@ -199,15 +186,16 @@ def _validate_candidate_audit(
             "assessments and excluded_candidates must partition every reviewed candidate exactly once"
         )
     corpus = source_index if source_index is not None else _all_documents(results)
-    documents = {value: row for row in corpus for value in {str(row["document_id"]), *map(str, row.get("identifier_aliases", []))}}
+    documents = _document_alias_index(corpus)
+    canonical = lambda source_id: str(documents[str(source_id)]["document_id"])
     source_ids = set(documents)
     dispositions = _contract_rows(records, "evidence_dispositions")
     expected_pairs = {
-        (str(row["candidate_id"]), str(source_id))
+        (str(row["candidate_id"]), canonical(source_id))
         for row in (candidate_evidence_index or [])
         for source_id in row.get("source_ids", [])
     }
-    candidate_sources = {str(row["candidate_id"]): set(map(str, row.get("source_ids", []))) for row in (candidate_evidence_index or [])}
+    candidate_sources = {str(row["candidate_id"]): {canonical(source_id) for source_id in row.get("source_ids", [])} for row in (candidate_evidence_index or [])}
     reviews_by_id = {str(row["candidate_id"]): row for row in _rows(results["candidate_review"]["records"], "reviews")}
     actual_pairs: list[tuple[str, str]] = []
     novelty_exclusions: dict[str, set[str]] = {}
@@ -222,9 +210,9 @@ def _validate_candidate_audit(
             )
         if not str(row["reason"]).strip():
             raise ProgramError(f"{label}.reason must be non-empty")
-        actual_pairs.append((candidate_id, source_id))
+        actual_pairs.append((candidate_id, canonical(source_id)))
         if row["disposition"] == "exact_disease_prior_use_or_testing":
-            novelty_exclusions.setdefault(candidate_id, set()).add(source_id)
+            novelty_exclusions.setdefault(candidate_id, set()).add(canonical(source_id))
     if len(actual_pairs) != len(set(actual_pairs)) or set(actual_pairs) != expected_pairs:
         raise ProgramError(
             "evidence_dispositions must cover candidate_evidence_index exactly; "
@@ -266,13 +254,13 @@ def _validate_candidate_audit(
         _validate_cited_entries(
             row["why_not"],
             label=f"{label}.why_not",
-            text_field="finding",
+            text_field="text",
             source_ids=source_ids,
         )
         for why_not_index, finding in enumerate(row["why_not"]):
             _validate_card_prose(
-                finding["finding"],
-                f"{label}.why_not[{why_not_index}].finding",
+                finding["text"],
+                f"{label}.why_not[{why_not_index}].text",
             )
         _validate_source_integrity(
             row["source_integrity"],
@@ -312,7 +300,7 @@ def _validate_candidate_audit(
             label=f"{label}.source_integrity",
         )
         if row["reason_code"] == "exact_disease_prior_use_or_testing" and not (
-            set(map(str, row["source_ids"]))
+            {canonical(source_id) for source_id in row["source_ids"]}
             & novelty_exclusions.get(str(row["candidate_id"]), set())
         ):
             raise ProgramError(f"{label} lacks its exact-disease evidence disposition")

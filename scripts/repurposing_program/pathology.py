@@ -678,15 +678,14 @@ def _validate_coverage_expansion(
     if documents and receipt["pdf_count"] < len(documents):
         raise ProgramError("Undermind receipt pdf_count cannot omit retained full-text documents")
     dispositions = receipt["paper_dispositions"]
-    allowed = {"retained", "counterclaim", "limitation", "identity", "duplicate", "no_material_evidence"}
-    if not isinstance(dispositions, dict) or any(not str(key).strip() or not isinstance(value, str) or value not in allowed for key, value in dispositions.items()):
+    if not isinstance(dispositions, list) or any(not isinstance(row, dict) or set(row) != {"cite_key", "document_id", "disposition", "rationale"} for row in dispositions):
         raise ProgramError("undermind_search_receipts[0].paper_dispositions is invalid")
-    if len(dispositions) > receipt["pdf_count"]:
-        raise ProgramError("Undermind read-paper dispositions cannot exceed available PDFs")
-    if set(dispositions) - set(map(str, ranked_ids)): raise ProgramError("Undermind read papers must come from the ranked result")
-    if any(dispositions.get(str(row["document_id"])) != "retained" for row in documents):
-        raise ProgramError("Every retained Undermind document needs a retained paper disposition")
-    if len(dispositions) != receipt["pdf_count"]: raise ProgramError("Undermind paper_dispositions must account for every read PDF")
+    cite_keys = [str(row["cite_key"]) for row in dispositions]
+    if len(dispositions) != receipt["pdf_count"] or len(cite_keys) != len(set(cite_keys)) or set(cite_keys) - set(map(str, ranked_ids)): raise ProgramError("Undermind paper_dispositions must account once for every read ranked paper")
+    if any(not key.strip() or row["disposition"] not in {"retained", "not_retained"} or not str(row["rationale"]).strip() for key, row in zip(cite_keys, dispositions)): raise ProgramError("Undermind paper_dispositions values are invalid")
+    if any((row["disposition"] == "retained" and not str(row["document_id"] or "").strip()) or (row["disposition"] == "not_retained" and row["document_id"] is not None) for row in dispositions): raise ProgramError("Undermind paper dispositions have an invalid document crosswalk")
+    retained_ids = [str(row["document_id"]) for row in dispositions if row["disposition"] == "retained"]
+    if len(retained_ids) != len(set(retained_ids)) or set(retained_ids) != {str(row["document_id"]) for row in documents}: raise ProgramError("Retained Undermind dispositions must match returned documents exactly")
 
 
 def _validate_curation(

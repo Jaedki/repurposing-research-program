@@ -25,6 +25,7 @@ from .evidence import (
     _all_documents,
     _cited_ids,
     _cited_documents,
+    _document_alias_index,
     _find,
     _merge_documents,
     _rows,
@@ -419,7 +420,7 @@ def _packet_context(
     documents = _canonicalize_document_corpus(
         run_root, _all_documents(results), verify_titles=False
     )
-    canonical_ids = {alias: str(row["document_id"]) for row in documents for alias in row.get("identifier_aliases", [])}
+    canonical_ids = {alias: str(row["document_id"]) for alias, row in _document_alias_index(documents).items()}
     reviews = _rows(results["candidate_review"]["records"], "reviews")
     candidates = [{**row, "prior_art_terms": _candidate_prior_art_terms(row, seeds)} for row in _canonical_candidates(results)]
     aliases = {
@@ -554,7 +555,7 @@ def _record_contract(
         )
     if task == "pathology_coverage_expansion" and context is not None:
         contracts["undermind_search_receipts"]["template"].update({
-            "search_name": context["undermind_search_name"], "outcome": "completed"
+            "search_name": context["undermind_search_name"], "outcome": "completed", "ranked_result_ids": [], "paper_dispositions": [{"cite_key": None, "document_id": None, "disposition": None, "rationale": None}]
         })
     return contracts
 

@@ -29,7 +29,7 @@ def _evidence_card_rows(
                 },
                 "reasons_why_not": [
                     {
-                        "text": str(finding["finding"]).strip(),
+                        "text": str(finding["text"]).strip(),
                         "source_ids": sorted(set(map(str, finding["source_ids"]))),
                     }
                     for finding in assessment["why_not"]
