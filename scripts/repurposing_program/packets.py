@@ -81,15 +81,12 @@ def _completed_hypothesis_packets(
         )
         review_source_ids = set(map(str, review["source_ids"]))
         source_ids = _cited_ids(issued["hypothesis"]) | review_source_ids
-        local_documents = _merge_documents(
-            [*issued["source_index"], *_source_index(documents, review_source_ids)],
-            canonical_publications=True,
-        )
+        local_documents = _source_index(documents, source_ids)
         completed.append({
             "hypothesis": issued["hypothesis"],
             "hypothesis_report": review["hypothesis_report"],
             "review_gaps": accepted.get("gaps", []),
-            "source_index": _source_index(local_documents, source_ids),
+            "source_index": local_documents,
         })
     return completed
 
@@ -659,9 +656,6 @@ def _build_packet(
         ]
     elif task == "candidate_evidence_review":
         packet_rules = [
-            "This folder is the complete hypothesis packet for one candidate.",
-            "Research the scientific viability of context.hypothesis and write its final natural "
-            "scientific prose without scoring or eligibility decisions.",
             "Controller validation owns canonical publication identity and title verification.",
         ]
     elif task == "candidate_audit":

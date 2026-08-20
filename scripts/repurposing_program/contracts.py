@@ -121,7 +121,7 @@ SCORE_COMPONENT_RUBRIC = {
     "disease_mechanism_validity": {
         "label": "Disease-mechanism validity and actionability",
         "question": "Independent of the drug, is the pathological state a material and potentially modifiable part of the disease?",
-        "consider": "Causality, human pathology, natural history, perturbational support, timing, actionability, and contradictions; human genetics is useful but not mandatory.",
+        "consider": "Causality, disease materiality, human pathology, natural history, perturbational support, modifiability, and contradictions; do not score drug action, rescue direction, or exposure here.",
         "anchors": {
             1: "Generic association, expression change, biomarker, or broad pathway label.",
             3: "Credible disease-specific evidence supports a plausible actionable role.",
@@ -131,27 +131,27 @@ SCORE_COMPONENT_RUBRIC = {
     "directional_rescue_logic": {
         "label": "Directional rescue logic and biological context",
         "question": "Would the proposed intervention move disease biology beneficially in the relevant context?",
-        "consider": "Direction, causal distance, tissue, cell state, stage, timing, compensation, and cited graph context. Novel indirect routes may score highly when every material link is supported and falsifiable.",
+        "consider": "Direction, causal distance, tissue, cell state, stage, timing, compensation, and cited graph context; do not rescore intrinsic drug action or human exposure. Novel indirect routes may score highly when every material link is supported and falsifiable.",
         "anchors": {
             1: "Generic benefit language or a long unsupported causal chain.",
             3: "A coherent cited directional bridge with explicit material assumptions.",
-            5: "The relevant perturbation is directly shown to rescue the pathological process in context.",
+            5: "A directionally matched perturbation, not necessarily this candidate, directly rescues the pathological process in context.",
         },
     },
     "exact_drug_pharmacology": {
         "label": "Exact-drug pharmacological support",
         "question": "Does this exact candidate reliably produce the action required by the hypothesis?",
-        "consider": "Active entity, functional potency, direction, selectivity or polypharmacology, engagement, mediation, metabolites, and reproducible target-independent phenotypes where appropriate.",
+        "consider": "The exact active entity's intrinsic action under tested conditions: functional potency, direction, selectivity or polypharmacology, causal mediation, metabolites, and reproducible target-independent phenotypes where appropriate; do not score achieved human exposure or disease benefit here.",
         "anchors": {
             1: "Database annotation, class inference, docking, or prediction without exact-drug confirmation.",
-            3: "Established exact-drug functional action with relevant potency but incomplete engagement or mediation.",
-            5: "Direct engagement and causal mediation are established in the relevant biological system.",
+            3: "Established exact-drug functional action with relevant potency but incomplete selectivity or causal mediation.",
+            5: "The exact-drug action and causal mediation are directly established in the relevant biological system.",
         },
     },
     "exposure_feasibility": {
         "label": "Exposure and translational feasibility",
         "question": "Can the required action plausibly occur at the relevant biological site in humans?",
-        "consider": "Attained unbound exposure, functional potency, tissue access, route, duration, metabolites, accumulation, local delivery, occupancy, and proximal pharmacodynamics. Missing PK lowers rather than blocks the score.",
+        "consider": "Attained unbound human exposure relative to the required pharmacological concentration, tissue access, route, duration, accumulation, local delivery, target-site occupancy, and proximal pharmacodynamics; do not rescore intrinsic drug action or efficacy. Missing PK lowers rather than blocks the score.",
         "anchors": {
             1: "Available evidence makes relevant exposure doubtful but not conclusively impossible.",
             2: "Relevant exposure is materially unknown without demonstrated impossibility.",
@@ -160,9 +160,9 @@ SCORE_COMPONENT_RUBRIC = {
         },
     },
     "empirical_translation": {
-        "label": "Integrated empirical and translational support",
+        "label": "Whole-hypothesis phenotypic support",
         "question": "Is there drug-specific evidence that the complete hypothesis produces a relevant beneficial phenotype?",
-        "consider": "Human-derived systems, disease models, adjacent or direct human evidence, independent convergence, nulls, failed replication, artefacts, and rival explanations. Prior disease-drug evidence is not required.",
+        "consider": "Drug-specific beneficial phenotypes in human-derived systems, disease models, or adjacent human evidence, including independent replication, nulls, artefacts, and rival explanations; do not rescore the component mechanism or PK premises. Prior disease-drug evidence is not required.",
         "anchors": {
             1: "Only computational prediction, a mismatched model, or a weak uncontrolled observation supports the phenotype.",
             3: "A relevant drug-specific phenotype or strong adjacent human precedent exists with material limitations.",
@@ -184,7 +184,7 @@ SCORE_RUBRIC = {
     "rules": [
         "Score the net evidence in each category, including the strongest relevant counterevidence.",
         "Missing evidence is not contradiction, and absent prior disease-drug testing is not a penalty by itself.",
-        "Apply one finding to the category whose premise it directly tests; do not award or deduct the same substantive finding twice.",
+        "A study may inform several categories only through distinct observations that test distinct premises; do not award or deduct the same observation twice.",
         "Computational or graph evidence may strengthen convergence but graph proximity, labels, docking, or prediction alone cannot establish a high score.",
         "Use invalidating_finding only when retained evidence directly disproves the exact hypothesis; weak, missing, indirect, or uncertain evidence never qualifies.",
     ],
@@ -192,7 +192,7 @@ SCORE_RUBRIC = {
         "Set to null unless retained evidence directly establishes that the exact drug does not "
         "perform the required action, acts in the harmful direction without a supported alternative "
         "route, cannot reach the required biological exposure, failed a decisive mechanism-informative "
-        "test, or produces only an established artefact. Preserve the score when such a finding exists."
+        "test, or produces only an established artefact. Set the directly disproved category to zero and score the other categories independently."
     ),
 }
 SEED_EXCLUSION_REASONS = frozenset({"no_established_action", "wrong_or_opposite_action", "invalid_entity", "duplicate_seed", "direct_derivation_contamination"})
@@ -494,7 +494,7 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
         "collections": ["documents", "identity_groups"],
     },
     "candidate_evidence_review": {
-        "role": "candidate hypothesis auditor and scientific report writer",
+        "role": "candidate hypothesis researcher and scientific report writer",
         "task": (
             "Use the complete single-candidate hypothesis in context.hypothesis. Research whether "
             "it is scientifically viable, checking the exact drug action, disease mechanism, proposed "
@@ -1174,7 +1174,8 @@ FIELD_RULES = {
         "each component has exactly value, reason, and source_ids; value is an integer from 0 "
         "through 5 and Python scales the unweighted sum to 100",
         "invalidating_finding is null or exactly finding and source_ids; use it only for direct "
-        "disproof under score_rubric.invalidating_finding and retain the candidate's scores",
+        "disproof under score_rubric.invalidating_finding, set the directly disproved category to "
+        "zero using the same evidence, and score other categories independently",
         "use the supplied hypothesis report without rewriting its prose",
         "excluded_candidates use one cited programme-eligibility reason from the bounded exclusion policy",
         "do not exclude a candidate merely for unresolved identity, weak evidence, long causal "

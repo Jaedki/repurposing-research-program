@@ -1,13 +1,13 @@
-"""Candidate seed and evidence-dossier partition and validation rules."""
+"""Candidate seed and scientific-report partition and validation rules."""
 
 from __future__ import annotations
 
 import re
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from .contracts import SEED_EXCLUSION_REASONS, _COMPARATORS
 from .errors import ProgramError
-from .evidence import _all_documents, _document_alias_index, _find, _rows
+from .evidence import _document_alias_index, _find, _rows
 from .graph import _graph_support_ids
 from .hypotheses import _connection_rows
 from .identity import _candidate_queries, _canonical_candidates
@@ -389,7 +389,8 @@ def _validate_seed_item(
 
 
 def _validate_review_item(
-    records: Mapping[str, Any], item_id: str, results: Mapping[str, Mapping[str, Any]]
+    records: Mapping[str, Any], item_id: str, results: Mapping[str, Mapping[str, Any]],
+    source_index: Iterable[Mapping[str, Any]],
 ) -> None:
     documents = _validate_documents(records, canonical_ids=True)
     reviews = _contract_rows(records, "reviews", "candidate_id")
@@ -397,7 +398,7 @@ def _validate_review_item(
     if {str(row["candidate_id"]) for row in reviews} != {str(batch["candidate_id"])}:
         raise ProgramError("candidate review must cover exactly the supplied candidate")
     retained_ids = {str(row["document_id"]) for row in documents}
-    source_ids = set(_document_alias_index([*_all_documents(results), *documents]))
+    source_ids = set(_document_alias_index([*source_index, *documents]))
     for index, row in enumerate(reviews):
         label = f"reviews[{index}]"
         if not str(row["hypothesis_report"]).strip():

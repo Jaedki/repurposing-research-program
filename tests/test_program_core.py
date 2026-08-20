@@ -1777,8 +1777,8 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(second_packet["context"]["hypothesis"]["candidate"]["candidate_id"], "UNICHEM:2")
         second_review = self.review("UNICHEM:2", "PMID:40")
         second_review["hypothesis_report"] = (
-            "The second drug has already entered an exact-disease therapeutic study and therefore "
-            "is not a novel repurposing hypothesis."
+            "The second drug has already entered an exact-disease therapeutic study, which is "
+            "material prior-use evidence for the downstream novelty decision."
         )
         self.submit(action, {
             "documents": [{"document_id": "PMID:40", "title": "Exact-disease study", "source": "test",
@@ -3411,14 +3411,22 @@ class WorkflowTest(unittest.TestCase):
         }
         batch = [{"candidate_id": "DRUG-A", "concept_id": "NODE:A"}]
         with patch.object(candidate_rules, "_review_batches", return_value=batch):
-            candidate_rules._validate_review_item(records, "DRUG-A", {})
+            candidate_rules._validate_review_item(records, "DRUG-A", {}, [])
             records["reviews"][0]["metadata"] = "not allowed"
             with self.assertRaisesRegex(core.ProgramError, "unexpected fields"):
-                candidate_rules._validate_review_item(records, "DRUG-A", {})
+                candidate_rules._validate_review_item(records, "DRUG-A", {}, [])
             del records["reviews"][0]["metadata"]
             records["reviews"][0]["source_ids"] = ["PMID:404"]
             with self.assertRaisesRegex(core.ProgramError, "unknown IDs"):
-                candidate_rules._validate_review_item(records, "DRUG-A", {})
+                candidate_rules._validate_review_item(records, "DRUG-A", {}, [])
+            supplied = {
+                "document_id": "PMID:2", "title": "Supplied evidence", "source": "test",
+                "evidence_passages": [{"text": "Evidence", "locator": "test fixture"}],
+            }
+            records["reviews"][0]["source_ids"] = ["PMID:1", "PMID:2"]
+            with self.assertRaisesRegex(core.ProgramError, "unknown IDs"):
+                candidate_rules._validate_review_item(records, "DRUG-A", {}, [])
+            candidate_rules._validate_review_item(records, "DRUG-A", {}, [supplied])
             records["reviews"][0]["source_ids"] = ["PMID:1"]
             records["documents"] = []
             with self.assertRaisesRegex(core.ProgramError, "retained by this review"):
@@ -3432,6 +3440,8 @@ class WorkflowTest(unittest.TestCase):
                         ],
                         "profiles": [{"source_ids": ["PMID:1"]}],
                     }}},
+                    [{"document_id": "PMID:1", "title": "Prior evidence", "source": "test",
+                      "evidence_passages": [{"text": "Evidence", "locator": "test fixture"}]}],
                 )
             records["documents"] = [
                 {"document_id": "PMID:1", "title": "Drug evidence", "source": "test",
@@ -3439,7 +3449,7 @@ class WorkflowTest(unittest.TestCase):
             ]
             records["reviews"] = [self.review("DRUG-B")]
             with self.assertRaisesRegex(core.ProgramError, "exactly the supplied candidate"):
-                candidate_rules._validate_review_item(records, "DRUG-A", {})
+                candidate_rules._validate_review_item(records, "DRUG-A", {}, [])
 
     def test_hypothesis_report_contract_keeps_prior_art_terms_internal(self):
         seed_records = {"candidates": [{"seed_id": "SEED-A", "name": "Brand A"}]}
@@ -3539,6 +3549,11 @@ class WorkflowTest(unittest.TestCase):
             "finding": "Direct retained evidence disproves the exact proposed route.",
             "source_ids": ["PMID:1"],
         }
+        with self.assertRaisesRegex(core.ProgramError, "zero-scored category"):
+            audit._validate_candidate_audit(invalidated, results, hypothesis_packets)
+        invalidated["assessments"][0]["component_scores"][
+            "directional_rescue_logic"
+        ]["value"] = 0
         audit._validate_candidate_audit(invalidated, results, hypothesis_packets)
 
     def test_exact_disease_novelty_exclusion_dry_run(self):
@@ -3615,285 +3630,10 @@ class WorkflowTest(unittest.TestCase):
         self.assertNotIn("candidate_evidence_index", context)
         self.assertEqual({row["document_id"] for row in completed["source_index"]}, {"PMID:1"})
 
-    def legacy_counterevidence_is_unscored_and_cannot_restore_robustness_points(self):
-        results = {
-            "candidate_review": {"records": {
-                "documents": [
-                    {
-                        "document_id": "PMID:1",
-                        "title": "Retained evidence",
-                        "source": "test",
-                        "evidence_passages": [{"text": "Evidence", "locator": "abstract"}],
-                    }
-                ],
-                "reviews": [self.review("DRUG-A")],
-            }}
-        }
-        assessment = self.assessment(
-            "DRUG-A", values={component: 5 for component in contracts.SCORE_COMPONENTS}
-        )
-        baseline_score = ranking._final_score(assessment)
-        assessment["why_not"] = [{
-            "text": "Independent disease models found no efficacy.",
-            "source_ids": ["PMID:1"],
-        }]
-        assessment["source_integrity"] = self.source_integrity(assessment, locator="abstract")
-        audit._validate_candidate_audit(
-            {"assessments": [assessment], "excluded_candidates": [],
-             "evidence_dispositions": []}, results
-        )
-        self.assertEqual(ranking._final_score(assessment), baseline_score)
 
-        invalid = json.loads(json.dumps(assessment))
-        invalid["component_scores"]["evidence_robustness"] = {
-            "value": 20,
-            "reason": "Consistent negative findings form a strong evidence base.",
-            "source_ids": ["PMID:1"],
-        }
-        with self.assertRaisesRegex(core.ProgramError, "unexpected fields"):
-            audit._validate_candidate_audit(
-                {"assessments": [invalid], "excluded_candidates": [],
-                 "evidence_dispositions": []}, results
-            )
 
-    def legacy_component_scores_allow_negative_evidence_without_manufactured_support(self):
-        review = self.review("DRUG-A")
-        review["supporting_findings"].append({
-            "finding": "A second retained source informs the drug-action component.",
-            "source_ids": ["PMID:2"],
-        })
-        results = {
-            "candidate_review": {"records": {
-                "documents": [
-                    {
-                        "document_id": source_id,
-                        "title": "Retained evidence",
-                        "source": "test",
-                        "evidence_passages": [{"text": "Evidence", "locator": "results"}],
-                    }
-                    for source_id in ("PMID:1", "PMID:2")
-                ],
-                "reviews": [review],
-            }}
-        }
-        component = "drug_action_confidence"
-        assessment = self.assessment("DRUG-A")
-        assessment["component_scores"][component]["source_ids"].append("PMID:2")
-        assessment["source_integrity"] = self.source_integrity(assessment, locator="results")
-        next(
-            check for check in assessment["source_integrity"]["checks"]
-            if check["scope"] == component and check["source_id"] == "PMID:2"
-        )["verdict"] = "contradicts"
 
-        audit._validate_candidate_audit(
-            {"assessments": [assessment], "excluded_candidates": [],
-             "evidence_dispositions": []}, results
-        )
-        assessment["component_scores"][component]["value"] = 20
-        with self.assertRaisesRegex(core.ProgramError, "20-point component"):
-            audit._validate_candidate_audit(
-                {"assessments": [assessment], "excluded_candidates": [],
-                 "evidence_dispositions": []}, results
-            )
 
-        unsupported = self.assessment("DRUG-A")
-        unsupported["source_integrity"] = self.source_integrity(unsupported, locator="results")
-        next(
-            check for check in unsupported["source_integrity"]["checks"]
-            if check["scope"] == component
-        )["verdict"] = "does_not_support"
-        audit._validate_candidate_audit(
-            {"assessments": [unsupported], "excluded_candidates": [],
-             "evidence_dispositions": []}, results
-        )
-
-    def legacy_source_integrity_checks_every_cited_use_and_cannot_defer_judgment(self):
-        results = {
-            "candidate_review": {"records": {
-                "documents": [{
-                    "document_id": "PMID:1",
-                    "title": "Retained evidence",
-                    "source": "test",
-                    "evidence_passages": [{"text": "Evidence", "locator": "results"}],
-                }],
-                "reviews": [self.review("DRUG-A")],
-            }}
-        }
-        assessment = self.assessment("DRUG-A")
-        assessment["aliases"] = [
-            {"name": "Alias one", "source_ids": ["PMID:1"]},
-            {"name": "Alias two", "source_ids": ["PMID:1"]},
-        ]
-        assessment["source_integrity"] = self.source_integrity(assessment, locator="results")
-        audit._validate_candidate_audit(
-            {"assessments": [assessment], "excluded_candidates": [],
-             "evidence_dispositions": []}, results
-        )
-        scopes = {
-            check["scope"] for check in assessment["source_integrity"]["checks"]
-        }
-        self.assertIn("alias[0]", scopes)
-        self.assertIn("alias[1]", scopes)
-
-        not_object = json.loads(json.dumps(assessment))
-        not_object["source_integrity"] = []
-        with self.assertRaisesRegex(core.ProgramError, "source_integrity must be an object"):
-            audit._validate_candidate_audit(
-                {"assessments": [not_object], "excluded_candidates": [],
-                 "evidence_dispositions": []}, results
-            )
-
-        prefixed = json.loads(json.dumps(assessment))
-        for check in prefixed["source_integrity"]["checks"]:
-            if check["scope"] in contracts.SCORE_COMPONENTS:
-                check["scope"] = f"component_scores.{check['scope']}"
-        with self.assertRaisesRegex(core.ProgramError, "cover every cited source use"):
-            audit._validate_candidate_audit(
-                {"assessments": [prefixed], "excluded_candidates": [],
-                 "evidence_dispositions": []}, results
-            )
-
-        generic = json.loads(json.dumps(assessment))
-        generic["source_integrity"] = {
-            "status": "supported",
-            "finding": "Looks sound.",
-            "source_ids": ["PMID:1"],
-        }
-        with self.assertRaisesRegex(core.ProgramError, "missing fields: checks"):
-            audit._validate_candidate_audit(
-                {"assessments": [generic], "excluded_candidates": [],
-                 "evidence_dispositions": []}, results
-            )
-
-        missing = json.loads(json.dumps(assessment))
-        missing["source_integrity"]["checks"].pop()
-        with self.assertRaisesRegex(core.ProgramError, "cover every cited source use"):
-            audit._validate_candidate_audit(
-                {"assessments": [missing], "excluded_candidates": [],
-                 "evidence_dispositions": []}, results
-            )
-
-        deferred = json.loads(json.dumps(assessment))
-        deferred["source_integrity"]["checks"][0]["finding"] = (
-            "This source needs independent verification."
-        )
-        with self.assertRaisesRegex(core.ProgramError, "not defer verification"):
-            audit._validate_candidate_audit(
-                {"assessments": [deferred], "excluded_candidates": [],
-                 "evidence_dispositions": []}, results
-            )
-
-        deferred["source_integrity"]["checks"][0]["finding"] = (
-            "This citation is unverifiable from the packet."
-        )
-        with self.assertRaisesRegex(core.ProgramError, "not defer verification"):
-            audit._validate_candidate_audit(
-                {"assessments": [deferred], "excluded_candidates": [],
-                 "evidence_dispositions": []}, results
-            )
-
-        no_content = json.loads(json.dumps(results))
-        del no_content["candidate_review"]["records"]["documents"][0]["evidence_passages"]
-        with self.assertRaisesRegex(core.ProgramError, "no inspectable content"):
-            audit._validate_candidate_audit(
-                {"assessments": [assessment], "excluded_candidates": [],
-                 "evidence_dispositions": []}, no_content
-            )
-
-        null_content = json.loads(json.dumps(results))
-        null_content["candidate_review"]["records"]["documents"][0][
-            "evidence_passages"
-        ] = [{"text": None, "locator": None}]
-        with self.assertRaisesRegex(core.ProgramError, "no inspectable content"):
-            audit._validate_candidate_audit(
-                {"assessments": [assessment], "excluded_candidates": [],
-                 "evidence_dispositions": []}, null_content
-            )
-
-        duplicate_publication = json.loads(json.dumps(assessment))
-        duplicate_publication["component_scores"]["drug_action_confidence"][
-            "source_ids"
-        ].append("DOI:10.1000/same")
-        duplicate_publication["source_integrity"] = self.source_integrity(
-            duplicate_publication, locator="results"
-        )
-        source_index = [
-            {
-                **results["candidate_review"]["records"]["documents"][0],
-                "canonical_publication_id": "PMID:1",
-            },
-            {
-                "document_id": "DOI:10.1000/same",
-                "title": "Retained evidence",
-                "canonical_publication_id": "PMID:1",
-                "evidence_passages": [{"text": "Evidence", "locator": "results"}],
-            },
-        ]
-        with self.assertRaisesRegex(core.ProgramError, "more than once"):
-            audit._validate_candidate_audit(
-                {"assessments": [duplicate_publication], "excluded_candidates": [],
-                 "evidence_dispositions": []},
-                results,
-                source_index,
-            )
-
-    def legacy_audit_checks_are_candidate_associated_passage_specific_and_cover_review_counterevidence(self):
-        document = {"document_id": "PMID:1", "title": "Evidence", "source": "test", "evidence_passages": [{"text": "The retained counterevidence.", "locator": "results"}]}
-        review = self.review("DRUG-A")
-        review["why_not"] = [self.review_finding("The retained counterevidence matters.", locator="results")]
-        results = {"candidate_review": {"records": {"documents": [document], "reviews": [review]}}}
-        assessment = self.assessment("DRUG-A")
-        assessment["source_integrity"] = self.source_integrity(assessment, locator="results")
-        records = {"assessments": [assessment], "excluded_candidates": [], "evidence_dispositions": [{"candidate_id": "DRUG-A", "source_id": "PMID:1", "disposition": "relevant_not_tested", "reason": "The source is candidate-relevant."}]}
-        with self.assertRaisesRegex(core.ProgramError, "cover every cited source use"):
-            audit._validate_candidate_audit(records, results, [document], [{"candidate_id": "DRUG-A", "source_ids": ["PMID:1"]}])
-        assessment["source_integrity"] = self.source_integrity(assessment, locator="results", review=review)
-        audit._validate_candidate_audit(records, results, [document], [{"candidate_id": "DRUG-A", "source_ids": ["PMID:1"]}])
-        wrong_locator = json.loads(json.dumps(records)); wrong_locator["assessments"][0]["source_integrity"]["checks"][0]["locator"] = "missing"
-        with self.assertRaisesRegex(core.ProgramError, "locator is not retained"):
-            audit._validate_candidate_audit(wrong_locator, results, [document], [{"candidate_id": "DRUG-A", "source_ids": ["PMID:1"]}])
-        wrong_relation = json.loads(json.dumps(records)); wrong_relation["assessments"][0]["source_integrity"]["checks"][0]["entity_relation"] = ""
-        with self.assertRaisesRegex(core.ProgramError, "entity_relation must be a non-empty string"):
-            audit._validate_candidate_audit(wrong_relation, results, [document], [{"candidate_id": "DRUG-A", "source_ids": ["PMID:1"]}])
-        with self.assertRaisesRegex(core.ProgramError, "not associated with this candidate"):
-            audit._validate_candidate_audit({**records, "evidence_dispositions": []}, results, [document], [{"candidate_id": "DRUG-A", "source_ids": []}])
-
-    def legacy_audit_independence_rejects_copied_generic_and_route_free_output(self):
-        document = {"document_id": "PMID:1", "title": "Evidence", "source": "test", "evidence_passages": [{"text": "Evidence", "locator": "abstract"}]}
-        copied_review = self.review("DRUG-A")
-        copied_review["hypothesis"] = "The exact retained drug action is inferred to correct the supplied disease mechanism in the affected tissue."
-        copied = self.assessment("DRUG-A")
-        copied["net_assessment"]["text"] = copied_review["hypothesis"]
-        copied["source_integrity"] = self.source_integrity(copied)
-        results = {"candidate_review": {"records": {"documents": [document], "reviews": [copied_review]}}}
-        with self.assertRaisesRegex(core.ProgramError, "copies a hidden dossier conclusion"):
-            audit._validate_candidate_audit({"assessments": [copied], "excluded_candidates": [], "evidence_dispositions": []}, results)
-        partial = self.assessment("DRUG-A")
-        partial["net_assessment"]["text"] = "The exact retained drug action is inferred to correct the supplied disease, but the remaining conclusion is independently framed."
-        partial["source_integrity"] = self.source_integrity(partial)
-        with self.assertRaisesRegex(core.ProgramError, "copies a hidden dossier conclusion"):
-            audit._validate_candidate_audit({"assessments": [partial], "excluded_candidates": [], "evidence_dispositions": []}, results)
-
-        reviews = [self.review(f"DRUG-{index}") for index in range(3)]
-        assessments = [self.assessment(f"DRUG-{index}") for index in range(3)]
-        for assessment in assessments:
-            for check in assessment["source_integrity"]["checks"]:
-                check["finding"] = "The first retained passage supports this exact candidate source use without qualification."
-        repeated_results = {"candidate_review": {"records": {"documents": [document], "reviews": reviews}}}
-        with self.assertRaisesRegex(core.ProgramError, "repeats a generic"):
-            audit._validate_candidate_audit({"assessments": assessments, "excluded_candidates": [], "evidence_dispositions": []}, repeated_results)
-
-        route_results = {
-            "candidate_review": {"records": {"documents": [document], "reviews": [self.review("DRUG-A")]}},
-            "candidate_seed_generation": {"records": {"rescue_strategies": [{"strategy_id": "STRATEGY-A", "pathological_state": "excess mitochondrial permeability transition", "rescuable_state": "controlled mitochondrial permeability transition", "desired_direction": "decrease permeability transition", "mechanistic_basis": "Mitochondrial permeability transition drives injury."}]}},
-        }
-        candidate = {"candidate_id": "DRUG-A", "strategy_ids": ["STRATEGY-A"]}
-        route_free = self.assessment("DRUG-A")
-        with patch.object(audit, "_canonical_candidates", return_value=[candidate]):
-            with self.assertRaisesRegex(core.ProgramError, "does not identify its actual rescue route"):
-                audit._validate_candidate_audit({"assessments": [route_free], "excluded_candidates": [], "evidence_dispositions": []}, route_results)
-            route_free["net_assessment"]["text"] = "The inference is that inhibiting mitochondrial permeability transition could restore cellular resilience."
-            audit._validate_candidate_audit({"assessments": [route_free], "excluded_candidates": [], "evidence_dispositions": []}, route_results)
 
     def test_raw_scores_sort_deterministically_and_ties_share_rank(self):
         candidates = [
@@ -3908,7 +3648,8 @@ class WorkflowTest(unittest.TestCase):
             for candidate_id in ("DRUG-A", "DRUG-B", "DRUG-C")
         ]
         high = {component: 5 for component in contracts.SCORE_COMPONENTS}
-        invalidated = self.assessment("DRUG-C", values=high)
+        invalidated_values = {**high, "empirical_translation": 0}
+        invalidated = self.assessment("DRUG-C", values=invalidated_values)
         invalidated["invalidating_finding"] = {
             "finding": "Direct retained evidence invalidates the exact hypothesis.",
             "source_ids": ["PMID:1"],
@@ -3937,7 +3678,7 @@ class WorkflowTest(unittest.TestCase):
             [
                 ("DRUG-A", 1, 100, "viable"),
                 ("DRUG-B", 1, 100, "viable"),
-                ("DRUG-C", 2, 100, "invalidated"),
+                ("DRUG-C", 2, 80, "invalidated"),
             ],
         )
 
@@ -3957,22 +3698,6 @@ class WorkflowTest(unittest.TestCase):
             "although relevant tissue exposure has not been established.\n",
         )
 
-    def legacy_card_prose_rejects_fragments_metadata_labels_and_ellipses(self):
-        self.assertEqual(
-            audit._validate_card_prose(
-                "Target inhibition could reduce pathological signalling.", "card"
-            ),
-            "Target inhibition could reduce pathological signalling.",
-        )
-        invalid = {
-            "Target inhibition": "complete sentence prose",
-            "Mechanism: target inhibition.": "metadata-labelled fragment",
-            "Target inhibition could reduce...": "ellipses",
-        }
-        for prose, error in invalid.items():
-            with self.subTest(prose=prose):
-                with self.assertRaisesRegex(core.ProgramError, error):
-                    audit._validate_card_prose(prose, "card")
 
     def test_assertions_merge_by_triple_with_context_and_controller_id(self):
         assertion = {
@@ -4125,16 +3850,6 @@ class WorkflowTest(unittest.TestCase):
             }],
         }
 
-    @staticmethod
-    def review_finding(text, source_id="PMID:1", *, locator="test fixture", identity_relation=None, entity_form="the stated candidate form"):
-        row = {
-            "finding": text, "source_ids": [source_id],
-            "evidence_locators": {source_id: locator}, "evidence_system": "human",
-            "epistemic_status": "direct_observation", "entity_form": entity_form,
-        }
-        if identity_relation is not None:
-            row["identity_relation"] = identity_relation
-        return row
 
     @staticmethod
     def review(candidate_id, source_id="PMID:1"):

@@ -173,7 +173,9 @@ closed scorer assigns five 0–5 category scores and an optional directly eviden
 finding, or applies a programme-eligibility exclusion. Python scales the unweighted sum to 100,
 keeps invalidated hypotheses after viable hypotheses, and rejects citations borrowed from another
 candidate packet. Weak, missing, indirect, or uncertain evidence lowers scores and never becomes an
-invalidating finding. The scorer does not search or rewrite the report. Final cards contain only the
+invalidating finding. A directly invalidated premise receives zero in its category using the same
+evidence; the remaining categories retain their independent scores. The scorer does not search or
+rewrite the report. Final cards contain only the
 preferred name and the review-owned hypothesis report verbatim; internal report source IDs and
 scoring metadata are not rendered into that prose.
 

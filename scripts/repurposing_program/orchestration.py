@@ -439,7 +439,7 @@ def _validate_result(
             result["records"], prior
         ),
         "candidate_evidence_review": lambda: _validate_review_item(
-            result["records"], str(item_id), prior
+            result["records"], str(item_id), prior, packet["context"]["source_index"]
         ),
         "candidate_audit": lambda: _validate_candidate_audit(
             result["records"], prior, packet["context"]["hypothesis_packets"],

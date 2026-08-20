@@ -72,11 +72,19 @@ def _validate_candidate_audit(
             )
             if not str(invalidating["finding"]).strip():
                 raise ProgramError(f"{label}.invalidating_finding.finding must be non-empty")
-            if not _references(
+            invalidating_refs = _references(
                 invalidating, "source_ids", candidate_source_ids,
                 f"{label}.invalidating_finding",
-            ):
-                raise ProgramError(f"{label}.invalidating_finding.source_ids must cite retained evidence")
+            )
+            zero_sources = {
+                str(source_id) for component in SCORE_COMPONENTS
+                if components[component]["value"] == 0
+                for source_id in components[component]["source_ids"]
+            }
+            if not invalidating_refs & zero_sources:
+                raise ProgramError(
+                    f"{label}.invalidating_finding must share evidence with a zero-scored category"
+                )
     for index, row in enumerate(exclusions):
         label = f"excluded_candidates[{index}]"
         if row["reason_code"] not in AUDIT_EXCLUSION_REASONS:
