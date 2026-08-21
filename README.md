@@ -1,6 +1,6 @@
 # Repurposing Research Program
 
-This skill runs a deterministic, source-backed programme for identifying existing drugs whose established actions could plausibly alter an evidence-backed element of a genetic disease's pathology. It builds and freezes a treatment-blind pathology graph before generating, reviewing, and ranking mechanism-linked candidates.Pathology evidence is kept separate from drug-action evidence.
+This skill runs a deterministic, source-backed programme for identifying existing drugs whose established actions could plausibly alter an evidence-backed element of a genetic disease's pathology. It builds and freezes a treatment-blind pathology graph before generating, reviewing, and ranking mechanism-linked candidates. Pathology evidence is kept separate from drug-action evidence.
 
 The outputs are experimental hypotheses for research prioritization. They are not clinical advice or evidence of efficacy.
 
@@ -28,4 +28,17 @@ The runtime must support fresh isolated packet workers, persisted local files, c
 
 The controller does not read Asta or Undermind credentials. Their searches are performed only by the packet workers assigned to those stages.
 
+## Example run
 
+The repository includes one complete example: [UNC80 deficiency](examples/unc80-deficiency/README.md). It contains the input case, ranked candidates, candidate cards, citations, provenance, exclusions, rescue strategies, evidence graph, and build manifest from the completed 21 August 2026 run.
+
+In Codex, the equivalent starting prompt is:
+
+```text
+$repurposing-research-program
+/goal Research existing-drug repurposing hypotheses for UNC80 deficiency (UNC80; MONDO:0014777).
+```
+
+## Licence
+
+Copyright © 2026 Jaedki. The original repository content is licensed under the [Apache License 2.0](LICENSE). Third-party evidence and database content retain their original rights and licences; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

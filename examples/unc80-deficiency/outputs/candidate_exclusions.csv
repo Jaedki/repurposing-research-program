@@ -1,0 +1,2 @@
+candidate_id,name,reason_code,finding,source_ids
+UNICHEM:449953,levetiracetam,exact_disease_prior_use_or_testing,"Levetiracetam was deliberately administered to people with molecularly defined UNC80 deficiency, including one individual within valproate-lamotrigine polytherapy plus vagus-nerve stimulation and another uncontrolled treatment sequence; the exclusion policy applies regardless of attribution or outcome.",DOI:10.1016/j.ajhg.2015.11.004
