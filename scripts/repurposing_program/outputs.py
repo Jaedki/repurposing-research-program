@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 from .bibliography import _canonicalize_document_corpus
 from .candidate_exports import _excluded_candidate_rows, _provenance_rows
-from .contracts import EXPERIMENTAL_USE_POLICY, MAX_SCORE, SCORE_COMPONENTS, STAGES
+from .contracts import EXPERIMENTAL_USE_POLICY, MAX_SCORE, SCORE_COMPONENTS
 from .errors import ProgramError
 from .evidence import _all_documents, _rows
 from .evidence_cards import _cards_bytes, _evidence_card_rows
@@ -78,7 +78,6 @@ def _write_output_files(
     _write_jsonl(outputs / "rescue_strategies.jsonl", rescue_strategies)
     seed_exclusions = sorted(_rows(results["candidate_seed_generation"]["records"], "exclusions"), key=lambda row: (str(row["origin_concept_id"]), str(row["name"])))
     _write_jsonl(outputs / "seed_exclusions.jsonl", seed_exclusions)
-    gap_count = sum(len(results[stage].get("gaps", [])) for stage in STAGES)
     raw_candidate_count = len(
         _rows(results["candidate_seed_generation"]["records"], "candidates")
     )
@@ -114,18 +113,21 @@ def _write_output_files(
         for candidate_id, node_ids in candidate_node_ids.items()
         if node_ids & context_only_ids
     )
-    node_coverage = "; ".join(
-        f"{node['node_id']} ({node['label']}): "
-        f"{len(candidate_ids_by_node[str(node['node_id'])])}"
+    covered_node_count = sum(
+        bool(candidate_ids_by_node[str(node["node_id"])])
         for node in coverage_nodes
-    ) or "none"
-    uncovered_nodes = ", ".join(
-        f"{node['node_id']} ({node['label']})"
-        for node in coverage_nodes
-        if not candidate_ids_by_node[str(node["node_id"])]
-    ) or "none"
-    multiple_node_candidates = ", ".join(candidates_using_multiple_nodes) or "none"
-    context_only_candidates = ", ".join(candidates_using_context_only_nodes) or "none"
+        if node.get("disposition") == "research"
+    )
+    unresolved_question_count = sum(
+        row.get("research_disposition") == "still_unresolved"
+        for row in _rows(
+            results["pathology_question_research"]["records"],
+            "question_answers",
+        )
+    )
+    question_count = len(
+        _rows(results["pathology_open_questions"]["records"], "open_questions")
+    )
     unseeded_strategy_count = sum(
         strategy["search_outcome"] == "no_supported_seed"
         for strategy in rescue_strategies
@@ -143,12 +145,14 @@ def _write_output_files(
         f"rescue strategies: {len(rescue_strategies)} "
         f"({unseeded_strategy_count} without a supported seed); "
         f"seed-stage exclusions: {len(seed_exclusions)}; "
-        f"reported gaps: {gap_count}.\n\n"
+        f"unresolved pathology questions: {unresolved_question_count} of "
+        f"{question_count}.\n\n"
         "## Graph coverage\n\n"
-        f"Candidates per graph node: {node_coverage}.\n\n"
-        f"Nodes with no candidate: {uncovered_nodes}.\n\n"
-        f"Candidates using more than one node: {multiple_node_candidates}.\n\n"
-        f"Candidates using context-only nodes: {context_only_candidates}.\n\n"
+        f"Research concepts with ranked candidates: {covered_node_count} of "
+        f"{sum(node.get('disposition') == 'research' for node in coverage_nodes)}; "
+        f"context-only concepts: {len(context_only_ids)}; ranked candidates using more than "
+        f"one node: {len(candidates_using_multiple_nodes)}; ranked candidates using "
+        f"context-only nodes: {len(candidates_using_context_only_nodes)}.\n\n"
         "Candidate nomination did not require a prior disease-drug literature association. "
         f"Audited candidates were ranked by an unweighted sum of "
         f"{len(SCORE_COMPONENTS)} five-point categories scaled to {MAX_SCORE}; "

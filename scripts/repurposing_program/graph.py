@@ -18,15 +18,29 @@ from .evidence import (
 from .pathology import _canonical_source_records
 from .storage import _stable_id
 
+
+_ASSERTION_RELATION_ALIASES = {
+    "biolink:causes": "causes",
+    "biolink:contributes_to": "contributes_to",
+    "causally_contributes_to": "contributes_to",
+}
+
+
+def _canonical_assertion_relation(value: Any) -> str:
+    relation = str(value).strip()
+    return _ASSERTION_RELATION_ALIASES.get(relation.casefold(), relation)
+
+
 def _merge_assertions(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     merged: dict[
         tuple[str, str, str],
         dict[tuple[str, str, str, str, str], dict[str, Any]],
     ] = {}
     for row in rows:
-        triple = tuple(
-            str(row.get(field, "")).strip()
-            for field in ("subject_id", "relation", "object_id")
+        triple = (
+            str(row.get("subject_id", "")).strip(),
+            _canonical_assertion_relation(row.get("relation", "")),
+            str(row.get("object_id", "")).strip(),
         )
         if not all(triple):
             raise ProgramError("assertions require subject_id, relation, and object_id")

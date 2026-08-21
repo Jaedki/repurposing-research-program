@@ -35,6 +35,13 @@ def _project_ranked_row(
             component: row["component_scores"][component]["value"]
             for component in SCORE_COMPONENTS
         },
+        **{
+            f"{component}_rationale": (
+                f"{row['component_scores'][component]['reason']} Sources: "
+                f"{'; '.join(map(str, row['component_scores'][component]['source_ids']))}"
+            )
+            for component in SCORE_COMPONENTS
+        },
         "final_score": _final_score(row),
         "hypothesis_report": reports[str(row["candidate_id"])]["hypothesis_report"],
     }

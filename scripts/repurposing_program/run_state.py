@@ -201,7 +201,10 @@ def _program_status(
     stop = _stop_reason(results)
     manifest_path = run_root / "outputs" / "manifest.json"
     next_task = next_item_id = None
-    accepted_items = 0
+    accepted_items = sum(
+        name.startswith("results/items/")
+        for name in _accepted_result_files(run_root)
+    )
     if manifest_path.exists():
         manifest = _read_json(manifest_path)
         _verify_outputs(run_root, manifest)
@@ -234,7 +237,7 @@ def _program_status(
                 "candidate_seed_generation": "candidate_seed_research",
                 "candidate_review": "candidate_evidence_review",
             }[next_stage]
-            next_item_id, accepted_items = _first_missing(
+            next_item_id, _ = _first_missing(
                 run_root, next_task, _item_ids(next_stage, results)
             )
             state = "needs_agent" if next_item_id is not None else "needs_controller"

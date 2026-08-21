@@ -1911,10 +1911,12 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("rescue strategies: 1 (0 without a supported seed)", summary)
         self.assertIn("5 five-point categories scaled to 100", summary)
         self.assertIn("## Graph coverage", summary)
-        self.assertIn("Candidates per graph node: NODE:1 (Process): 1", summary)
-        self.assertIn("Nodes with no candidate: none", summary)
-        self.assertIn("Candidates using more than one node: none", summary)
-        self.assertIn("Candidates using context-only nodes: none", summary)
+        self.assertIn("unresolved pathology questions: 0 of 1", summary)
+        self.assertIn("Research concepts with ranked candidates: 1 of 1", summary)
+        self.assertIn("context-only concepts: 0", summary)
+        self.assertIn("ranked candidates using more than one node: 0", summary)
+        self.assertIn("ranked candidates using context-only nodes: 0", summary)
+        self.assertNotIn("reported gaps:", summary)
         provenance = [
             json.loads(line)
             for line in (self.root / "outputs" / "candidate_provenance.jsonl")
@@ -1942,6 +1944,12 @@ class WorkflowTest(unittest.TestCase):
         self.assertNotIn("candidate_id", csv_lines[0].split(","))
         self.assertEqual(csv_lines[0].split(",")[1], "name")
         self.assertEqual(csv_lines[1].split(",")[1], "Drug")
+        for component in contracts.SCORE_COMPONENTS:
+            self.assertIn(f"{component}_rationale", csv_lines[0].split(","))
+            self.assertIn(
+                f"The retained evidence supports the {component} rating. Sources: PMID:3",
+                csv_lines[1],
+            )
         cards = (self.root / "outputs" / "candidate_cards.md").read_text(encoding="utf-8")
         self.assertIn("## Drug", cards)
         self.assertNotIn("UNICHEM:1", cards)
@@ -1968,7 +1976,9 @@ class WorkflowTest(unittest.TestCase):
         self.assertFalse((self.root / "outputs" / "candidate_exclusions.jsonl").exists())
         self.assertTrue((self.root / "outputs" / "seed_exclusions.jsonl").exists())
         self.assertIn("Unsupported agent", (self.root / "outputs" / "seed_exclusions.jsonl").read_text())
-        self.assertEqual(core.status(self.root)["state"], "complete")
+        completed_status = core.status(self.root)
+        self.assertEqual(completed_status["state"], "complete")
+        self.assertEqual(completed_status["accepted_items"], 4)
         self.assertEqual(core.build_outputs(self.root), manifest)
 
         normalized_stage_hashes = {}
@@ -3759,6 +3769,34 @@ class WorkflowTest(unittest.TestCase):
             [assertion, {**assertion, "object_id": "NODE:3"}]
         )
         self.assertEqual(len(distinct), 2)
+
+    def test_assertion_relation_aliases_merge_without_collapsing_distinct_relations(self):
+        assertion = {
+            "subject_id": "NODE:1",
+            "relation": "causes",
+            "object_id": "NODE:2",
+            "evidence_context": [{
+                "source_ids": ["PMID:1"],
+                "evidence_type": "human",
+                "model": "affected individuals",
+                "stage": "established disease",
+                "polarity": "supports",
+                "summary": "causal finding",
+            }],
+        }
+        merged = graph_rules._merge_assertions([
+            assertion,
+            {**assertion, "relation": "biolink:causes"},
+            {**assertion, "relation": "contributes_to"},
+            {**assertion, "relation": "biolink:contributes_to"},
+            {**assertion, "relation": "causally_contributes_to"},
+            {**assertion, "relation": "increases"},
+        ])
+
+        self.assertEqual(
+            [row["relation"] for row in merged],
+            ["causes", "contributes_to", "increases"],
+        )
 
     @staticmethod
     def profile(item_id, node_type):
