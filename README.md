@@ -36,7 +36,7 @@ In Codex, the equivalent starting prompt is:
 
 ```text
 $repurposing-research-program
-/goal Research existing-drug repurposing hypotheses for UNC80 deficiency (UNC80; MONDO:0014777).
+/goal Research existing-drug repurposing hypotheses for UNC80 deficiency.
 ```
 
 ## Licence
