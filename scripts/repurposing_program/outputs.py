@@ -156,8 +156,8 @@ def _write_output_files(
         "Candidate nomination did not require a prior disease-drug literature association. "
         f"Audited candidates were ranked by an unweighted sum of "
         f"{len(SCORE_COMPONENTS)} five-point categories scaled to {MAX_SCORE}; "
-        "directly invalidated hypotheses rank after viable hypotheses, while exact-disease prior "
-        "testing and invalid entities remain programme-eligibility exclusions.\n\n"
+        "directly invalidated hypotheses rank after viable hypotheses, while qualifying exact-disease "
+        "prior testing under the bounded novelty policy and invalid entities remain programme-eligibility exclusions.\n\n"
         f"{EXPERIMENTAL_USE_POLICY}\n"
     )
     _write_once(outputs / "summary.md", summary.encode("utf-8"))

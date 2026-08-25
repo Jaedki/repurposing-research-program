@@ -179,7 +179,7 @@ rewrite the report. Final cards contain only the
 preferred name and the review-owned hypothesis report verbatim; internal report source IDs and
 scoring metadata are not rendered into that prose.
 
-Repurposing novelty is a binary gate under the supplied bounded exclusion policy.
+Repurposing novelty is a binary gate under the supplied bounded exclusion policy, but exact-disease exposure qualifies only when it materially anticipates the proposed hypothesis; isolated screens, uninterpretable experiments, and materially different mechanistic rationales remain evidence for scoring.
 
 Only `status=complete` results are accepted. A failed preflight leaves the same packet ready and
 the research result noncanonical; the worker corrects the exact invalid field and direct dependants,

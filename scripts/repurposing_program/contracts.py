@@ -199,13 +199,13 @@ SEED_EXCLUSION_REASONS = frozenset({"no_established_action", "wrong_or_opposite_
 AUDIT_EXCLUSION_POLICY = {
     "exact_disease_prior_use_or_testing": (
         "The retained corpus establishes that the exact candidate, including the same active moiety "
-        "as a salt, formulation, or combination component, is an established exact-disease use, was "
-        "deliberately administered or applied in the exact disease or a disease-specific human, animal, "
-        "cell, or organoid model with a disease-relevant endpoint, or entered a registered exact-disease "
-        "therapeutic study. Exclude "
-        "regardless of outcome, controls, study quality, or interpretability. A proposal, review, "
-        "patent, computational prediction, related-disease study, class-level analogue, incidental "
-        "exposure, or unresolved identity does not establish exact-disease testing."
+        "as a salt, formulation, or combination component, is an established exact-disease use, entered "
+        "a registered exact-disease therapeutic study, or was deliberately tested in the exact disease or "
+        "a disease-specific human, animal, cell, or organoid model in work that materially anticipates "
+        "the proposed repurposing hypothesis through a substantially overlapping therapeutic rationale "
+        "and disease-relevant endpoint. Exclude only on that basis. Do not exclude solely for incidental "
+        "exposure, an isolated screen, an uninterpretable experiment, or testing under a materially "
+        "different mechanistic rationale; retain such evidence for scoring. A proposal, review, patent, computational prediction, related-disease study, class-level analogue, or unresolved identity does not establish qualifying exact-disease testing."
     ),
     "invalid_candidate": (
         "The retained corpus establishes that the entity is not an existing drug or administered "

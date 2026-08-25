@@ -1857,7 +1857,8 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(set(exclusion_policy), set(contracts.AUDIT_EXCLUSION_REASONS))
         novelty_policy = exclusion_policy["exact_disease_prior_use_or_testing"]
         self.assertIn("registered exact-disease therapeutic study", novelty_policy)
-        self.assertIn("regardless of outcome, controls, study quality", novelty_policy)
+        self.assertIn("materially anticipates the proposed repurposing hypothesis", novelty_policy)
+        self.assertIn("isolated screen", novelty_policy)
         self.assertIn("computational prediction", novelty_policy)
         self.assertNotIn("human_intervention", exclusion_policy)
         self.assertNotIn("unsupported_action", exclusion_policy)
