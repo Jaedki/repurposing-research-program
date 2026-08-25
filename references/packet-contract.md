@@ -180,6 +180,7 @@ preferred name and the review-owned hypothesis report verbatim; internal report 
 scoring metadata are not rendered into that prose.
 
 Repurposing novelty is a binary gate under the supplied bounded exclusion policy, but exact-disease exposure qualifies only when it materially anticipates the proposed hypothesis; isolated screens, uninterpretable experiments, and materially different mechanistic rationales remain evidence for scoring.
+Programme eligibility also requires retained evidence of current regulatory approval or marketed therapeutic use, or completed Phase-I-equivalent human administration with publicly interpretable safety and tolerability findings that did not terminate development for safety.
 
 Only `status=complete` results are accepted. A failed preflight leaves the same packet ready and
 the research result noncanonical; the worker corrects the exact invalid field and direct dependants,

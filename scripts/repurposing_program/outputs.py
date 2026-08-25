@@ -157,7 +157,7 @@ def _write_output_files(
         f"Audited candidates were ranked by an unweighted sum of "
         f"{len(SCORE_COMPONENTS)} five-point categories scaled to {MAX_SCORE}; "
         "directly invalidated hypotheses rank after viable hypotheses, while qualifying exact-disease "
-        "prior testing under the bounded novelty policy and invalid entities remain programme-eligibility exclusions.\n\n"
+        "prior testing under the bounded novelty policy, absent qualifying human-safety precedent, and invalid entities remain programme-eligibility exclusions.\n\n"
         f"{EXPERIMENTAL_USE_POLICY}\n"
     )
     _write_once(outputs / "summary.md", summary.encode("utf-8"))

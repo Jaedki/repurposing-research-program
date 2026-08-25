@@ -1860,6 +1860,9 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("materially anticipates the proposed repurposing hypothesis", novelty_policy)
         self.assertIn("isolated screen", novelty_policy)
         self.assertIn("computational prediction", novelty_policy)
+        safety_policy = exclusion_policy["no_qualifying_human_safety_precedent"]
+        self.assertIn("completed Phase-I-equivalent human administration", safety_policy)
+        self.assertIn("human dosing without interpretable reported safety results", safety_policy)
         self.assertNotIn("human_intervention", exclusion_policy)
         self.assertNotIn("unsupported_action", exclusion_policy)
         self.assertNotIn("opposite_action", exclusion_policy)
@@ -2114,6 +2117,8 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("context.hypothesis", review_guidance)
         self.assertIn("scientifically viable", review_guidance)
         self.assertIn("exact-disease prior use or testing", review_guidance)
+        self.assertIn("completed Phase-I-equivalent human dosing", review_guidance)
+        self.assertIn("explicitly report that qualification was not established", review_guidance)
         self.assertIn("natural scientific paragraph", review_guidance)
         self.assertNotIn("Life Science Research", review_guidance)
         self.assertNotIn("structured lookup", review_guidance.casefold())

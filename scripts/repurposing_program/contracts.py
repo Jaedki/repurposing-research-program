@@ -207,6 +207,7 @@ AUDIT_EXCLUSION_POLICY = {
         "exposure, an isolated screen, an uninterpretable experiment, or testing under a materially "
         "different mechanistic rationale; retain such evidence for scoring. A proposal, review, patent, computational prediction, related-disease study, class-level analogue, or unresolved identity does not establish qualifying exact-disease testing."
     ),
+    "no_qualifying_human_safety_precedent": ("Exclude unless the retained corpus establishes that the exact candidate, including the same active moiety as a salt or formulation, has current regulatory approval or marketed therapeutic use, or completed Phase-I-equivalent human administration with publicly interpretable safety and tolerability findings that did not terminate development for safety. Trial registration, planned or ongoing human testing, human dosing without interpretable reported safety results, and non-human use do not qualify."),
     "invalid_candidate": (
         "The retained corpus establishes that the entity is not an existing drug or administered "
         "intervention suitable for repurposing, such as a placebo, vehicle, or sham; unresolved "
@@ -499,7 +500,7 @@ STAGE_GUIDANCE: dict[str, dict[str, Any]] = {
             "Use the complete single-candidate hypothesis in context.hypothesis. Research whether "
             "it is scientifically viable, checking the exact drug action, disease mechanism, proposed "
             "directional bridge, relevant exposure, empirical translation, material positive and "
-            "negative findings, artefacts, rival explanations, and exact-disease prior use or testing. "
+            "negative findings, artefacts, rival explanations, exact-disease prior use or testing, and whether the exact candidate has current approval or marketed use, or completed Phase-I-equivalent human dosing with interpretable safety and tolerability results; cite supporting evidence or explicitly report that qualification was not established. "
             "Write one balanced, natural scientific paragraph that explains the "
             "hypothesis, evidential basis, inferential step, and material limitations without field "
             "labels, scoring, or templated why-not prose. Cite the retained sources in the paragraph "
