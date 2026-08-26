@@ -7,7 +7,7 @@ from typing import Any, Iterable, Mapping
 
 from .contracts import SEED_EXCLUSION_REASONS, _COMPARATORS
 from .errors import ProgramError
-from .evidence import _document_alias_index, _find, _rows
+from .evidence import _find, _rows
 from .graph import _graph_support_ids
 from .hypotheses import _connection_rows
 from .identity import _candidate_queries, _canonical_candidates
@@ -152,7 +152,6 @@ def _validate_seed_item(
     routed_connection_ids = {key for key, row in connections_by_id.items() if item_id in set(map(str, row["node_ids"]))}
     routed_context_ids = routed_question_ids | routed_connection_ids
     pathology_source_ids = _ids(_rows(graph, "documents"), "document_id", "documents")
-    pathology_source_aliases = set(_document_alias_index(_rows(graph, "documents")))
     returned_seed_source_ids = {str(row["document_id"]) for row in documents}
     if not strategies:
         raise ProgramError("candidate seed research requires at least one rescue_strategy")
@@ -281,7 +280,7 @@ def _validate_seed_item(
         _id_list(row["strategy_keys"], f"{label}.strategy_keys", allowed=set(strategy_by_key), allow_empty=False)
         _id_list(row["source_ids"], f"{label}.source_ids", allowed=pathology_source_ids | returned_seed_source_ids, allow_empty=False)
 
-    new_mechanism_source_ids = returned_seed_source_ids - pathology_source_aliases
+    new_mechanism_source_ids = returned_seed_source_ids - pathology_source_ids
     for index, row in enumerate(candidates):
         label = f"candidates[{index}]"
         _candidate_queries(row)
@@ -398,7 +397,7 @@ def _validate_review_item(
     if {str(row["candidate_id"]) for row in reviews} != {str(batch["candidate_id"])}:
         raise ProgramError("candidate review must cover exactly the supplied candidate")
     retained_ids = {str(row["document_id"]) for row in documents}
-    source_ids = set(_document_alias_index([*source_index, *documents]))
+    source_ids = {str(row["document_id"]) for row in [*source_index, *documents]}
     for index, row in enumerate(reviews):
         label = f"reviews[{index}]"
         if not str(row["hypothesis_report"]).strip():

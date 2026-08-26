@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
-from .bibliography import _canonicalize_document_corpus, _canonicalize_documents
 from .candidates import _review_batches
 from .contracts import (
     ASTA_CITATION_LIMIT,
@@ -55,9 +54,7 @@ from .validation import _secret_paths
 
 
 def _source_catalog(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    fields = (
-        "document_id", "canonical_publication_id", "title", "year", "source", "url",
-    )
+    fields = ("document_id", "title", "year", "source", "url")
     return [
         {field: row[field] for field in fields if field in row}
         for row in documents
@@ -67,9 +64,7 @@ def _source_catalog(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _completed_hypothesis_packets(
     run_root: Path, results: Mapping[str, Mapping[str, Any]]
 ) -> list[dict[str, Any]]:
-    documents = _canonicalize_document_corpus(
-        run_root, _all_documents(results), verify_titles=False
-    )
+    documents = _all_documents(results)
     completed = []
     for review in _rows(results["candidate_review"]["records"], "reviews"):
         candidate_id = str(review["candidate_id"])
@@ -287,9 +282,7 @@ def _packet_context(
             "allowed_assertion_nodes": allowed_assertion_nodes,
             "disease_context": disease_context,
             "source_index": _source_index(
-                _canonicalize_documents(
-                    run_root, documents, verify_titles=False, preserve_titles=True
-                ),
+                documents,
                 _cited_ids(
                     [node, *member_nodes, *related_nodes, *edges, *disease_context]
                 ),
@@ -437,9 +430,7 @@ def _packet_context(
         ])
         return {
             "hypothesis": hypothesis,
-            "source_index": _source_index(_canonicalize_document_corpus(
-                run_root, source_documents, verify_titles=False
-            ), _cited_ids(hypothesis)),
+            "source_index": _source_index(source_documents, _cited_ids(hypothesis)),
         }
     return {"hypothesis_packets": _completed_hypothesis_packets(run_root, results)}
 
@@ -528,7 +519,15 @@ def _record_contract(
         )
     if task == "pathology_coverage_expansion" and context is not None:
         contracts["undermind_search_receipts"]["template"].update({
-            "search_name": context["undermind_search_name"], "outcome": "completed", "ranked_result_ids": [], "paper_dispositions": [{"cite_key": None, "document_id": None, "disposition": None, "rationale": None}]
+            "search_name": context["undermind_search_name"],
+            "outcome": "completed",
+            "ranked_result_ids": [],
+            "paper_dispositions": [{
+                "cite_key": None,
+                "source_ids": [],
+                "disposition": None,
+                "rationale": None,
+            }],
         })
     return contracts
 

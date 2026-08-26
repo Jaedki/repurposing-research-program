@@ -6,7 +6,7 @@ from typing import Any, Iterable, Mapping
 
 from .contracts import AUDIT_EXCLUSION_REASONS, SCORE_COMPONENTS, SCORE_MAX, SCORE_MIN
 from .errors import ProgramError
-from .evidence import _document_alias_index, _rows
+from .evidence import _rows
 from .validation import _contract_rows, _ids, _references, _validate_exact_object
 
 
@@ -36,9 +36,9 @@ def _validate_candidate_audit(
         )
     hypothesis_packets = list(hypothesis_packets)
     source_ids_by_candidate = {
-        str(packet["hypothesis"]["candidate"]["candidate_id"]): set(
-            _document_alias_index(packet["source_index"])
-        )
+        str(packet["hypothesis"]["candidate"]["candidate_id"]): {
+            str(row["document_id"]) for row in packet["source_index"]
+        }
         for packet in hypothesis_packets
     }
     if (

@@ -615,7 +615,26 @@ ROW_SCHEMAS = {
             "ranked_result_count", "ranked_result_ids", "pdf_count", "paper_dispositions",
         ],
         "additional_fields": False,
-        "field_contracts": {"outcome": {"allowed_values": ["completed"]}, "paper_dispositions": {"type": "list of objects", "required_fields": ["cite_key", "document_id", "disposition", "rationale"], "additional_fields": False, "field_contracts": {"disposition": {"allowed_values": ["retained", "not_retained"]}}, "value_rule": "one row per read ranked paper; cite_key is its ranked_result_id; retained crosswalks to a returned canonical document_id, not_retained uses null, and rationale is non-empty"}},
+        "field_contracts": {
+            "outcome": {"allowed_values": ["completed"]},
+            "paper_dispositions": {
+                "type": "list of objects",
+                "required_fields": [
+                    "cite_key", "source_ids", "disposition", "rationale",
+                ],
+                "additional_fields": False,
+                "field_contracts": {
+                    "disposition": {
+                        "allowed_values": ["retained", "not_retained"]
+                    }
+                },
+                "value_rule": (
+                    "one row per read ranked paper; cite_key is its ranked_result_id; "
+                    "retained uses one returned source_id, not_retained uses an empty "
+                    "list, and rationale is non-empty"
+                ),
+            },
+        },
     },
     "source_nodes": {
         "required_fields": ["node_id", "label", "node_type", "source_ids"],

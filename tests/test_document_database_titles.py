@@ -8,224 +8,277 @@ from unittest.mock import patch
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from repurposing_program import bibliography, evidence  # noqa: E402
+from repurposing_program import bibliography, evidence, hypotheses  # noqa: E402
 from repurposing_program.errors import ProgramError  # noqa: E402
 
 
-class DatabaseDocumentTitleTests(unittest.TestCase):
-    def test_supported_database_accessions_accept_record_label_variants(self):
-        cases = (
-            (
-                "HPA:ENSG00000141837",
-                "CACNA1A - Human Protein Atlas gene entry",
-                "CACNA1A tissue and single-cell expression summary",
-            ),
-            (
-                "UNIPROT:O00555",
-                "Voltage-dependent P/Q-type calcium channel subunit alpha-1A",
-                "UniProtKB O00555: Voltage-dependent P/Q-type calcium channel subunit alpha-1A",
-            ),
-            (
-                "https://reactome.org/content/detail/R-HSA-210490",
-                "CACNA1A [plasma membrane]",
-                "CACNA1A at the plasma membrane",
-            ),
-            (
-                "https://www.ebi.ac.uk/QuickGO/term/GO:0005245",
-                "GO:0005245 voltage-gated calcium channel activity",
-                "voltage-gated calcium channel activity and CACNA1A annotations",
-            ),
-            (
-                "https://www.bgee.org/gene/ENSG00000141837",
-                "Bgee healthy wild-type expression conditions for human CACNA1A",
-                "CACNA1A ENSG00000141837 expression in Homo sapiens",
-            ),
-            (
-                "DAILYMED:bc8f7cf2-c19c-4235-859f-9ff1dd21908e",
-                "Perampanel tablets, full prescribing information",
-                "PERAMPANEL — perampanel tablet, film coated",
-            ),
-            (
-                "PUBCHEM:4054",
-                "Memantine | C12H21N | CID 4054",
-                "Memantine compound record",
-            ),
-        )
-        for document_id, left, right in cases:
-            with self.subTest(document_id=document_id):
-                merged = evidence._merge_documents([
-                    {"document_id": document_id, "title": left},
-                    {"document_id": document_id, "title": right},
-                ])
-                self.assertEqual(len(merged), 1)
-
-    def test_database_record_label_variants_still_require_a_shared_entity(self):
-        cases = (
-            (
-                "HPA:ENSG00000141837", "CACNA1A expression", "ATP1A1 expression"
-            ),
-            (
-                "UNIPROT:O00555",
-                "Voltage-dependent calcium channel subunit alpha-1A",
-                "Voltage-dependent calcium channel subunit alpha-1B",
-            ),
-            (
-                "DAILYMED:bc8f7cf2-c19c-4235-859f-9ff1dd21908e",
-                "Perampanel tablets, full prescribing information",
-                "Memantine tablets, full prescribing information",
-            ),
-            (
-                "PUBCHEM:4054", "Memantine compound record", "Ketamine compound record"
-            ),
-        )
-        for document_id, left, right in cases:
-            with self.subTest(document_id=document_id), self.assertRaisesRegex(
-                ProgramError, "Conflicting document metadata"
-            ):
-                evidence._merge_documents([
-                    {"document_id": document_id, "title": left},
-                    {"document_id": document_id, "title": right},
-                ])
-
-    def test_pubchem_locator_suffix_does_not_create_a_title_conflict(self):
-        documents = evidence._merge_documents(
-            [
-                {
-                    "document_id": "PUBCHEM:163659",
-                    "title": "Mithramycin",
-                    "evidence_passages": [
-                        {"text": "Seed evidence", "locator": "PubChem record"}
-                    ],
-                },
-                {
-                    "document_id": "PUBCHEM:163659",
-                    "title": "Mithramycin, PubChem CID 163659",
-                    "evidence_passages": [
-                        {"text": "Identity evidence", "locator": "PubChem record"}
-                    ],
-                },
-            ]
-        )
+class PublicationIdentityTests(unittest.TestCase):
+    def test_exact_document_ids_merge_without_title_identity_logic(self):
+        documents = evidence._merge_documents([
+            {
+                "document_id": "PMID:35445439",
+                "title": "Authoritative article title",
+                "evidence_passages": [{"text": "First", "locator": "p1"}],
+            },
+            {
+                "document_id": "PMID:35445439",
+                "title": "Treatment-blind projection",
+                "evidence_passages": [{"text": "Second", "locator": "p2"}],
+            },
+        ])
 
         self.assertEqual(len(documents), 1)
-        self.assertEqual(documents[0]["title"], "Mithramycin")
+        self.assertEqual(documents[0]["title"], "Authoritative article title")
         self.assertEqual(len(documents[0]["evidence_passages"]), 2)
 
-    def test_pubchem_locator_suffix_does_not_hide_a_different_name(self):
-        with self.assertRaisesRegex(ProgramError, "Conflicting document metadata"):
-            evidence._merge_documents(
-                [
-                    {
-                        "document_id": "PUBCHEM:163659",
-                        "title": "Mithramycin",
-                    },
-                    {
-                        "document_id": "PUBCHEM:163659",
-                        "title": "Different compound, PubChem CID 163659",
-                    },
-                ]
-            )
-
-    def test_publication_titles_remain_strict(self):
-        with self.assertRaisesRegex(ProgramError, "Conflicting document metadata"):
-            evidence._merge_documents(
-                [
-                    {"document_id": "PMID:123", "title": "Mithramycin"},
-                    {
-                        "document_id": "PMID:123",
-                        "title": "Mithramycin, PubChem CID 163659",
-                    },
-                ]
-            )
-
-    def test_verified_publication_formatting_variants_merge(self):
-        documents = evidence._merge_documents(
-            [
+    def test_publication_ids_normalize_once_and_merge_all_evidence(self):
+        records = {
+            "documents": [
                 {
-                    "document_id": "PMID:35445439",
-                    "title": "5-HT2 receptor antagonism reduces motoneuron output",
+                    "document_id": "PMID:123",
+                    "pmid": "123",
+                    "title": "Paper",
+                    "evidence_passages": [{"text": "First", "locator": "p1"}],
+                    "tags": ["source"],
+                    "source_ids": ["PMID:123"],
                 },
                 {
-                    "document_id": "PMID:35445439",
-                    "title": "5-HT(2) receptor antagonism reduces motoneuron output.",
+                    "document_id": "DOI:10.1000/example",
+                    "doi": "10.1000/example",
+                    "pmcid": "PMC123",
+                    "title": "Paper",
+                    "evidence_passages": [{"text": "Second", "locator": "p2"}],
+                    "tags": ["coverage"],
                 },
-            ]
+            ],
+            "claims": [{"source_ids": ["PMID:123"]}],
+            "profiles": [{"pathology_source_ids": ["PMID:123"]}],
+            "candidates": [{"mechanism_source_ids": ["PMID:123"]}],
+        }
+        metadata = {
+            document_id: {
+                "title": "Paper",
+                "canonical_id": "DOI:10.1000/example",
+                "identifiers": [document_id, "DOI:10.1000/example"],
+            }
+            for document_id in ("PMID:123", "DOI:10.1000/example")
+        }
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            bibliography, "_resolve_bibliographic_metadata", return_value=metadata
+        ):
+            normalized = bibliography._normalize_result_documents(
+                Path(directory), records, verify_titles=True
+            )
+            repeated = bibliography._normalize_result_documents(
+                Path(directory), normalized, verify_titles=True
+            )
+
+        self.assertEqual(normalized, repeated)
+        self.assertEqual(records["documents"][0]["document_id"], "PMID:123")
+        self.assertEqual(len(normalized["documents"]), 1)
+        self.assertFalse(
+            {"doi", "pmid", "pmcid"} & set(normalized["documents"][0])
         )
-
-        self.assertEqual(len(documents), 1)
         self.assertEqual(
-            documents[0]["title"],
-            "5-HT2 receptor antagonism reduces motoneuron output",
+            normalized["documents"][0]["document_id"], "DOI:10.1000/example"
         )
+        self.assertEqual(len(normalized["documents"][0]["evidence_passages"]), 2)
+        self.assertEqual(normalized["documents"][0]["tags"], ["coverage", "source"])
+        self.assertEqual(
+            normalized["documents"][0]["source_ids"], ["DOI:10.1000/example"]
+        )
+        for collection, field in (
+            ("claims", "source_ids"),
+            ("profiles", "pathology_source_ids"),
+            ("candidates", "mechanism_source_ids"),
+        ):
+            self.assertEqual(
+                normalized[collection][0][field], ["DOI:10.1000/example"]
+            )
 
-    def test_minor_publication_title_variants_merge_and_project_canonical_title(self):
-        submitted = "Multi-center phase II study of a candidate treatment"
-        canonical = "Multicenter phase 2 study of a candidate treatment"
-        documents = evidence._merge_documents([
-            {"document_id": "PMID:123", "title": submitted},
-            {"document_id": "PMID:123", "title": canonical},
-        ])
-        metadata = {"PMID:123": {
-            "title": canonical,
-            "canonical_publication_id": "PMID:123",
-            "identifier_aliases": ["PMID:123"],
-            "metadata_source": "PubMed",
+    def test_disposition_crosswalk_uses_the_same_citation_rewrite(self):
+        records = {
+            "documents": [{"document_id": "PMCID:PMC123", "title": "Paper"}],
+            "receipts": [{
+                "paper_dispositions": [
+                    {"source_ids": ["PMCID:PMC123"], "disposition": "retained"},
+                    {"source_ids": [], "disposition": "not_retained"},
+                ]
+            }],
+        }
+        metadata = {"PMCID:PMC123": {
+            "title": "Paper",
+            "canonical_id": "DOI:10.1000/example",
+            "identifiers": ["PMCID:PMC123", "DOI:10.1000/example"],
         }}
         with tempfile.TemporaryDirectory() as directory, patch.object(
             bibliography, "_resolve_bibliographic_metadata", return_value=metadata
         ):
-            projected = bibliography._canonicalize_documents(
-                Path(directory), documents, verify_titles=True
+            normalized = bibliography._normalize_result_documents(
+                Path(directory), records, verify_titles=True
             )
 
-        self.assertEqual(projected[0]["title"], canonical)
+        dispositions = normalized["receipts"][0]["paper_dispositions"]
+        self.assertEqual(dispositions[0]["source_ids"], ["DOI:10.1000/example"])
+        self.assertEqual(dispositions[1]["source_ids"], [])
 
-    def test_publication_formatting_normalization_does_not_hide_word_changes(self):
-        with self.assertRaisesRegex(ProgramError, "Conflicting document metadata"):
-            evidence._merge_documents(
-                [
-                    {"document_id": "PMID:35445439", "title": "5-HT2 agonism"},
-                    {"document_id": "PMID:35445439", "title": "5-HT2 antagonism"},
-                ]
-            )
-
-    def test_downstream_corpus_collapses_publication_aliases_and_unions_passages(self):
-        results = {
-            "stage_a": {"records": {"documents": [{
-                "document_id": "PMID:123", "canonical_publication_id": "DOI:10.1000/example",
-                "identifier_aliases": ["PMID:123", "DOI:10.1000/example"], "title": "Paper",
-                "evidence_passages": [{"text": "First", "locator": "p1"}],
-            }], "claims": [{"source_ids": ["PMID:123"]}]}},
-            "stage_b": {"records": {"documents": [{
-                "document_id": "DOI:10.1000/example", "canonical_publication_id": "DOI:10.1000/example",
-                "identifier_aliases": ["PMID:123", "DOI:10.1000/example"], "title": "Paper",
-                "evidence_passages": [{"text": "Second", "locator": "p2"}],
-            }], "claims": [{"source_ids": ["DOI:10.1000/example"]}]}},
+    def test_xald_and_unc80_publication_groups_each_collapse_to_one_document(self):
+        groups = (
+            (
+                "DOI:10.1016/j.ebiom.2023.104781",
+                "PMID:37683329",
+                "PMCID:PMC10497986",
+            ),
+            (
+                "DOI:10.26502/jbb.2642-91280091",
+                "PMID:38077449",
+                "PMCID:PMC10705002",
+            ),
+            (
+                "DOI:10.1016/j.ajhg.2015.11.004",
+                "PMID:26708751",
+                "PMCID:PMC4716670",
+            ),
+            (
+                "DOI:10.1038/s41467-020-17105-8",
+                "PMID:32620897",
+                "PMCID:PMC7335163",
+            ),
+        )
+        documents = [
+            {"document_id": document_id, "title": f"Paper {index}"}
+            for index, group in enumerate(groups)
+            for document_id in group
+        ]
+        metadata = {
+            document_id: {
+                "title": f"Paper {index}",
+                "canonical_id": group[0],
+                "identifiers": list(group),
+            }
+            for index, group in enumerate(groups)
+            for document_id in group
         }
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            bibliography, "_resolve_bibliographic_metadata", return_value=metadata
+        ):
+            normalized = bibliography._normalize_result_documents(
+                Path(directory), {"documents": documents}, verify_titles=True
+            )
 
-        documents = evidence._all_documents(results)
+        self.assertEqual(
+            [row["document_id"] for row in normalized["documents"]],
+            sorted(group[0] for group in groups),
+        )
 
-        self.assertEqual([row["document_id"] for row in documents], ["DOI:10.1000/example"])
-        self.assertEqual(len(documents[0]["evidence_passages"]), 2)
+    def test_source_pmid_and_node_pmcid_become_existing_evidence(self):
+        metadata = {
+            document_id: {
+                "title": "One paper",
+                "canonical_id": "DOI:10.1000/existing",
+                "identifiers": [
+                    "PMID:123", "PMCID:PMC123", "DOI:10.1000/existing"
+                ],
+            }
+            for document_id in ("PMID:123", "PMCID:PMC123")
+        }
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            bibliography, "_resolve_bibliographic_metadata", return_value=metadata
+        ):
+            source = bibliography._normalize_result_documents(
+                Path(directory),
+                {"documents": [{"document_id": "PMID:123", "title": "One paper"}]},
+                verify_titles=True,
+            )
+            node = bibliography._normalize_result_documents(
+                Path(directory),
+                {"documents": [{"document_id": "PMCID:PMC123", "title": "One paper"}]},
+                verify_titles=True,
+            )
 
-    def test_canonical_publication_year_variants_do_not_conflict(self):
-        documents = evidence._merge_documents([
-            {"document_id": "DOI:10.1000/example", "canonical_publication_id": "DOI:10.1000/example", "year": 2013},
-            {"document_id": "PMCID:PMC123", "canonical_publication_id": "DOI:10.1000/example", "year": 2014},
-        ], canonical_publications=True)
+        self.assertEqual(
+            hypotheses._reused_graph_publications(
+                node["documents"], source["documents"]
+            ),
+            {"DOI:10.1000/existing"},
+        )
 
-        self.assertEqual(len(documents), 1)
-        self.assertEqual(documents[0]["year"], 2013)
+    def test_citation_only_publication_id_is_normalized(self):
+        records = {
+            "documents": [{"document_id": "DOI:10.1000/existing", "title": "Paper"}],
+            "profiles": [{"source_ids": ["PMCID:PMC123"]}],
+        }
+        metadata = {
+            value: {
+                "title": "Paper",
+                "canonical_id": "DOI:10.1000/existing",
+                "identifiers": ["PMCID:PMC123", "DOI:10.1000/existing"],
+            }
+            for value in ("PMCID:PMC123", "DOI:10.1000/existing")
+        }
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            bibliography, "_resolve_bibliographic_metadata", return_value=metadata
+        ):
+            normalized = bibliography._normalize_result_documents(
+                Path(directory), records, verify_titles=True
+            )
 
-    def test_recanonicalization_unions_and_preserves_publication_aliases(self):
-        document = {"document_id": "DOI:10.1000/example", "title": "Paper", "identifier_aliases": ["DOI:10.1000/example", "PMID:123"]}
-        metadata = {"DOI:10.1000/example": {"title": "Paper", "canonical_publication_id": "DOI:10.1000/example", "identifier_aliases": ["DOI:10.1000/example"]}}
-        with tempfile.TemporaryDirectory() as directory, patch.object(bibliography, "_resolve_bibliographic_metadata", return_value=metadata):
-            first = bibliography._canonicalize_document_corpus(Path(directory), [document], verify_titles=False)
-            second = bibliography._canonicalize_document_corpus(Path(directory), first, verify_titles=False)
+        self.assertEqual(
+            normalized["profiles"][0]["source_ids"], ["DOI:10.1000/existing"]
+        )
 
-        self.assertEqual(first, second)
-        self.assertEqual(first[0]["identifier_aliases"], ["DOI:10.1000/example", "PMID:123"])
+    def test_titles_are_verified_without_being_replaced(self):
+        records = {"documents": [{
+            "document_id": "PMID:123",
+            "title": "Multi-center phase II study",
+        }]}
+        metadata = {"PMID:123": {
+            "title": "Multicenter phase 2 study",
+            "canonical_id": "PMID:123",
+            "identifiers": ["PMID:123"],
+        }}
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            bibliography, "_resolve_bibliographic_metadata", return_value=metadata
+        ):
+            normalized = bibliography._normalize_result_documents(
+                Path(directory), records, verify_titles=True
+            )
+        self.assertEqual(
+            normalized["documents"][0]["title"], records["documents"][0]["title"]
+        )
+
+        metadata["PMID:123"]["title"] = "Different publication"
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            bibliography, "_resolve_bibliographic_metadata", return_value=metadata
+        ), self.assertRaisesRegex(ProgramError, "metadata mismatch"):
+            bibliography._normalize_result_documents(
+                Path(directory), records, verify_titles=True
+            )
+
+    def test_controller_titles_and_nonpublication_ids_remain_unchanged(self):
+        records = {"documents": [
+            {"document_id": "PMID:123", "title": "Treatment-blind pathology"},
+            {"document_id": "S2:" + "A" * 40, "title": "Opaque paper"},
+        ]}
+        metadata = {"PMID:123": {
+            "title": "Treatment-focused source title",
+            "canonical_id": "DOI:10.1000/example",
+            "identifiers": ["PMID:123", "DOI:10.1000/example"],
+        }}
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            bibliography, "_resolve_bibliographic_metadata", return_value=metadata
+        ):
+            normalized = bibliography._normalize_result_documents(
+                Path(directory), records, verify_titles=False
+            )
+
+        self.assertEqual(
+            {row["document_id"]: row["title"] for row in normalized["documents"]},
+            {
+                "DOI:10.1000/example": "Treatment-blind pathology",
+                "S2:" + "A" * 40: "Opaque paper",
+            },
+        )
 
 
 if __name__ == "__main__":

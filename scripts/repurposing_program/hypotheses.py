@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from .bibliography import _normalized_publication_id
 from .errors import ProgramError
 from .evidence import _find, _merge_documents, _normalized_title, _rows, _source_index
 from .graph import _graph_index
@@ -74,47 +73,23 @@ def _graph_documents(results: Mapping[str, Mapping[str, Any]]) -> list[dict[str,
     return _rows(results["evidence_graph"]["records"], "documents")
 
 
-def _publication_identity_tokens(document: Mapping[str, Any]) -> set[str]:
-    values = [
-        document.get("document_id"),
-        document.get("canonical_publication_id"),
-        *(
-            document.get("identifier_aliases", [])
-            if isinstance(document.get("identifier_aliases"), list)
-            else []
-        ),
-    ]
-    tokens: set[str] = set()
-    for value in values:
-        normalized = _normalized_publication_id(value)
-        if normalized is not None:
-            tokens.add(normalized)
-            continue
-        text = str(value or "").strip()
-        if text.upper().startswith("S2:"):
-            tokens.add(text.upper())
-    return tokens
-
-
 def _reused_graph_publications(
     documents: list[dict[str, Any]], graph_documents: list[dict[str, Any]]
 ) -> set[str]:
-    graph_tokens = set().union(*(
-        _publication_identity_tokens(document) for document in graph_documents
-    )) if graph_documents else set()
+    graph_ids = {str(document["document_id"]) for document in graph_documents}
     graph_titles = {
         _normalized_title(document.get("title"))
         for document in graph_documents
-        if _publication_identity_tokens(document) and _normalized_title(document.get("title"))
+        if str(document["document_id"]).upper().startswith(("S2:", "HTTPS://"))
+        and _normalized_title(document.get("title"))
     }
     reused: set[str] = set()
     for document in documents:
-        tokens = _publication_identity_tokens(document)
-        if not tokens:
-            continue
+        document_id = str(document["document_id"])
         title = _normalized_title(document.get("title"))
-        if tokens & graph_tokens or (title and title in graph_titles):
-            reused.add(str(document["document_id"]))
+        opaque = document_id.upper().startswith(("S2:", "HTTPS://"))
+        if document_id in graph_ids or (opaque and title and title in graph_titles):
+            reused.add(document_id)
     return reused
 
 

@@ -9,7 +9,7 @@ from typing import Any, Mapping
 from pathology_sources import SourceError, fetch_pathology_sources, screen_pathology_sources
 
 from .audit import _validate_candidate_audit
-from .bibliography import _canonicalize_documents, _validate_bibliographic_documents
+from .bibliography import _normalize_result_documents
 from .candidates import _validate_review_item, _validate_seed_item
 from .contracts import STAGE_GUIDANCE, STAGES
 from .errors import ProgramError
@@ -345,11 +345,8 @@ def _advance_controller(
             )
         except SourceError as exc:
             raise ProgramError(str(exc)) from exc
-        result["records"]["documents"] = _canonicalize_documents(
-            root,
-            _rows(result["records"], "documents"),
-            verify_titles=False,
-            preserve_titles=True,
+        result["records"] = _normalize_result_documents(
+            root, result["records"], verify_titles=False
         )
         _validate_source_result(result)
     elif stage == "evidence_graph":
@@ -462,9 +459,16 @@ def _validated_submission(
     item_id = current.get("next_item_id")
     packet = _read_json(_packet_path(run_root, task, item_id))
     result = _read_json(Path(result_path).expanduser().resolve())
-    _validate_result(task, item_id, result, packet, prior)
     if "documents" in STAGE_GUIDANCE[task]["collections"]:
-        _validate_bibliographic_documents(run_root, result["records"])
+        if not isinstance(result.get("records"), Mapping):
+            raise ProgramError("result records must be an object")
+        result = {
+            **result,
+            "records": _normalize_result_documents(
+                run_root, result["records"], verify_titles=True
+            ),
+        }
+    _validate_result(task, item_id, result, packet, prior)
     return run_root, case, result, task, item_id
 
 

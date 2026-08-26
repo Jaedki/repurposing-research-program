@@ -145,8 +145,8 @@ def bibliographic_metadata(_root, documents):
             "year": 2026,
             "journal": "Test journal",
             "authors": ["Test Author"],
-            "canonical_publication_id": normalized,
-            "identifier_aliases": [normalized],
+            "canonical_id": normalized,
+            "identifiers": [normalized],
             "metadata_source": "test",
         }
     return resolved
@@ -376,7 +376,7 @@ class BibliographicMetadataTest(unittest.TestCase):
             "year": 2022,
             "journal": "Journal C",
             "authors": ["C Author"],
-            "identifier_aliases": ["DOI:10.1000/example"],
+            "identifiers": ["DOI:10.1000/example"],
             "metadata_source": "DOI",
         }
         with (
@@ -388,15 +388,15 @@ class BibliographicMetadataTest(unittest.TestCase):
 
         self.assertEqual(set(resolved), {"PMID:11", "PMCID:PMC22", "DOI:10.1000/example"})
         self.assertEqual(
-            resolved["PMID:11"]["canonical_publication_id"], "DOI:10.1000/eleven"
+            resolved["PMID:11"]["canonical_id"], "DOI:10.1000/eleven"
         )
         self.assertEqual(
-            resolved["PMID:11"]["identifier_aliases"],
+            resolved["PMID:11"]["identifiers"],
             ["DOI:10.1000/eleven", "PMCID:PMC11", "PMID:11"],
         )
-        self.assertEqual(resolved["PMCID:PMC22"]["canonical_publication_id"], "PMCID:PMC22")
+        self.assertEqual(resolved["PMCID:PMC22"]["canonical_id"], "PMCID:PMC22")
         self.assertEqual(
-            resolved["DOI:10.1000/example"]["canonical_publication_id"],
+            resolved["DOI:10.1000/example"]["canonical_id"],
             "DOI:10.1000/example",
         )
         doi.assert_called_once()
@@ -438,7 +438,7 @@ class BibliographicMetadataTest(unittest.TestCase):
 
         self.assertEqual(fetch.call_count, 3)
         self.assertEqual(
-            resolved["PMCID:PMC10497986"]["canonical_publication_id"],
+            resolved["PMCID:PMC10497986"]["canonical_id"],
             "DOI:10.1016/j.ebiom.2023.104781",
         )
 
@@ -452,7 +452,7 @@ class BibliographicMetadataTest(unittest.TestCase):
                     Path(directory), [{"document_id": "PMID:999", "title": "Invented"}]
                 )
 
-    def test_one_worker_result_cannot_return_two_aliases_for_one_publication(self):
+    def test_one_worker_result_merges_two_ids_for_one_publication(self):
         documents = [
             {"document_id": "PMID:11", "title": "One article"},
             {"document_id": "DOI:10.1000/one", "title": "One article"},
@@ -460,18 +460,21 @@ class BibliographicMetadataTest(unittest.TestCase):
         metadata = {
             document["document_id"]: {
                 "title": "One article",
-                "canonical_publication_id": "PMID:11",
-                "identifier_aliases": ["PMID:11", "DOI:10.1000/one"],
+                "canonical_id": "DOI:10.1000/one",
+                "identifiers": ["PMID:11", "DOI:10.1000/one"],
             }
             for document in documents
         }
         with tempfile.TemporaryDirectory() as directory, patch.object(
             bibliography, "_resolve_bibliographic_metadata", return_value=metadata
         ):
-            with self.assertRaisesRegex(core.ProgramError, "identify the same publication"):
-                bibliography._validate_bibliographic_documents(
-                    Path(directory), {"documents": documents}
-                )
+            normalized = bibliography._normalize_result_documents(
+                Path(directory), {"documents": documents}, verify_titles=True
+            )
+        self.assertEqual(
+            normalized["documents"],
+            [{"document_id": "DOI:10.1000/one", "title": "One article"}],
+        )
 
     def test_doi_metadata_projection_is_bounded_and_canonical(self):
         response = {
@@ -563,8 +566,8 @@ class SourceAdjudicationWorkflowTest(unittest.TestCase):
             for row in result["records"][collection]:
                 row["source_ids"] = ["PMID:11"]
         metadata = {"PMID:11": {
-            "title": "Drug X treatment restores function", "canonical_publication_id": "PMID:11",
-            "identifier_aliases": ["PMID:11"], "metadata_source": "PubMed",
+            "title": "Drug X treatment restores function", "canonical_id": "PMID:11",
+            "identifiers": ["PMID:11"], "metadata_source": "PubMed",
         }}
         with tempfile.TemporaryDirectory() as directory, patch.object(
             orchestration, "screen_pathology_sources", side_effect=source_screening_result
@@ -935,9 +938,12 @@ class WorkflowTest(unittest.TestCase):
         with self.assertRaisesRegex(core.ProgramError, "another indexed node"):
             self.submit(action, records)
 
-    def test_pathology_research_source_index_has_canonical_publication_metadata(self):
+    def test_pathology_research_source_index_uses_accepted_document_unchanged(self):
         source = source_result()
-        document = {"document_id": "PMID:11", "title": "Pathology", "source": "test"}
+        document = {
+            "document_id": "PMID:11", "title": "Pathology",
+            "source": "test", "year": 2025,
+        }
         source["records"]["documents"] = [document]
         for collection in ("source_nodes", "source_edges", "disease_context"):
             for row in source["records"][collection]:
@@ -957,21 +963,19 @@ class WorkflowTest(unittest.TestCase):
             }]}},
         }
 
-        metadata = bibliographic_metadata(self.root, [document])
-        metadata["PMID:11"]["title"] = "Drug X treatment restores function"
-        with patch.object(bibliography, "_resolve_bibliographic_metadata", return_value=metadata):
-            context = packets._packet_context(
-                self.root, "pathology_node_research", "NODE:1", results
-            )
+        context = packets._packet_context(
+            self.root, "pathology_node_research", "NODE:1", results
+        )
 
-        self.assertEqual(context["source_index"][0]["canonical_publication_id"], "PMID:11")
-        self.assertEqual(context["source_index"][0]["year"], 2026)
+        self.assertEqual(context["source_index"][0]["document_id"], "PMID:11")
+        self.assertEqual(context["source_index"][0]["year"], 2025)
         self.assertEqual(context["source_index"][0]["title"], "Pathology")
-        self.assertNotIn("Drug X treatment", json.dumps(context))
-        self.assertNotIn("canonical_publication_id", document)
 
-    def test_candidate_review_source_index_has_canonical_publication_metadata(self):
-        document = {"document_id": "PMID:12", "title": "Drug action", "source": "test"}
+    def test_candidate_review_source_index_uses_exact_document_id(self):
+        document = {
+            "document_id": "PMID:12", "title": "Drug action",
+            "source": "test", "year": 2025,
+        }
         candidate = {
             "candidate_id": "DRUG:1", "name": "Drug one", "member_seed_ids": ["SEED:1"],
             "strategy_ids": ["STRATEGY:1"],
@@ -1002,9 +1006,8 @@ class WorkflowTest(unittest.TestCase):
                 self.root, "candidate_evidence_review", "DRUG:1", results
             )
 
-        self.assertEqual(context["source_index"][0]["canonical_publication_id"], "PMID:12")
-        self.assertEqual(context["source_index"][0]["year"], 2026)
-        self.assertNotIn("canonical_publication_id", document)
+        self.assertEqual(context["source_index"][0]["document_id"], "PMID:12")
+        self.assertEqual(context["source_index"][0]["year"], 2025)
 
     def test_empty_source_screening_skips_the_adjudication_agent(self):
         action = core.next_action(self.root)
@@ -1291,20 +1294,6 @@ class WorkflowTest(unittest.TestCase):
         hypotheses._validate_question_research(
             {"documents": [], "question_answers": [still_unresolved]}, prior
         )
-        aliased_graph_answer = json.loads(json.dumps(answer))
-        aliased_graph_answer["claims"][1]["source_ids"] = ["DOI:10.1000/graph-paper"]
-        with self.assertRaisesRegex(core.ProgramError, "already present in the frozen corpus"):
-            hypotheses._validate_question_research(
-                {
-                    "documents": [{
-                        "document_id": "DOI:10.1000/graph-paper",
-                        "title": "Research evidence",
-                        "source": "test",
-                    }],
-                    "question_answers": [aliased_graph_answer],
-                },
-                prior,
-            )
         redundant_citation = json.loads(json.dumps(answer))
         redundant_citation["claims"][1]["delta_type"] = "baseline"
         redundant_citation["frozen_baseline_claim_ids"].append("CLAIM:1")
@@ -1819,7 +1808,7 @@ class WorkflowTest(unittest.TestCase):
             completed_by_id["UNICHEM:1"]["source_index"][0]["evidence_passages"]
         )
         self.assertEqual(
-            completed_by_id["UNICHEM:1"]["source_index"][0]["canonical_publication_id"],
+            completed_by_id["UNICHEM:1"]["source_index"][0]["document_id"],
             "PMID:1",
         )
         self.assertEqual(
@@ -2665,17 +2654,6 @@ class WorkflowTest(unittest.TestCase):
         with self.assertRaisesRegex(core.ProgramError, "retained drug-MOA source"):
             candidate_rules._validate_seed_item(perturbation_shortcut, "NODE:1", results)
 
-        perturbation_alias = json.loads(json.dumps(perturbation_shortcut))
-        pathology_document = next(
-            row for row in results["evidence_graph"]["records"]["documents"]
-            if row["document_id"] == "PMID:1"
-        )
-        pathology_document["identifier_aliases"] = ["PMID:1", "DOI:10.1000/perturbation"]
-        perturbation_alias["documents"][0]["document_id"] = "DOI:10.1000/perturbation"
-        perturbation_alias["candidates"][0]["mechanism_source_ids"] = ["DOI:10.1000/perturbation"]
-        with self.assertRaisesRegex(core.ProgramError, "retained drug-MOA source"):
-            candidate_rules._validate_seed_item(perturbation_alias, "NODE:1", results)
-
         multiple = json.loads(json.dumps(seed_records))
         second_strategy = {
             "strategy_key": "strategy-2",
@@ -2866,17 +2844,45 @@ class WorkflowTest(unittest.TestCase):
         }
         path = self.root / "preflight.json"
         path.write_text(json.dumps(result), encoding="utf-8")
+        raw_bytes = path.read_bytes()
         with self.assertRaisesRegex(core.ProgramError, "distinct_mechanisms must be a list"):
             core.validate_submission(self.root, path)
+        self.assertEqual(path.read_bytes(), raw_bytes)
         self.assertFalse(storage._item_result_path(
             self.root, "pathology_node_research", action["next_item_id"]
         ).exists())
 
         result["records"]["profiles"][0]["distinct_mechanisms"] = []
         path.write_text(json.dumps(result), encoding="utf-8")
-        self.assertEqual(core.validate_submission(self.root, path)["valid"], True)
-        self.assertEqual(core.next_action(self.root)["packet_id"], action["packet_id"])
-        core.submit(self.root, path)
+        raw_bytes = path.read_bytes()
+
+        def crosswalk(_root, documents):
+            metadata = bibliographic_metadata(_root, documents)
+            metadata["PMID:1"].update({
+                "canonical_id": "DOI:10.1000/research",
+                "identifiers": ["PMID:1", "DOI:10.1000/research"],
+            })
+            return metadata
+
+        with patch.object(
+            bibliography, "_resolve_bibliographic_metadata", side_effect=crosswalk
+        ):
+            self.assertEqual(core.validate_submission(self.root, path)["valid"], True)
+            self.assertEqual(path.read_bytes(), raw_bytes)
+            self.assertEqual(core.next_action(self.root)["packet_id"], action["packet_id"])
+            expected = {
+                **result,
+                "records": bibliography._normalize_result_documents(
+                    self.root, result["records"], verify_titles=True
+                ),
+            }
+            core.submit(self.root, path)
+
+        accepted_path = storage._item_result_path(
+            self.root, "pathology_node_research", action["next_item_id"]
+        )
+        self.assertEqual(accepted_path.read_bytes(), storage._canonical_bytes(expected))
+        self.assertEqual(path.read_bytes(), raw_bytes)
 
     def test_canonical_document_identifier_families(self):
         for document_id in (
@@ -2888,7 +2894,7 @@ class WorkflowTest(unittest.TestCase):
             self.assertIsNotNone(contracts.CANONICAL_DOCUMENT_ID.fullmatch(document_id))
         self.assertIsNone(contracts.CANONICAL_DOCUMENT_ID.fullmatch("DOC-AUTHOR-2026-TOPIC"))
 
-    def test_document_metadata_enriches_only_when_identity_fields_agree(self):
+    def test_exact_document_merge_unions_lists_and_keeps_first_scalar(self):
         documents = evidence._merge_documents([
             {
                 "document_id": "PMID:22312314",
@@ -2918,13 +2924,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(documents[0]["snippets"], ["research snippet", "source snippet"])
         self.assertEqual(documents[0]["supports"], ["PARTIAL", "SUPPORT"])
 
-        with self.assertRaisesRegex(core.ProgramError, "Conflicting document metadata"):
-            evidence._merge_documents([
-                documents[0],
-                {**documents[0], "title": "A different article"},
-            ])
-
-    def test_bibliographic_title_mismatch_is_rejected_and_projection_is_authoritative(self):
+    def test_bibliographic_title_mismatch_is_rejected_without_replacing_titles(self):
         document = {
             "document_id": "PMID:12024045",
             "title": "Incorrect title",
@@ -2937,8 +2937,8 @@ class WorkflowTest(unittest.TestCase):
                 "year": 2002,
                 "journal": "Canonical journal",
                 "authors": ["A. Author"],
-                "canonical_publication_id": "PMID:12024045",
-                "identifier_aliases": ["PMID:12024045", "DOI:10.1/example"],
+                "canonical_id": "DOI:10.1000/example",
+                "identifiers": ["PMID:12024045", "DOI:10.1000/example"],
                 "metadata_source": "PubMed",
             }
         }
@@ -2948,19 +2948,22 @@ class WorkflowTest(unittest.TestCase):
         ):
             root = Path(directory)
             with self.assertRaisesRegex(core.ProgramError, "metadata mismatch"):
-                bibliography._canonicalize_documents(root, [document], verify_titles=True)
-            projected = bibliography._canonicalize_documents(root, [document], verify_titles=False)[0]
+                bibliography._normalize_result_documents(
+                    root, {"documents": [document]}, verify_titles=True
+                )
+            projected = bibliography._normalize_result_documents(
+                root, {"documents": [document]}, verify_titles=False
+            )["documents"][0]
 
-        self.assertEqual(projected["title"], "Canonical article title")
-        self.assertEqual(projected["submitted_title"], "Incorrect title")
-        self.assertEqual(projected["canonical_publication_id"], "PMID:12024045")
+        self.assertEqual(projected["title"], "Incorrect title")
+        self.assertEqual(projected["document_id"], "DOI:10.1000/example")
 
     def test_bibliographic_title_verification_normalizes_formatting(self):
         canonical = {
             "PMID:35584812": {
                 "title": "Disease progression in a SOD1(G93A) mouse model.",
-                "canonical_publication_id": "PMID:35584812",
-                "identifier_aliases": ["PMID:35584812"],
+                "canonical_id": "PMID:35584812",
+                "identifiers": ["PMID:35584812"],
                 "metadata_source": "PubMed",
             },
         }
@@ -2972,17 +2975,17 @@ class WorkflowTest(unittest.TestCase):
                 return_value=canonical,
             ),
         ):
-            accepted = bibliography._canonicalize_documents(
+            accepted = bibliography._normalize_result_documents(
                 Path(directory),
-                [{
+                {"documents": [{
                     "document_id": "PMID:35584812",
                     "title": "Disease progression in a SOD1G93A mouse model",
-                }],
+                }]},
                 verify_titles=True,
-            )
+            )["documents"]
 
         self.assertEqual(
-            accepted[0]["title"], "Disease progression in a SOD1(G93A) mouse model."
+            accepted[0]["title"], "Disease progression in a SOD1G93A mouse model"
         )
 
     def test_document_propagation_recurses_and_ignores_document_metadata(self):

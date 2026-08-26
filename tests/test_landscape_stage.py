@@ -103,8 +103,8 @@ def bibliographic_metadata(_root, documents):
             "year": 2026,
             "journal": "Test journal",
             "authors": ["Test Author"],
-            "canonical_publication_id": row["document_id"],
-            "identifier_aliases": [row["document_id"]],
+            "canonical_id": row["document_id"],
+            "identifiers": [row["document_id"]],
             "metadata_source": "test",
         }
         for row in documents
@@ -344,7 +344,7 @@ class LandscapeWorkflowTest(unittest.TestCase):
             ] or ["PAPER-0"],
             "pdf_count": len(records.get("documents", [])),
             "paper_dispositions": [
-                {"cite_key": f"PAPER-{index}", "document_id": row["document_id"], "disposition": "retained", "rationale": "Supports a retained proposal."}
+                {"cite_key": f"PAPER-{index}", "source_ids": [row["document_id"]], "disposition": "retained", "rationale": "Supports a retained proposal."}
                 for index, row in enumerate(records.get("documents", []))
             ],
         }])
@@ -460,7 +460,7 @@ class LandscapeWorkflowTest(unittest.TestCase):
         ]["template"]
         self.assertEqual(receipt_template["search_name"], packet["context"]["undermind_search_name"])
         self.assertEqual(receipt_template["outcome"], "completed")
-        self.assertEqual(set(receipt_template["paper_dispositions"][0]), {"cite_key", "document_id", "disposition", "rationale"})
+        self.assertEqual(set(receipt_template["paper_dispositions"][0]), {"cite_key", "source_ids", "disposition", "rationale"})
         self.assertEqual(packet["result_contract"]["records"]["undermind_search_receipts"]["field_contracts"]["paper_dispositions"]["field_contracts"]["disposition"]["allowed_values"], ["retained", "not_retained"])
         rules = " ".join(packet["rules"])
         self.assertIn("get_orientation", rules)
@@ -515,7 +515,7 @@ class LandscapeWorkflowTest(unittest.TestCase):
             self.submit_coverage(action, records)
         records["undermind_search_receipts"][0].update({
             "ranked_result_ids": ["PAPER-1"],
-            "paper_dispositions": [{"cite_key": "PAPER-1", "document_id": "PMID:999", "disposition": "retained", "rationale": "Claimed retained."}],
+            "paper_dispositions": [{"cite_key": "PAPER-1", "source_ids": ["PMID:999"], "disposition": "retained", "rationale": "Claimed retained."}],
         })
         with self.assertRaisesRegex(core.ProgramError, "match returned documents"):
             self.submit_coverage(action, records)
@@ -526,7 +526,7 @@ class LandscapeWorkflowTest(unittest.TestCase):
         status = self.submit_coverage(action, {"documents": [], "coverage_proposals": [], "undermind_search_receipts": [{
             "workspace_id": "workspace-1", "search_name": packet["context"]["undermind_search_name"], "search_path": "/deep-search/test", "outcome": "completed",
             "ranked_result_count": 1, "ranked_result_ids": ["Ber19"], "pdf_count": 1,
-            "paper_dispositions": [{"cite_key": "Ber19", "document_id": None, "disposition": "not_retained", "rationale": "No distinct pathology addition."}],
+            "paper_dispositions": [{"cite_key": "Ber19", "source_ids": [], "disposition": "not_retained", "rationale": "No distinct pathology addition."}],
         }]})
         self.assertEqual(status["next_task"], "pathology_curation")
 

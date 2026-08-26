@@ -678,13 +678,26 @@ def _validate_coverage_expansion(
     if documents and receipt["pdf_count"] < len(documents):
         raise ProgramError("Undermind receipt pdf_count cannot omit retained full-text documents")
     dispositions = receipt["paper_dispositions"]
-    if not isinstance(dispositions, list) or any(not isinstance(row, dict) or set(row) != {"cite_key", "document_id", "disposition", "rationale"} for row in dispositions):
+    disposition_fields = {"cite_key", "source_ids", "disposition", "rationale"}
+    if not isinstance(dispositions, list) or any(
+        not isinstance(row, dict) or set(row) != disposition_fields
+        for row in dispositions
+    ):
         raise ProgramError("undermind_search_receipts[0].paper_dispositions is invalid")
     cite_keys = [str(row["cite_key"]) for row in dispositions]
     if len(dispositions) != receipt["pdf_count"] or len(cite_keys) != len(set(cite_keys)) or set(cite_keys) - set(map(str, ranked_ids)): raise ProgramError("Undermind paper_dispositions must account once for every read ranked paper")
     if any(not key.strip() or row["disposition"] not in {"retained", "not_retained"} or not str(row["rationale"]).strip() for key, row in zip(cite_keys, dispositions)): raise ProgramError("Undermind paper_dispositions values are invalid")
-    if any((row["disposition"] == "retained" and not str(row["document_id"] or "").strip()) or (row["disposition"] == "not_retained" and row["document_id"] is not None) for row in dispositions): raise ProgramError("Undermind paper dispositions have an invalid document crosswalk")
-    retained_ids = [str(row["document_id"]) for row in dispositions if row["disposition"] == "retained"]
+    if any(
+        not isinstance(row["source_ids"], list)
+        or len(row["source_ids"]) != (1 if row["disposition"] == "retained" else 0)
+        for row in dispositions
+    ):
+        raise ProgramError("Undermind paper dispositions have an invalid document crosswalk")
+    retained_ids = [
+        str(row["source_ids"][0])
+        for row in dispositions
+        if row["disposition"] == "retained"
+    ]
     if len(retained_ids) != len(set(retained_ids)) or set(retained_ids) != {str(row["document_id"]) for row in documents}: raise ProgramError("Retained Undermind dispositions must match returned documents exactly")
 
 

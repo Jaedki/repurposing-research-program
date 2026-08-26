@@ -80,11 +80,13 @@ A run is derived from `case.json`, canonical `results/*.json`, item results unde
 
 ## Evidence propagation
 
-Accepted worker results remain unchanged. At each aggregation boundary, Python propagates only cited
-documents owned by that stage; unused returned documents remain in the accepted result but do not
-enter downstream context. Publication aliases are canonicalized without rewriting the submitted
-document ID. `_all_documents()` constructs the deduplicated closed corpus only for audit and output
-generation. The audit cannot add evidence. Final cards project only the preferred drug name and the
+Raw worker submissions remain unchanged. Immediately before scientific validation, Python resolves
+PMID, PMCID, and DOI values to one `document_id`, rewrites every citation list, and merges documents
+with the same resulting ID. Submission persists exactly that normalized accepted result. Every later
+stage uses exact document-ID equality and performs no bibliographic lookup. At each aggregation
+boundary, Python propagates only cited documents owned by that stage; unused returned documents
+remain in the accepted result but do not enter downstream context. `_all_documents()` constructs the
+deduplicated closed corpus only for audit and output generation. The audit cannot add evidence. Final cards project only the preferred drug name and the
 review-owned hypothesis report verbatim; scoring and audit metadata stay out of that prose. See
 [packet-contract.md](packet-contract.md) for citation propagation and audit fields, and
 [source-adapters.md](source-adapters.md) for publication identity.
@@ -119,8 +121,8 @@ point while extracted responsibilities have one owner:
   artifact paths;
 - `repurposing_program.evidence` owns evidence-record access, document-content checks, citation
   traversal, source projection, and deterministic evidence merging;
-- `repurposing_program.bibliography` owns publication-ID normalization, cached metadata transport,
-  canonical publication projection, and bibliographic validation;
+- `repurposing_program.bibliography` owns the single pre-acceptance publication normalization
+  boundary, cached metadata transport, and submitted-title verification;
 - `repurposing_program.validation` owns shared record-schema, reference, secret, and document-ID
   validation primitives;
 - `repurposing_program.pathology` owns treatment-field rejection, Asta and Undermind proposal and

@@ -12,7 +12,14 @@ from urllib.request import Request, urlopen
 
 from .contracts import _PUBLICATION_ID
 from .errors import ProgramError
-from .evidence import _equivalent_document_titles, _merge_documents, _rows, _year
+from .evidence import (
+    _cited_ids,
+    _equivalent_publication_titles,
+    _merge_documents,
+    _rewrite_citations,
+    _rows,
+    _year,
+)
 from .storage import _canonical_bytes, _read_json, _sha256, _write_json
 
 
@@ -111,10 +118,10 @@ def _summary_metadata(
     row: Mapping[str, Any],
     *,
     source: str,
-    aliases: Iterable[str],
+    identifiers: Iterable[str],
 ) -> dict[str, Any]:
     article_ids = row.get("articleids", [])
-    resolved_aliases = set(aliases)
+    resolved_identifiers = set(identifiers)
     if isinstance(article_ids, list):
         for item in article_ids:
             if not isinstance(item, dict) or not item.get("value"):
@@ -122,11 +129,11 @@ def _summary_metadata(
             id_type = str(item.get("idtype", "")).casefold()
             value = str(item["value"])
             if id_type == "pubmed":
-                resolved_aliases.add(f"PMID:{value}")
+                resolved_identifiers.add(f"PMID:{value}")
             elif id_type == "pmc":
-                resolved_aliases.add(f"PMCID:{value.upper()}")
+                resolved_identifiers.add(f"PMCID:{value.upper()}")
             elif id_type == "doi":
-                resolved_aliases.add(f"DOI:{value.lower()}")
+                resolved_identifiers.add(f"DOI:{value.lower()}")
     authors = row.get("authors", [])
     author_names = [
         str(author.get("name"))
@@ -138,7 +145,7 @@ def _summary_metadata(
         "year": _year(row.get("pubdate")),
         "journal": str(row.get("fulljournalname") or row.get("source") or "").strip(),
         "authors": author_names,
-        "identifier_aliases": sorted(resolved_aliases),
+        "identifiers": sorted(resolved_identifiers),
         "metadata_source": source,
     }
 
@@ -181,7 +188,7 @@ def _doi_metadata(root: Path, doi: str) -> dict[str, Any]:
         "year": year,
         "journal": str(journal or "").strip(),
         "authors": author_names,
-        "identifier_aliases": [f"DOI:{doi.lower()}"],
+        "identifiers": [f"DOI:{doi.lower()}"],
         "metadata_source": "DOI",
     }
 
@@ -210,14 +217,14 @@ def _resolve_bibliographic_metadata(
         prefix, value = normalized.split(":", 1)
         if prefix == "PMID" and value in pubmed:
             metadata = _summary_metadata(
-                pubmed[value], source="PubMed", aliases=[normalized]
+                pubmed[value], source="PubMed", identifiers=[normalized]
             )
         elif prefix == "PMCID":
             key = value.removeprefix("PMC")
             if key not in pmc:
                 raise ProgramError(f"Canonical metadata was not found for {document_id}")
             metadata = _summary_metadata(
-                pmc[key], source="PubMed Central", aliases=[normalized]
+                pmc[key], source="PubMed Central", identifiers=[normalized]
             )
         elif prefix == "DOI":
             metadata = _doi_metadata(root, value)
@@ -225,67 +232,63 @@ def _resolve_bibliographic_metadata(
             raise ProgramError(f"Canonical metadata was not found for {document_id}")
         if not metadata["title"]:
             raise ProgramError(f"Canonical metadata has no title for {document_id}")
-        alias_set = set(map(str, metadata["identifier_aliases"]))
+        identifier_set = set(map(str, metadata["identifiers"]))
         canonical_id = next(
-            (alias for alias_prefix in ("DOI:", "PMID:", "PMCID:")
-             for alias in sorted(alias_set) if alias.startswith(alias_prefix)),
+            (identifier for prefix in ("DOI:", "PMID:", "PMCID:")
+             for identifier in sorted(identifier_set) if identifier.startswith(prefix)),
             normalized,
         )
         resolved[document_id] = {
             **metadata,
-            "canonical_publication_id": canonical_id,
-            "identifier_aliases": sorted(alias_set),
+            "canonical_id": canonical_id,
+            "identifiers": sorted(identifier_set),
         }
     return resolved
 
 
-def _canonicalize_documents(
+def _normalize_result_documents(
     root: Path,
-    documents: Iterable[dict[str, Any]],
+    records: Mapping[str, Any],
     *,
-    verify_titles: bool, preserve_titles: bool = False,
-) -> list[dict[str, Any]]:
-    rows = [dict(row) for row in documents]
-    metadata = _resolve_bibliographic_metadata(root, rows)
-    output: list[dict[str, Any]] = []
-    for row in rows:
+    verify_titles: bool,
+) -> dict[str, Any]:
+    rows = [dict(row) for row in _rows(records, "documents")]
+    document_ids = {str(row["document_id"]) for row in rows}
+    submitted_ids = document_ids | _cited_ids(records)
+    metadata = _resolve_bibliographic_metadata(root, [
+        *rows, *({"document_id": value, "title": value} for value in submitted_ids - document_ids)
+    ])
+    identity_map = {
+        value: str(metadata.get(value, {}).get("canonical_id") or value)
+        for value in submitted_ids
+    }
+    normalized = []
+    for row in sorted(rows, key=lambda item: (
+        identity_map[str(item["document_id"])], str(item["document_id"]),
+        _canonical_bytes(item),
+    )):
         document_id = str(row["document_id"])
-        submitted_title = row.get("title")
-        canonical = metadata.get(document_id)
-        if canonical is None:
-            output.append(row)
-            continue
-        if not _equivalent_document_titles(
-            document_id, row.get("title"), canonical["title"]
+        resolved = metadata.get(document_id)
+        if resolved and verify_titles and not _equivalent_publication_titles(
+            row.get("title"), resolved["title"]
         ):
-            if verify_titles:
-                raise ProgramError(
-                    f"Document metadata mismatch for {document_id}: submitted title "
-                    f"{row.get('title')!r}; canonical title {canonical['title']!r}"
-                )
-            row["submitted_title"] = row.get("title")
-        canonical = {**canonical, "identifier_aliases": sorted({document_id, str(canonical.get("canonical_publication_id") or document_id), *map(str, row.get("identifier_aliases", [])), *map(str, canonical.get("identifier_aliases", []))})}
-        row.update({key: value for key, value in canonical.items() if value not in (None, "", [])})
-        if preserve_titles: row["title"] = submitted_title
-        output.append(row)
-    return output
-
-def _canonicalize_document_corpus(root: Path, documents: Iterable[dict[str, Any]], *, verify_titles: bool) -> list[dict[str, Any]]:
-    return _merge_documents(_canonicalize_documents(root, documents, verify_titles=verify_titles), canonical_publications=True)
-
-
-def _validate_bibliographic_documents(root: Path, records: Mapping[str, Any]) -> None:
-    documents = _rows(records, "documents")
-    canonicalized = _canonicalize_documents(root, documents, verify_titles=True)
-    seen: dict[str, str] = {}
-    for row in canonicalized:
-        canonical_id = row.get("canonical_publication_id")
-        if canonical_id is None:
-            continue
-        document_id = str(row["document_id"])
-        prior = seen.setdefault(str(canonical_id), document_id)
-        if prior != document_id:
             raise ProgramError(
-                f"Documents {prior} and {document_id} identify the same publication "
-                f"{canonical_id}; return one canonical citation"
+                f"Document metadata mismatch for {document_id}: submitted title "
+                f"{row.get('title')!r}; canonical title {resolved['title']!r}"
             )
+        normalized_row = {
+            **{key: value for key, value in _rewrite_citations(row, identity_map).items()
+               if key not in {"doi", "pmid", "pmcid"}},
+            "document_id": identity_map[document_id],
+        }
+        if resolved:
+            for field in ("year", "journal", "authors", "metadata_source"):
+                if (
+                    normalized_row.get(field) in (None, "", [])
+                    and resolved.get(field) not in (None, "", [])
+                ):
+                    normalized_row[field] = resolved[field]
+        normalized.append(normalized_row)
+    output = _rewrite_citations(records, identity_map)
+    output["documents"] = _merge_documents(normalized)
+    return output

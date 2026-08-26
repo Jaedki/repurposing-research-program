@@ -18,19 +18,6 @@ from .contracts import (
 from .errors import ProgramError
 from .storage import _canonical_bytes
 
-_DATABASE_RECORD_ID = re.compile(
-    r"^(?:(?:HPA|UNIPROT(?:KB)?|DAILYMED|PUBCHEM):\S+|https://reactome\.org/content/detail/R-[A-Z]{3}-\d+|https://www\.ebi\.ac\.uk/QuickGO/term/GO:\d+|https://www\.bgee\.org/gene/ENSG\d+)$",
-    re.IGNORECASE,
-)
-_DATABASE_TITLE_STOPWORDS = {
-    "human", "protein", "atlas", "gene", "entry", "tissue", "expression", "summary",
-    "single", "cell", "uniprotkb", "reactome", "plasma", "membrane", "bgee",
-    "healthy", "wild", "type", "conditions", "homo", "sapiens",
-    "tablet", "tablets", "film", "coated", "injection", "full", "prescribing",
-    "information", "compound", "record",
-}
-
-
 def _normalized_title(value: Any) -> str:
     text = html.unescape(str(value))
     text = re.sub(r"<[^>]+>", " ", text)
@@ -38,43 +25,10 @@ def _normalized_title(value: Any) -> str:
     return " ".join(re.findall(r"[\w]+", text, flags=re.UNICODE))
 
 
-def _normalized_document_title(document_id: str, value: Any) -> str:
-    """Normalize a title while ignoring a redundant database-record locator."""
-    title = _normalized_title(value)
-    if re.fullmatch(
-        r"(?:PMID:\d+|PMCID:PMC\d+|DOI:10\.\d{4,9}/\S+)",
-        document_id,
-        flags=re.IGNORECASE,
-    ):
-        # Submission-time bibliographic verification uses this compact form so
-        # formatting variants such as ``5-HT2`` and ``5-HT(2)`` can both match
-        # the same authoritative title.  Aggregation must apply the identical
-        # equivalence rule to already-verified immutable results.
-        return title.replace(" ", "")
-    match = re.fullmatch(r"PUBCHEM:(\d+)", document_id, flags=re.IGNORECASE)
-    if match:
-        suffix = f" pubchem cid {match.group(1)}"
-        if title.endswith(suffix):
-            title = title[: -len(suffix)].strip()
-    return title
-
-
-def _equivalent_document_titles(document_id: str, left: Any, right: Any) -> bool:
-    """Accept minor title variants while retaining a wrong-title sanity check."""
-    normalized = [
-        _normalized_document_title(document_id, value) for value in (left, right)
-    ]
+def _equivalent_publication_titles(left: Any, right: Any) -> bool:
+    normalized = [_normalized_title(value).replace(" ", "") for value in (left, right)]
     if normalized[0] == normalized[1]:
         return True
-    if _DATABASE_RECORD_ID.fullmatch(document_id):
-        identifier_tokens = set(_normalized_title(document_id).split())
-        tokens = [
-            {token for token in title.split()
-             if (len(token) >= 4 or any(char.isdigit() for char in token))
-             and token not in _DATABASE_TITLE_STOPWORDS | identifier_tokens}
-            for title in normalized
-        ]
-        return bool(tokens[0] and (tokens[0] <= tokens[1] or tokens[1] <= tokens[0]))
     return min(map(len, normalized)) >= 12 and SequenceMatcher(
         None, *normalized, autojunk=False
     ).ratio() >= 0.9
@@ -186,30 +140,15 @@ def _source_index(
     documents: list[dict[str, Any]], source_ids: set[str] | None = None
 ) -> list[dict[str, Any]]:
     fields = (
-        "document_id", "canonical_publication_id", "identifier_aliases", "title",
-        "submitted_title", "year", "journal", "authors", "source", "metadata_source",
+        "document_id", "title", "year", "journal", "authors", "source", "metadata_source",
         "citation", "url", "raw_path", "abstract", "evidence_passages", "supporting_text",
         "structured_content", "snippets", "supports",
     )
     return [
         {key: row[key] for key in fields if key in row}
         for row in documents
-        if source_ids is None or source_ids & {str(row["document_id"]), *map(str, row.get("identifier_aliases", []))}
+        if source_ids is None or str(row["document_id"]) in source_ids
     ]
-
-
-def _document_alias_index(
-    documents: Iterable[Mapping[str, Any]],
-) -> dict[str, Mapping[str, Any]]:
-    index: dict[str, Mapping[str, Any]] = {}
-    for row in documents:
-        document_id = str(row["document_id"])
-        aliases = {document_id, *map(str, row.get("identifier_aliases", []))}
-        for alias in aliases:
-            prior = index.setdefault(alias, row)
-            if str(prior["document_id"]) != document_id:
-                raise ProgramError(f"Publication alias {alias} maps to multiple retained documents")
-    return index
 
 
 def _merge_unique(
@@ -226,29 +165,16 @@ def _merge_unique(
     return [merged[key] for key in sorted(merged)]
 
 
-def _merge_documents(rows: Iterable[dict[str, Any]], *, canonical_publications: bool = False) -> list[dict[str, Any]]:
+def _merge_documents(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
-    identity_fields = {"title", "canonical_publication_id"}
     for row in rows:
         document_id = str(row.get("document_id", "")).strip()
         if not document_id:
             raise ProgramError("documents.document_id is required")
-        key = str(row.get("canonical_publication_id") or document_id) if canonical_publications else document_id
-        current = merged.setdefault(key, {"document_id": key})
-        if canonical_publications:
-            row = {**row, "identifier_aliases": sorted({document_id, *row.get("identifier_aliases", [])})}
+        current = merged.setdefault(document_id, {"document_id": document_id})
         for field, value in row.items():
             if field == "document_id" or value in (None, "", []):
                 continue
-            conflict = field in identity_fields and field in current and current[field] != value
-            if field == "title" and conflict:
-                conflict = not canonical_publications and not _equivalent_document_titles(
-                    document_id, current[field], value
-                )
-            if conflict:
-                raise ProgramError(
-                    f"Conflicting document metadata for {document_id}: {field}"
-                )
             if isinstance(value, list):
                 prior = current.get(field, [])
                 if not isinstance(prior, list):
@@ -259,6 +185,22 @@ def _merge_documents(rows: Iterable[dict[str, Any]], *, canonical_publications: 
                 continue
             current[field] = value
     return [merged[key] for key in sorted(merged)]
+
+
+def _rewrite_citations(value: Any, identity_map: Mapping[str, str]) -> Any:
+    if isinstance(value, Mapping):
+        rewritten = {}
+        for field, nested in value.items():
+            if field in _CITATION_FIELDS and isinstance(nested, list):
+                rewritten[field] = sorted({
+                    identity_map.get(str(item), str(item)) for item in nested
+                })
+            else:
+                rewritten[field] = _rewrite_citations(nested, identity_map)
+        return rewritten
+    if isinstance(value, list):
+        return [_rewrite_citations(item, identity_map) for item in value]
+    return value
 
 
 def _cited_ids(value: Any) -> set[str]:
@@ -318,5 +260,5 @@ def _all_documents(results: Mapping[str, Mapping[str, Any]]) -> list[dict[str, A
             }
             if isinstance(result.get("records"), Mapping)
             for row in _cited_documents(result["records"])
-        ), canonical_publications=True
+        )
     )

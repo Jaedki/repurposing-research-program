@@ -76,25 +76,24 @@ FUNCTION_OWNERS = {
         "_batches",
         "_bibliographic_get",
         "_bibliographic_request",
-        "_canonicalize_documents",
         "_doi_metadata",
         "_ncbi_summaries",
+        "_normalize_result_documents",
         "_normalized_publication_id",
         "_resolve_bibliographic_metadata",
         "_summary_metadata",
-        "_validate_bibliographic_documents",
     ),
     evidence: (
         "_all_documents",
         "_cited_documents",
         "_cited_ids",
         "_document_has_inspectable_content",
-        "_document_alias_index",
         "_find",
         "_merge_documents",
         "_merge_text",
         "_merge_unique",
         "_normalized_title",
+        "_rewrite_citations",
         "_rows",
         "_select_cited_documents",
         "_source_index",
@@ -316,6 +315,10 @@ class FinishedArchitectureBoundaryTest(unittest.TestCase):
         higher_level_names = {"orchestration", "outputs", "packets", "run_state"}
         for module in (candidate_exports, evidence_cards, manifests, ranking):
             self.assertFalse(_imports(module) & higher_level_names, module.__name__)
+
+    def test_frozen_evidence_paths_do_not_import_bibliography(self):
+        for module in (graph, packets, audit, outputs):
+            self.assertNotIn("repurposing_program.bibliography", _imports(module))
 
     def test_package_dependency_graph_is_acyclic(self):
         modules = {module.__name__.rsplit(".", 1)[-1]: module for module in MODULES}
