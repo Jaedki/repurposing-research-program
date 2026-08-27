@@ -30,13 +30,13 @@ The controller does not read Asta or Undermind credentials. Their searches are p
 
 ## Example run
 
-The repository includes one complete example: [UNC80 deficiency](examples/unc80-deficiency/README.md). It contains the input case, ranked candidates, candidate cards, citations, provenance, exclusions, rescue strategies, evidence graph, and build manifest from the completed 21 August 2026 run.
+The repository includes the human-facing outputs from one completed Mitchell syndrome (ACOX1) run: [summary](examples/mitchell-syndrome/outputs/summary.md), [ranked candidates](examples/mitchell-syndrome/outputs/candidates.csv), [candidate evidence cards](examples/mitchell-syndrome/outputs/candidate_cards.md), and [audited exclusions](examples/mitchell-syndrome/outputs/candidate_exclusions.csv).
 
 In Codex, the equivalent starting prompt is:
 
 ```text
 $repurposing-research-program
-/goal Research existing-drug repurposing hypotheses for UNC80 deficiency.
+/goal Research existing-drug repurposing hypotheses for Mitchell syndrome (ACOX1).
 ```
 
 ## Licence

@@ -1,0 +1,2 @@
+candidate_id,name,reason_code,finding,source_ids
+UNICHEM:76673,Acetylcysteine,exact_disease_prior_use_or_testing,"The retained corpus documents deliberate high-dose acetylcysteine treatment in an exact Mitchell-syndrome patient under the same antioxidant and CNS-redox rationale, with an initially reported stabilization or improvement followed by a fatal CNS flare; this materially anticipates the proposed repurposing hypothesis despite being uncontrolled.",DOI:10.1016/j.neuron.2020.02.021

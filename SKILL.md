@@ -133,3 +133,5 @@ documented once in `references/packet-contract.md`.
 Report status, retained source count, pathology profile count, raw and deduplicated candidate
 counts, material gaps, and the experimental-use policy. Report `source_edges` as source edges and
 researched `assertions` as assertions; before pathology-node research the assertion count is zero.
+For a completed run, link `outputs/summary.md`, `outputs/candidates.csv`,
+`outputs/candidate_exclusions.csv`, and `outputs/candidate_cards.md` in the final handoff.
