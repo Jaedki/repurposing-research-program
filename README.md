@@ -1,12 +1,12 @@
 # Repurposing Research Program
 
-This skill runs a deterministic, source-backed programme for identifying existing drugs whose established actions could plausibly alter an evidence-backed element of a genetic disease's pathology. It builds and freezes a treatment-blind pathology graph before generating, reviewing, and ranking mechanism-linked candidates. Pathology evidence is kept separate from drug-action evidence.
+This skill runs deterministic and LLM powered research for creating drug repurposing hypotheses through established drug actions which could plausibly alter an evidence-backed element of a genetic disease's pathology. It builds and freezes a treatment-blind pathology graph before generating, reviewing, and ranking candidates.
 
 The outputs are experimental hypotheses for research prioritization. They are not clinical advice or evidence of efficacy.
 
 ## Agent runtime
 
-The repository is built as an [OpenAI Codex skill](SKILL.md). `agents/openai.yaml` supplies Codex interface metadata; it is not an OpenAI Agents SDK or Agent Builder workflow.
+The repository is built as an [OpenAI Codex skill](SKILL.md). `agents/openai.yaml` supplies Codex interface metadata.
 
 The runtime must support fresh isolated packet workers, persisted local files, command execution, literature research, and the configured Asta and Undermind MCP services.
 
@@ -26,8 +26,6 @@ The runtime must support fresh isolated packet workers, persisted local files, c
 - Asta MCP configured in the agent host with `ASTA_AI2_API_KEY`.
 - Undermind MCP available through a connected account with workspace and search access.
 
-The controller does not read Asta or Undermind credentials. Their searches are performed only by the packet workers assigned to those stages.
-
 ## Example run
 
 The repository includes the human-facing outputs from one completed Mitchell syndrome (ACOX1) run: [summary](examples/mitchell-syndrome/outputs/summary.md), [ranked candidates](examples/mitchell-syndrome/outputs/candidates.csv), [candidate evidence cards](examples/mitchell-syndrome/outputs/candidate_cards.md), and [audited exclusions](examples/mitchell-syndrome/outputs/candidate_exclusions.csv).
@@ -35,8 +33,7 @@ The repository includes the human-facing outputs from one completed Mitchell syn
 In Codex, the equivalent starting prompt is:
 
 ```text
-$repurposing-research-program
-/goal Research existing-drug repurposing hypotheses for Mitchell syndrome (ACOX1).
+use $repurposing-research-program for Mitchell syndrome (ACOX1) /goal.
 ```
 
 ## Licence
