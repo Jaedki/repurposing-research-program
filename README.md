@@ -1,40 +1,65 @@
 # Repurposing Research Program
 
-This skill runs deterministic and LLM powered research for creating drug repurposing hypotheses through established drug actions which could plausibly alter an evidence-backed element of a genetic disease's pathology. It builds and freezes a treatment-blind pathology graph before generating, reviewing, and ranking candidates.
+[![Tests](https://github.com/Jaedki/repurposing-research-program/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/Jaedki/repurposing-research-program/actions/workflows/test.yml)
 
-The outputs are experimental hypotheses for research prioritization. They are not clinical advice or evidence of efficacy.
+An AI research workflow for finding and prioritising drug repurposing hypotheses for genetic diseases.
 
-## Agent runtime
+Give it a disease and, optionally, a gene. It researches the underlying biology, identifies existing drugs whose known actions could address specific disease mechanisms, and produces ranked candidates with cited evidence and limitations.
 
-The repository is built as an [OpenAI Codex skill](SKILL.md). `agents/openai.yaml` supplies Codex interface metadata.
+Currently optimised for GPT models in OpenAI Codex and packaged as a [Codex skill](SKILL.md). AI agents carry out the research; Python manages the workflow, validates results, and calculates the final rankings.
 
-The runtime must support fresh isolated packet workers, persisted local files, command execution, literature research, and the configured Asta and Undermind MCP services.
+**For research use.** Outputs are experimental hypotheses, not clinical advice or evidence that a treatment works.
 
-## Prerequisites
+## How it works
 
-- Python with the pinned dependency installed:
-
-  ```powershell
-  python -m pip install -r requirements.txt
-  ```
-
-- Network access to:
-  - Monarch Initiative for disease resolution and pathology associations.
-  - GitHub and `raw.githubusercontent.com` for commit-pinned DisMech records.
-  - EMBL-EBI UniChem for candidate identity resolution.
-  - NCBI PubMed, PubMed Central, and the NCBI identifier converter, plus DOI resolution, for publication identity checks.
-- Asta MCP configured in the agent host with `ASTA_AI2_API_KEY`.
-- Undermind MCP available through a connected account with workspace and search access.
-
-## Example run
-
-The repository includes the human-facing outputs from one completed Mitchell syndrome (ACOX1) run: [summary](examples/mitchell-syndrome/outputs/summary.md), [ranked candidates](examples/mitchell-syndrome/outputs/candidates.csv), [candidate evidence cards](examples/mitchell-syndrome/outputs/candidate_cards.md), and [audited exclusions](examples/mitchell-syndrome/outputs/candidate_exclusions.csv).
-
-In Codex, the equivalent starting prompt is:
-
-```text
-use $repurposing-research-program for Mitchell syndrome (ACOX1) /goal.
+```mermaid
+flowchart TD
+    A[Research disease biology] --> B[Map the evidence and investigate open questions]
+    B --> C[Identify drug candidates]
+    C --> D[Check identities and review each hypothesis]
+    D --> E[Score, rank and export results]
 ```
+
+Disease biology is researched before drugs are considered. The evidence map is fixed before candidate generation, and each hypothesis links evidence about the disease to separate evidence about a drug's action. A previous publication connecting that drug to the disease is not required.
+
+## Getting started
+
+You'll need Codex with subagents, local file and command access, and web research enabled; Python (automated tests use 3.14); and connected **Asta and Undermind MCP services**. Configure Asta with `ASTA_AI2_API_KEY` in the MCP host and connect an Undermind account with workspace and search access. These services are required for the literature discovery stages. See [source setup details](references/source-adapters.md).
+
+1. Ask Codex to install the skill:
+
+   ```text
+   Use $skill-installer to install https://github.com/Jaedki/repurposing-research-program (the skill is at the repository root).
+   ```
+
+2. Install the Python dependency from the installed skill folder:
+
+   ```sh
+   python -m pip install -r requirements.txt
+   ```
+
+3. Start a research run in Codex:
+
+   ```text
+   Use $repurposing-research-program for Mitchell syndrome (ACOX1). Save the run in runs/mitchell-syndrome.
+   ```
+
+Replace the disease and gene with your own case. Codex needs network access to the literature services and scientific databases listed in the [source documentation](references/source-adapters.md). If the installed skill does not appear, restart Codex; see the [Codex skills guide](https://developers.openai.com/codex/skills/).
+
+## Example: Mitchell syndrome (ACOX1)
+
+The included run retained **169 sources**, researched **13 disease concepts**, and produced **15 ranked candidates** plus **1 audited exclusion**. Five of ten open pathology questions remained unresolved.
+
+| Output | What you'll find |
+| --- | --- |
+| [Run summary](examples/mitchell-syndrome/outputs/summary.md) | Coverage, candidate counts and remaining gaps |
+| [Ranked candidates](examples/mitchell-syndrome/outputs/candidates.csv) | Scores, scoring reasons and hypothesis reports |
+| [Evidence cards](examples/mitchell-syndrome/outputs/candidate_cards.md) | Each candidate's rationale, cited evidence and limitations |
+| [Exclusions](examples/mitchell-syndrome/outputs/candidate_exclusions.csv) | Candidates excluded during the final audit and why |
+
+Completed runs save these files in their `outputs/` folder. Rankings help prioritise further investigation; they do not estimate treatment effectiveness.
+
+For implementation details, see the [workflow instructions](SKILL.md) and [architecture](references/architecture.md).
 
 ## Licence
 

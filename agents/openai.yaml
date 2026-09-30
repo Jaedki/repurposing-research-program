@@ -1,4 +1,4 @@
 interface:
   display_name: "Repurposing Research Program"
-  short_description: "Deep pathology-first drug repurposing"
+  short_description: "AI research for genetic disease drug repurposing"
   default_prompt: "Use $repurposing-research-program to build a deeply researched, treatment-blind disease pathology graph before generating mechanism-linked existing-drug candidates. Do not require prior disease-drug literature; follow the deterministic packet workflow."
